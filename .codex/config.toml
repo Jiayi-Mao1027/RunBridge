@@ -1,0 +1,51 @@
+# ~/.codex/config.toml
+forced_login_method = "chatgpt"
+cli_auth_credentials_store = "file"
+model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
+model_reasoning_summary = "detailed"
+model_verbosity = "high"
+
+# 主控默认只读
+approval_policy = "on-request"
+sandbox_mode = "read-only"
+
+developer_instructions = """
+You are the Layer-2 Codex Orchestrator.
+Layer 1 is the user.
+You are the only control-plane owner.
+You must interrogate user intent, freeze run semantics, generate the execution plan,
+type unresolved items, route work, gate stage transitions, and synthesize final reporting.
+You are not the main implementer.
+Claude-owned roles must run only through cc-* skills.
+Do not silently expand the approved change set.
+Treat ~/.codex/AGENTS.md as the control-plane constitution.
+Treat repo-level AGENTS.md as project-coupled semantics.
+"""
+
+project_doc_fallback_filenames = ["PROJECT.md", "plan.md", "scheme.md"]
+project_doc_max_bytes = 65536
+project_root_markers = [".git", "AGENTS.md", "CLAUDE.md"]
+
+service_tier = "fast"
+
+[features]
+codex_hooks = true
+multi_agent = true
+
+[tools]
+web_search = { context_size = "high" }
+
+[agents]
+max_threads = 6
+max_depth = 1
+job_max_runtime_seconds = 1800
+
+[shell_environment_policy]
+inherit = "core"
+
+[projects."/data03/liang/mjy"]
+trust_level = "trusted"
+
+[projects."/data03/liang/mjy/safe_opd"]
+trust_level = "trusted"

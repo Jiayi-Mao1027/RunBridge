@@ -1,0 +1,17 @@
+ntk/
+safe_opd/
+.claude/
+.codex/auth.json
+.codex/bridge_api.toml
+.codex/memories/
+.codex/log/
+.codex/.tmp/
+.codex/cache/
+.codex/shell_snapshots/
+.codex/sessions/
+.codex/plugins/
+.codex/tmp/
+.codex/history.jsonl
+.npm/
+.claude-isolated/
+.claude.json

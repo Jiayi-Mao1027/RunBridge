@@ -1,0 +1,21 @@
+[selection]
+preferred_models = ["H100"]
+default_gpu_count = 2
+light_check_gpu_count = 1
+max_gpu_count = 3
+
+[behavior]
+probe_required = true
+record_manifest = true
+forbid_kill_foreign_process = true
+allow_fallback_when_preferred_unavailable = true
+
+[commands]
+probe = "python3 ~/.codex/protocol/bin/gpu_probe.py --requested {requested} --max-gpus {max_gpus} --json"
+ownership_snapshot = "python3 ~/.codex/protocol/bin/owned_processes.py snapshot"
+ownership_check = "python3 ~/.codex/protocol/bin/owned_processes.py check {pid}"
+ownership_register = "python3 ~/.codex/protocol/bin/owned_processes.py register {pid} --label {label}"
+
+[notes]
+platform = "default"
+comment = "Override this file per host/platform when deployment-specific GPU policy differs."

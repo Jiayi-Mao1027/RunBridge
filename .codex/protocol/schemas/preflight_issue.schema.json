@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "issue_type": {
+      "type": "string",
+      "enum": ["user_decision", "orchestrator_default", "execution_layer_fix", "nonblocking_risk", "hard_stop"]
+    },
+    "owner": {
+      "type": "string"
+    },
+    "blocks_current_stage": {
+      "type": "boolean"
+    },
+    "requires_user_decision": {
+      "type": "boolean"
+    },
+    "default_action_if_any": {
+      "type": "string"
+    },
+    "stage_effect": {
+      "type": "string",
+      "enum": ["advance", "reroute_to_orchestrator", "reroute_to_opus_debug", "reroute_to_execution", "pause_for_user", "hard_stop"]
+    },
+    "severity": {
+      "type": "string"
+    },
+    "evidence_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "why_this_type": {
+      "type": "string"
+    },
+    "next_stage_if_accepted": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "title",
+    "description",
+    "issue_type",
+    "owner",
+    "stage_effect",
+    "evidence_paths"
+  ]
+}

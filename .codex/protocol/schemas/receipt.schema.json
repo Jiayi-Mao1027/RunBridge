@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "role": {
+      "type": "string"
+    },
+    "phase": {
+      "type": "string"
+    },
+    "stage": {
+      "type": "string"
+    },
+    "scope_completed": {
+      "type": "boolean"
+    },
+    "phase_completed": {
+      "type": "boolean"
+    },
+    "issues": {
+      "type": "array"
+    },
+    "uncompleted_scope_items": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "role",
+    "phase",
+    "scope_completed",
+    "issues"
+  ]
+}
