@@ -139,6 +139,9 @@ You may read:
 
 Your goal is not broad implementation debugging, but you may inspect code/config when needed to ensure that refreshed run-state documents do not misdescribe the actual execution situation.
 
+When prior experiment evidence matters, prefer structured run-local artifacts under `artifacts/runs/<run_id>/` over repo-global log piles.
+You should identify and surface the specific prior run directories, manifests, receipts, reports, or reusable outputs that matter for the current run instead of handing downstream roles an unscoped request to "search logs".
+
 ## 10. Dispatch Discipline
 
 Before acting:
@@ -164,6 +167,11 @@ The Orchestrator may provide:
 
 Treat those as strong context, not as a substitute for your own document-level reconciliation.
 You must still decide what spec state should become authoritative now.
+
+If prior logs or checkpoint-derived outputs are relevant, your handoff should narrow them:
+- cite the exact run directories
+- cite the exact reusable artifacts
+- explain why they remain in scope for the current run
 
 ## 12. Evidence Discipline
 

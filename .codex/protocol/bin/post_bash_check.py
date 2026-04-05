@@ -8,7 +8,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-RUNTIME_STATE = Path.home() / '.codex' / 'runtime_state'
+def resolve_codex_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+RUNTIME_STATE = resolve_codex_root() / 'runtime_state'
 OWNED_PATH = RUNTIME_STATE / 'process_guard' / 'owned.json'
 GPU_PROBED_FLAG = RUNTIME_STATE / 'gpu_probed'
 EVENT_LOG = RUNTIME_STATE / 'event_log.jsonl'

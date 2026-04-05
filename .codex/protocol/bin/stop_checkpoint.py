@@ -14,8 +14,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+def resolve_codex_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
-RUNTIME_STATE = Path.home() / '.codex' / 'runtime_state'
+
+RUNTIME_STATE = resolve_codex_root() / 'runtime_state'
 CHECKPOINT_PATH = RUNTIME_STATE / 'checkpoint.json'
 OWNED_PATH = RUNTIME_STATE / 'process_guard' / 'owned.json'
 EVENT_LOG = RUNTIME_STATE / 'event_log.jsonl'
@@ -99,6 +102,37 @@ def count_owned_processes() -> dict:
     }
 
 
+def latest_run_dir(repo: Path) -> Path | None:
+    runs_dir = repo / 'artifacts' / 'runs'
+    if not runs_dir.is_dir():
+        return None
+    run_dirs = sorted(
+        [d for d in runs_dir.iterdir() if d.is_dir()],
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    return run_dirs[0] if run_dirs else None
+
+
+def latest_pending_issues(run_dir: Path | None) -> list:
+    if run_dir is None:
+        return []
+    receipts_dir = run_dir / 'completion_receipts'
+    if not receipts_dir.is_dir():
+        return []
+    receipt_files = sorted(
+        [p for p in receipts_dir.iterdir() if p.suffix == '.json'],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for rf in receipt_files:
+        receipt = read_json(rf)
+        if receipt and 'issues' in receipt:
+            issues = receipt.get('issues')
+            return issues if isinstance(issues, list) else []
+    return []
+
+
 def main() -> int:
     try:
         hook_input = json.load(sys.stdin)
@@ -119,24 +153,11 @@ def main() -> int:
         'pending_issues': [],  # Populated if we can read receipts
     }
 
-    # Try to gather pending issues from the latest receipt
     if repo:
-        runs_dir = repo / 'artifacts' / 'runs'
-        if runs_dir.is_dir():
-            run_dirs = sorted(
-                [d for d in runs_dir.iterdir() if d.is_dir()],
-                key=lambda d: d.stat().st_mtime,
-                reverse=True,
-            )
-            if run_dirs:
-                receipts_dir = run_dirs[0] / 'receipts'
-                if receipts_dir.is_dir():
-                    for rf in sorted(receipts_dir.iterdir(), reverse=True):
-                        if rf.suffix == '.json':
-                            receipt = read_json(rf)
-                            if receipt and 'issues' in receipt:
-                                checkpoint['pending_issues'] = receipt['issues']
-                            break
+        run_dir = latest_run_dir(repo)
+        if run_dir is not None:
+            checkpoint['latest_run_dir'] = str(run_dir)
+        checkpoint['pending_issues'] = latest_pending_issues(run_dir)
 
     write_json(CHECKPOINT_PATH, checkpoint)
 

@@ -19,6 +19,9 @@ except Exception:
     tomllib = None
 
 
+FORCED_CLAUDE_SETTINGS_PATH = pathlib.Path("/data03/liang/mjy/.claude-isolated/settings.json")
+
+
 def read_text(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
@@ -52,21 +55,11 @@ def role_slug(role: str) -> str:
 # ---------------------------------------------------------------------------
 
 def resolve_codex_root() -> pathlib.Path:
-    env = os.getenv("CODEX_ROOT")
-    if env:
-        return pathlib.Path(env).expanduser().resolve()
     return pathlib.Path(__file__).resolve().parents[2]  # .../.codex
 
 
 def resolve_user_root() -> pathlib.Path:
-    env = os.getenv("CODEX_USER_ROOT") or os.getenv("CLAUDE_SKILL_USER_ROOT")
-    if env:
-        return pathlib.Path(env).expanduser().resolve()
     return resolve_codex_root().parent
-
-
-def resolve_claude_root() -> pathlib.Path:
-    return resolve_user_root() / ".claude"
 
 
 def parse_frontmatter(md_text: str) -> dict[str, str]:
@@ -136,6 +129,10 @@ def ensure_project_state(repo_root: pathlib.Path) -> None:
         subprocess.run([str(helper), str(repo_root)], check=True)
 
 
+# ---------------------------------------------------------------------------
+# bridge_api.toml
+# ---------------------------------------------------------------------------
+
 def load_bridge_config() -> dict[str, Any]:
     path = resolve_codex_root() / "bridge_api.toml"
     if not path.exists():
@@ -149,58 +146,133 @@ def load_bridge_config() -> dict[str, Any]:
     return cfg
 
 
-def merge_headers_for_env(headers_obj: dict[str, Any] | None) -> str | None:
-    if not headers_obj:
-        return None
-    parts: list[str] = []
-    for k, v in headers_obj.items():
-        parts.append(f"{k}: {v}")
-    return "\n".join(parts) if parts else None
-
-
-def apply_bridge_environment(cfg: dict[str, Any]) -> dict[str, str]:
-    """
-    Best-effort mapping from bridge_api.toml into env for the installed Claude CLI/SDK.
-    model is passed programmatically; auth/header fields are exported into the process env.
-    api_base_url is intentionally ignored in SDK mode.
-    """
-    env_updates: dict[str, str] = {}
-
-    api_key = str(cfg.get("api_key", "")).strip()
-    auth_token = str(cfg.get("auth_token", "")).strip()
-    headers = cfg.get("headers", {}) or {}
-
-    if api_key:
-        env_updates["ANTHROPIC_API_KEY"] = api_key
-    if auth_token:
-        env_updates["ANTHROPIC_AUTH_TOKEN"] = auth_token
-
-    custom_headers = merge_headers_for_env(headers)
-    if custom_headers:
-        env_updates["ANTHROPIC_CUSTOM_HEADERS"] = custom_headers
-
-    if bool(cfg.get("use_bedrock", False)):
-        env_updates["CLAUDE_CODE_USE_BEDROCK"] = "1"
-    if bool(cfg.get("use_vertex", False)):
-        env_updates["CLAUDE_CODE_USE_VERTEX"] = "1"
-
-    return env_updates
+def resolved_cli_path(bridge_cfg: dict[str, Any]) -> str | None:
+    value = str(bridge_cfg.get("cli_path", "")).strip()
+    return value or None
 
 
 def resolved_model(args_model: str | None, bridge_cfg: dict[str, Any]) -> str | None:
     if args_model:
         return args_model
-    model = str(bridge_cfg.get("model", "")).strip()
-    return model or None
+    value = str(bridge_cfg.get("model", "")).strip()
+    return value or None
 
 
-def build_system_prompt(skill_dir: pathlib.Path, repo_root: pathlib.Path) -> str:
+def resolved_settings_path(bridge_cfg: dict[str, Any]) -> str | None:
+    if not FORCED_CLAUDE_SETTINGS_PATH.is_file():
+        raise RuntimeError(
+            f"required Claude settings file is missing: {FORCED_CLAUDE_SETTINGS_PATH}"
+        )
+    return str(FORCED_CLAUDE_SETTINGS_PATH)
+
+
+def resolved_setting_sources(bridge_cfg: dict[str, Any]) -> list[str]:
+    raw = bridge_cfg.get("setting_sources", [])
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise RuntimeError("claude_bridge.setting_sources must be a list")
+    out: list[str] = []
+    for item in raw:
+        s = str(item).strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def resolved_claude_config_dir(bridge_cfg: dict[str, Any]) -> str | None:
+    value = str(bridge_cfg.get("claude_config_dir", "")).strip()
+    return value or None
+
+
+def resolved_enable_tool_search(bridge_cfg: dict[str, Any]) -> str | None:
+    value = str(bridge_cfg.get("enable_tool_search", "")).strip()
+    return value or None
+
+
+def resolved_enable_claudeai_mcp_servers(bridge_cfg: dict[str, Any]) -> str | None:
+    value = str(bridge_cfg.get("enable_claudeai_mcp_servers", "")).strip()
+    return value or None
+
+
+def resolved_headers(bridge_cfg: dict[str, Any]) -> dict[str, str]:
+    raw = bridge_cfg.get("headers", {}) or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v) for k, v in raw.items()}
+
+
+def resolved_global_claude_md(bridge_cfg: dict[str, Any]) -> pathlib.Path:
+    cfg_dir = resolved_claude_config_dir(bridge_cfg)
+    if cfg_dir:
+        return pathlib.Path(cfg_dir).resolve() / "CLAUDE.md"
+    # fallback only if not provided
+    return resolve_user_root() / ".claude" / "CLAUDE.md"
+
+
+def merge_headers_for_env(headers_obj: dict[str, str]) -> str | None:
+    if not headers_obj:
+        return None
+    return "\n".join(f"{k}: {v}" for k, v in headers_obj.items())
+
+
+def build_runtime_env(bridge_cfg: dict[str, Any]) -> dict[str, str]:
+    """
+    Internal runtime env built from TOML.
+    User does not need to export anything manually.
+    """
+    env_updates: dict[str, str] = {}
+    env_updates["HOME"] = str(resolve_user_root())
+    env_updates["CODEX_HOME"] = str(resolve_codex_root())
+
+    cfg_dir = resolved_claude_config_dir(bridge_cfg)
+    if cfg_dir:
+        env_updates["CLAUDE_CONFIG_DIR"] = cfg_dir
+
+    enable_tool_search = resolved_enable_tool_search(bridge_cfg)
+    if enable_tool_search:
+        env_updates["ENABLE_TOOL_SEARCH"] = enable_tool_search
+
+    enable_mcp = resolved_enable_claudeai_mcp_servers(bridge_cfg)
+    if enable_mcp:
+        env_updates["ENABLE_CLAUDEAI_MCP_SERVERS"] = enable_mcp
+
+    merged_headers = merge_headers_for_env(resolved_headers(bridge_cfg))
+    if merged_headers:
+        env_updates["ANTHROPIC_CUSTOM_HEADERS"] = merged_headers
+
+    return env_updates
+
+
+def build_cli_extra_args(bridge_cfg: dict[str, Any], user_extra_args: list[str]) -> dict[str, str | None]:
+    extra: dict[str, str | None] = {}
+
+    for item in user_extra_args:
+        token = item.strip()
+        if not token:
+            continue
+        if "=" in token:
+            k, v = token.split("=", 1)
+            extra[k.lstrip("-")] = v
+        else:
+            extra[token.lstrip("-")] = None
+
+    return extra
+
+
+# ---------------------------------------------------------------------------
+# Prompt building
+# ---------------------------------------------------------------------------
+
+def build_system_prompt(skill_dir: pathlib.Path, repo_root: pathlib.Path, bridge_cfg: dict[str, Any]) -> str:
     meta = load_skill_metadata(skill_dir)
     worker_path = skill_dir / meta.get("worker_contract", "worker.md")
+    global_claude_md = resolved_global_claude_md(bridge_cfg)
 
     parts: list[str] = []
     for title, path in [
-        ("GLOBAL_CLAUDE_RUNTIME", resolve_claude_root() / "CLAUDE.md"),
+        ("GLOBAL_CODEX_AGENTS", resolve_codex_root() / "AGENTS.md"),
+        ("GLOBAL_CLAUDE_RUNTIME", global_claude_md),
         ("REPOSITORY_AGENTS", repo_root / "AGENTS.md"),
         ("REPOSITORY_CLAUDE", repo_root / "CLAUDE.md"),
         ("BOUND_WORKER_CONTRACT", worker_path),
@@ -285,6 +357,10 @@ def build_user_prompt(
         f"BEGIN PACKET\n{packet_text}\nEND PACKET"
     ).strip()
 
+
+# ---------------------------------------------------------------------------
+# Output parsing / validation
+# ---------------------------------------------------------------------------
 
 def result_message_payload(message: Any) -> dict[str, Any]:
     return {
@@ -371,6 +447,10 @@ def validate_worker_payload(payload: dict[str, Any], role: str, phase: str | Non
 
     return payload
 
+
+# ---------------------------------------------------------------------------
+# Artifact writing
+# ---------------------------------------------------------------------------
 
 def summary_markdown(role: str, summary: dict[str, Any]) -> str:
     key_points = summary.get("key_points", []) or []
@@ -470,19 +550,9 @@ def write_failure_artifacts(
     write_text(run_root / "orchestrator_summaries" / f"{slug}.md", summary_markdown(role, summary))
 
 
-def parse_extra_args(items: list[str]) -> dict[str, str | None]:
-    result: dict[str, str | None] = {}
-    for item in items:
-        token = item.strip()
-        if not token:
-            continue
-        if "=" in token:
-            k, v = token.split("=", 1)
-            result[k] = v
-        else:
-            result[token] = None
-    return result
-
+# ---------------------------------------------------------------------------
+# Main SDK execution
+# ---------------------------------------------------------------------------
 
 async def run_sdk(args: argparse.Namespace) -> int:
     skill_dir = pathlib.Path(args.skill_dir).resolve()
@@ -509,9 +579,14 @@ async def run_sdk(args: argparse.Namespace) -> int:
     ensure_project_state(repo_root)
 
     bridge_cfg = load_bridge_config()
-    env_updates = apply_bridge_environment(bridge_cfg)
+    cli_path = resolved_cli_path(bridge_cfg)
+    model = resolved_model(args.model, bridge_cfg)
+    settings_path = resolved_settings_path(bridge_cfg)
+    setting_sources = resolved_setting_sources(bridge_cfg)
+    runtime_env = build_runtime_env(bridge_cfg)
+    cli_extra_args = build_cli_extra_args(bridge_cfg, args.extra_arg)
 
-    system_prompt = build_system_prompt(skill_dir, repo_root)
+    system_prompt = build_system_prompt(skill_dir, repo_root, bridge_cfg)
     user_prompt = build_user_prompt(
         role=args.role,
         repo_root=repo_root,
@@ -527,15 +602,16 @@ async def run_sdk(args: argparse.Namespace) -> int:
         system_prompt=system_prompt,
         cwd=str(repo_root),
         add_dirs=[str(p) for p in args.add_dir],
-        model=resolved_model(args.model, bridge_cfg),
+        model=model,
+        cli_path=cli_path,
+        settings=settings_path,
+        setting_sources=setting_sources,
         max_turns=args.max_turns,
         max_thinking_tokens=args.max_thinking_tokens,
         allowed_tools=args.allowed_tool,
         disallowed_tools=args.disallowed_tool,
         permission_mode=args.permission_mode,
-        settings=args.settings or bridge_cfg.get("settings"),
-        env=env_updates,
-        extra_args=parse_extra_args(args.extra_arg),
+        extra_args=cli_extra_args,
     )
 
     meta = {
@@ -548,21 +624,27 @@ async def run_sdk(args: argparse.Namespace) -> int:
         "run_root": str(run_root),
         "output_dir": str(output_dir),
         "bridge_config_applied": {
-            "model": resolved_model(args.model, bridge_cfg),
-            "settings": args.settings or bridge_cfg.get("settings") or "",
-            "env_keys": sorted(env_updates.keys()),
+            "cli_path": cli_path,
+            "model": model,
+            "settings": settings_path,
+            "setting_sources": setting_sources,
+            "claude_config_dir": resolved_claude_config_dir(bridge_cfg),
+            "enable_tool_search": resolved_enable_tool_search(bridge_cfg),
+            "enable_claudeai_mcp_servers": resolved_enable_claudeai_mcp_servers(bridge_cfg),
+            "claude_md_path": str(resolved_global_claude_md(bridge_cfg)),
         },
         "sdk_options": {
-            "model": resolved_model(args.model, bridge_cfg),
+            "cli_path": cli_path,
+            "model": model,
             "max_thinking_tokens": args.max_thinking_tokens,
             "max_turns": args.max_turns,
             "allowed_tools": args.allowed_tool,
             "disallowed_tools": args.disallowed_tool,
-            "settings": args.settings or bridge_cfg.get("settings"),
             "permission_mode": args.permission_mode,
             "add_dirs": [str(p) for p in args.add_dir],
-            "extra_args": parse_extra_args(args.extra_arg),
+            "extra_args": cli_extra_args,
         },
+        "runtime_env_keys": sorted(runtime_env.keys()),
         "sent": False,
     }
     write_json(raw_dir / "meta.json", meta)
@@ -579,14 +661,28 @@ async def run_sdk(args: argparse.Namespace) -> int:
     )
 
     if args.no_send:
+        append_jsonl(
+            run_root / "stage_journal.jsonl",
+            {
+                "ts": now_ts(),
+                "role": args.role,
+                "phase": args.phase or "",
+                "state": "completed",
+                "output_dir": str(output_dir),
+                "no_send": True,
+            },
+        )
         print(str(output_dir))
         return 0
 
+    old_env = os.environ.copy()
     streamed_text: list[str] = []
     result_meta: dict[str, Any] | None = None
     message_log: list[dict[str, Any]] = []
 
     try:
+        os.environ.update(runtime_env)
+
         async for message in query(prompt=user_prompt, options=sdk_options):
             msg_type = type(message).__name__
             entry: dict[str, Any] = {"type": msg_type}
@@ -659,6 +755,9 @@ async def run_sdk(args: argparse.Namespace) -> int:
             },
         )
         raise
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -675,7 +774,6 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--max-thinking-tokens", type=int)
     ap.add_argument("--max-turns", type=int, default=8)
     ap.add_argument("--permission-mode")
-    ap.add_argument("--settings")
 
     ap.add_argument("--add-dir", action="append", default=[])
     ap.add_argument("--allowed-tool", action="append", default=[])

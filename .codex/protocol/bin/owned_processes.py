@@ -8,7 +8,11 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 
-STATE_DIR = Path.home() / '.codex' / 'runtime_state' / 'process_guard'
+def resolve_codex_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+STATE_DIR = resolve_codex_root() / 'runtime_state' / 'process_guard'
 BASELINE = STATE_DIR / 'baseline.json'
 OWNED = STATE_DIR / 'owned.json'
 

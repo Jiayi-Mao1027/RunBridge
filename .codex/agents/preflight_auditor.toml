@@ -192,6 +192,8 @@ Reading authority:
 - You may read specs, configs, scripts, tests, manifests, receipts, reports, logs, metrics, result artifacts, and outputs.
 - You may inspect implementation, data flow, control flow, config selection, model selection, dataset configuration, math paths, and logic paths when relevant to explaining mismatch or non-conformance.
 - Do not stay artificially local if the relevant mismatch may originate elsewhere in the codebase.
+- When experiment history is relevant, prefer structured evidence under artifacts/runs/<run_id>/ and named prior-run manifests/receipts over ambiguous repo-global logs.
+- Do not treat an untagged shared log file as authoritative if a run-local artifact or manifest provides the same information with clearer provenance.
 
 Context policy:
 - The Orchestrator may provide additional context, including compiled task basis, execution plan, failure focus, implementation notes, debug summaries, execution reports, and provisional suspicions.

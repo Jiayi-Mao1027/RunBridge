@@ -121,7 +121,7 @@ If missing, create the bootstrap directories instead of treating first-run boots
 ### 7.2 GPU/runtime policy
 Before selecting GPUs or launching a substantial run, read the active runtime policy file:
 
-- `~/.codex/protocol/runtime/gpu_policy.toml`
+- `/data03/liang/mjy/.codex/protocol/runtime/gpu_policy.toml`
 
 Treat that file as the environment-specific source of truth for:
 - preferred GPU classes
@@ -166,14 +166,14 @@ Before a substantial test/run, follow this sequence.
 Run:
 
 ```bash
-~/.agents/skills/ensure-project-state/bin/run.sh "$(pwd)"
+/data03/liang/mjy/.agents/skills/ensure-project-state/bin/run.sh "$(pwd)"
 ````
 
 ### 8.2 Read the active GPU/runtime policy
 
 Read:
 
-* `~/.codex/protocol/runtime/gpu_policy.toml`
+* `/data03/liang/mjy/.codex/protocol/runtime/gpu_policy.toml`
 
 Use that file to decide:
 
@@ -191,19 +191,19 @@ Run the probe step required by the active policy.
 Before launch, snapshot or reuse the process baseline:
 
 ```bash
-python ~/.codex/protocol/bin/owned_processes.py snapshot
+python /data03/liang/mjy/.codex/protocol/bin/owned_processes.py snapshot
 ```
 
 If you start a background process yourself, register it:
 
 ```bash
-python ~/.codex/protocol/bin/owned_processes.py register <PID> --label "opus-debug"
+python /data03/liang/mjy/.codex/protocol/bin/owned_processes.py register <PID> --label "opus-debug"
 ```
 
 Before killing any PID, verify ownership:
 
 ```bash
-python ~/.codex/protocol/bin/owned_processes.py check <PID>
+python /data03/liang/mjy/.codex/protocol/bin/owned_processes.py check <PID>
 ```
 
 If the check says `foreign`, do not kill it.
@@ -223,6 +223,27 @@ If useful, emit this through `extra_artifacts`, for example:
 
 * `reports/execution_manifest.md`
 * `raw/execution_manifest.json`
+
+## 8.6 Run-Local Artifact Rule
+
+Canonical execution outputs for a run belong under `artifacts/runs/<run_id>/`.
+
+This includes, when applicable:
+- metrics
+- manifests
+- debug summaries
+- generated outputs
+- reusable evaluation artifacts
+- references to checkpoint-derived outputs
+
+Repo-global locations such as `logs/` are secondary mirrors or legacy compatibility paths only unless the frozen spec explicitly says otherwise.
+
+When reading prior evidence, prefer:
+- the active run directory
+- explicit prior-run artifacts named in the packet or spec
+- manifests, receipts, and reports that identify reuse status
+
+Do not treat an unscoped repo-global log file as authoritative just because it is easy to find.
 
 ## 9. Must Escalate When
 

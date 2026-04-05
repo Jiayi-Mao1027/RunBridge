@@ -2,7 +2,7 @@
 forced_login_method = "chatgpt"
 cli_auth_credentials_store = "file"
 model = "gpt-5.4"
-model_reasoning_effort = "xhigh"
+model_reasoning_effort = "high"
 model_reasoning_summary = "detailed"
 model_verbosity = "high"
 
@@ -26,8 +26,6 @@ Treat repo-level AGENTS.md as project-coupled semantics.
 project_doc_fallback_filenames = ["PROJECT.md", "plan.md", "scheme.md"]
 project_doc_max_bytes = 65536
 project_root_markers = [".git", "AGENTS.md", "CLAUDE.md"]
-
-service_tier = "fast"
 
 [features]
 codex_hooks = true

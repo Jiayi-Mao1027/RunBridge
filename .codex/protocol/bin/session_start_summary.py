@@ -6,13 +6,27 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+def resolve_codex_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
-OUT_DIR = Path.home() / ".codex" / "runtime_state"
+
+OUT_DIR = resolve_codex_root() / "runtime_state"
 OUT_FILE = OUT_DIR / "session_start_last.json"
+CHECKPOINT_FILE = OUT_DIR / "checkpoint.json"
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
 
 def main() -> int:
@@ -29,6 +43,10 @@ def main() -> int:
         "written_at": now(),
         "hook_payload": payload,
     }
+
+    checkpoint = read_json(CHECKPOINT_FILE)
+    if checkpoint:
+        record["checkpoint"] = checkpoint
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     OUT_FILE.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")

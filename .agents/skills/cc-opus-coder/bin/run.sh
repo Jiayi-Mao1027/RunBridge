@@ -20,7 +20,6 @@ fi
 CLAUDE_MAX_THINKING_TOKENS="${CLAUDE_MAX_THINKING_TOKENS:-14000}"
 CLAUDE_MAX_TURNS="${CLAUDE_MAX_TURNS:-12}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-acceptEdits}"
-CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}"
 CLAUDE_ADD_DIRS="${CLAUDE_ADD_DIRS:-}"
 
@@ -50,9 +49,6 @@ ARGS=(
   --disallowed-tool "WebSearch"
 )
 
-if [[ -n "$CLAUDE_SETTINGS" ]]; then
-  ARGS+=(--settings "$CLAUDE_SETTINGS")
-fi
 if [[ -n "$PHASE" ]]; then
   ARGS+=(--phase "$PHASE")
 fi
@@ -75,11 +71,11 @@ if [[ -f "$REPO_ROOT/AGENTS.md" ]]; then
 fi
 
 # Runtime policy context for environment-specific GPU rules
-if [[ -d "$HOME/.codex/protocol/runtime" ]]; then
-  ARGS+=(--add-dir "$HOME/.codex/protocol/runtime")
+if [[ -d "$USER_ROOT/.codex/protocol/runtime" ]]; then
+  ARGS+=(--add-dir "$USER_ROOT/.codex/protocol/runtime")
 fi
-if [[ -d "$HOME/.codex/protocol/bin" ]]; then
-  ARGS+=(--add-dir "$HOME/.codex/protocol/bin")
+if [[ -d "$USER_ROOT/.codex/protocol/bin" ]]; then
+  ARGS+=(--add-dir "$USER_ROOT/.codex/protocol/bin")
 fi
 
 # Optional extra readable dirs, colon-separated

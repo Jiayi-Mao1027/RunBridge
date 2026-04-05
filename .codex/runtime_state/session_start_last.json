@@ -1,0 +1,12 @@
+{
+  "written_at": "2026-04-05T17:32:49.734836+00:00",
+  "hook_payload": {
+    "session_id": "019d5eb4-4c7c-7ea0-99f9-e65ded87fa59",
+    "transcript_path": "/data03/liang/mjy/.codex/sessions/2026/04/06/rollout-2026-04-06T01-32-47-019d5eb4-4c7c-7ea0-99f9-e65ded87fa59.jsonl",
+    "cwd": "/data03/liang/mjy/safe_opd",
+    "hook_event_name": "SessionStart",
+    "model": "gpt-5.4",
+    "permission_mode": "default",
+    "source": "startup"
+  }
+}

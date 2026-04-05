@@ -1,0 +1,97 @@
+{
+  "stopped_at": "2026-04-05T19:34:29.235013+00:00",
+  "stop_reason": "unknown",
+  "repo_root": "/data03/liang/mjy/safe_opd",
+  "stage": "unknown",
+  "phase": "unknown",
+  "owned_processes": {
+    "count": 0,
+    "pids": [],
+    "labels": []
+  },
+  "recent_events": [
+    {
+      "type": "session_stop",
+      "timestamp": "2026-04-05T17:37:42.056983+00:00",
+      "reason": "unknown",
+      "checkpoint_path": "/data03/liang/mjy/.codex/runtime_state/checkpoint.json"
+    },
+    {
+      "type": "session_stop",
+      "timestamp": "2026-04-05T17:41:08.851331+00:00",
+      "reason": "unknown",
+      "checkpoint_path": "/data03/liang/mjy/.codex/runtime_state/checkpoint.json"
+    },
+    {
+      "type": "session_stop",
+      "timestamp": "2026-04-05T18:47:22.934191+00:00",
+      "reason": "unknown",
+      "checkpoint_path": "/data03/liang/mjy/.codex/runtime_state/checkpoint.json"
+    },
+    {
+      "type": "session_stop",
+      "timestamp": "2026-04-05T19:13:55.222223+00:00",
+      "reason": "unknown",
+      "checkpoint_path": "/data03/liang/mjy/.codex/runtime_state/checkpoint.json"
+    }
+  ],
+  "pending_issues": [
+    {
+      "title": "claude_agent_sdk import not verifiable via read tools",
+      "issue_type": "nonblocking_risk",
+      "severity": "low",
+      "evidence_paths": [
+        "/data03/liang/mjy/.codex/protocol/bin/claude_skill_runner.py"
+      ],
+      "next_action": "Carry as known dependency risk; prior successful run is best available evidence of SDK presence"
+    },
+    {
+      "title": "cli_path hardcoded to /root/.local/bin/claude — assumes root execution context",
+      "issue_type": "nonblocking_risk",
+      "severity": "low",
+      "evidence_paths": [
+        "/data03/liang/mjy/.codex/bridge_api.toml"
+      ],
+      "next_action": "Carry silently; no action unless execution user context changes"
+    },
+    {
+      "title": "Model identifier claude-sonnet-4-6 has nonstandard format",
+      "issue_type": "nonblocking_risk",
+      "severity": "low",
+      "evidence_paths": [
+        "/data03/liang/mjy/.codex/bridge_api.toml"
+      ],
+      "next_action": "Orchestrator should confirm this alias is intentional; prior successful run suggests it resolves"
+    },
+    {
+      "title": "Dead [claude_bridge.execution] config section in bridge_api.toml",
+      "issue_type": "nonblocking_risk",
+      "severity": "low",
+      "evidence_paths": [
+        "/data03/liang/mjy/.codex/bridge_api.toml",
+        "/data03/liang/mjy/.codex/protocol/bin/claude_skill_runner.py"
+      ],
+      "next_action": "Cosmetic only; no functional action required"
+    },
+    {
+      "title": "settings TOML key is dead config — runner uses FORCED_CLAUDE_SETTINGS_PATH unconditionally",
+      "issue_type": "nonblocking_risk",
+      "severity": "low",
+      "evidence_paths": [
+        "/data03/liang/mjy/.codex/bridge_api.toml",
+        "/data03/liang/mjy/.codex/protocol/bin/claude_skill_runner.py"
+      ],
+      "next_action": "Cosmetic only; values happen to be identical so no functional divergence"
+    },
+    {
+      "title": "Stale dry-run fragment subdirs in smoke run artifact root",
+      "issue_type": "execution_layer_fix",
+      "severity": "low",
+      "evidence_paths": [
+        "/data03/liang/mjy/safe_opd/artifacts/runs/run_20260406_agent_smoke/stage_journal.jsonl"
+      ],
+      "next_action": "Optional cleanup by Orchestrator or Opus; not a blocker"
+    }
+  ],
+  "latest_run_dir": "/data03/liang/mjy/safe_opd/artifacts/runs/run_20260406_agent_smoke"
+}
