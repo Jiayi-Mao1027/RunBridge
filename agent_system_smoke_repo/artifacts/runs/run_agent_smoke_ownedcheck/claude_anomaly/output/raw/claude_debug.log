@@ -1,0 +1,77 @@
+2026-04-05T20:33:38.502Z [DEBUG] MDM settings load completed in 1ms
+2026-04-05T20:33:38.532Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /etc/claude-code/managed-settings.json
+2026-04-05T20:33:38.532Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /data03/liang/mjy/agent_system_smoke_repo/.claude/settings.json
+2026-04-05T20:33:38.533Z [DEBUG] CA certs: Config fallback - globalEnv keys: , settingsEnv keys: ANTHROPIC_BASE_URL,ANTHROPIC_API_KEY,CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+2026-04-05T20:33:38.533Z [DEBUG] [init] configureGlobalMTLS starting
+2026-04-05T20:33:38.533Z [DEBUG] [init] configureGlobalMTLS complete
+2026-04-05T20:33:38.534Z [DEBUG] [init] configureGlobalAgents starting
+2026-04-05T20:33:38.534Z [DEBUG] CA certs: useSystemCA=false, extraCertsPath=undefined
+2026-04-05T20:33:38.536Z [DEBUG] [init] configureGlobalAgents complete
+2026-04-05T20:33:38.537Z [DEBUG] Error log sink initialized
+2026-04-05T20:33:38.541Z [DEBUG] [STARTUP] Loading MCP configs...
+2026-04-05T20:33:38.541Z [DEBUG] [STARTUP] Running setup()...
+2026-04-05T20:33:38.542Z [DEBUG] Error log sink initialized
+2026-04-05T20:33:38.543Z [DEBUG] Loading skills from: managed=/etc/claude-code/.claude/skills, user=/data03/liang/mjy/.claude-isolated/skills, project=[]
+2026-04-05T20:33:38.543Z [DEBUG] [STARTUP] setup() completed in 2ms
+2026-04-05T20:33:38.543Z [DEBUG] Cleared CA certificates cache
+2026-04-05T20:33:38.543Z [DEBUG] Cleared mTLS configuration cache
+2026-04-05T20:33:38.543Z [DEBUG] Cleared proxy agent cache
+2026-04-05T20:33:38.543Z [DEBUG] CA certs: useSystemCA=false, extraCertsPath=undefined
+2026-04-05T20:33:38.544Z [DEBUG] [STARTUP] Loading commands and agents...
+2026-04-05T20:33:38.552Z [DEBUG] getSkills returning: 0 skill dir commands, 0 plugin skills, 8 bundled skills, 0 builtin plugin skills
+2026-04-05T20:33:38.553Z [DEBUG] [STARTUP] Commands and agents loaded in 9ms
+2026-04-05T20:33:38.554Z [DEBUG] Skipping startup prefetches, last ran 1775421219s ago
+2026-04-05T20:33:38.554Z [DEBUG] [STARTUP] MCP configs resolved in 0ms (awaited at +13ms)
+2026-04-05T20:33:38.554Z [DEBUG] Cleared CA certificates cache
+2026-04-05T20:33:38.554Z [DEBUG] Cleared mTLS configuration cache
+2026-04-05T20:33:38.554Z [DEBUG] Cleared proxy agent cache
+2026-04-05T20:33:38.554Z [DEBUG] CA certs: useSystemCA=false, extraCertsPath=undefined
+2026-04-05T20:33:38.557Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-04-05T20:33:38.558Z [DEBUG] [Perfetto] initializePerfettoTracing called, env value: undefined
+2026-04-05T20:33:38.558Z [DEBUG] [3P telemetry] isTelemetryEnabled=false (CLAUDE_CODE_ENABLE_TELEMETRY=undefined)
+2026-04-05T20:33:38.560Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /data03/liang/mjy/agent_system_smoke_repo/.claude/settings.local.json
+2026-04-05T20:33:38.560Z [DEBUG] [auto-mode] hasAutoModeOptIn=false skipAutoPermissionPrompt: user=undefined local=undefined flag=undefined policy=undefined
+2026-04-05T20:33:38.560Z [DEBUG] [auto-mode] verifyAutoModeGateAccess: enabledState=opt-in disabledBySettings=false model=claude-sonnet-4-6 modelSupported=true disableFastModeBreakerFires=false carouselAvailable=false canEnterAuto=true
+2026-04-05T20:33:38.560Z [DEBUG] [auto-mode] verifyAutoModeGateAccess setAvailable: true -> false
+2026-04-05T20:33:38.560Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /data03/liang/mjy/agent_system_smoke_repo/specs/.claude/settings.json
+2026-04-05T20:33:38.560Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /data03/liang/mjy/agent_system_smoke_repo/specs/.claude/settings.local.json
+2026-04-05T20:33:38.561Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /data03/liang/mjy/agent_system_smoke_repo/artifacts/.claude/settings.json
+2026-04-05T20:33:38.561Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /data03/liang/mjy/agent_system_smoke_repo/artifacts/.claude/settings.local.json
+2026-04-05T20:33:38.694Z [DEBUG] [ScheduledTasks] scheduler start() — enabled=false, hasTasks=false
+2026-04-05T20:33:38.703Z [DEBUG] installed_plugins.json doesn't exist, returning empty V2 object
+2026-04-05T20:33:38.704Z [DEBUG] Found 0 plugins (0 enabled, 0 disabled)
+2026-04-05T20:33:38.705Z [DEBUG] Git remote URL: https://github.com/Jiayi-Mao1027/Structure-config
+2026-04-05T20:33:38.705Z [DEBUG] Parsed repository: github.com/Jiayi-Mao1027/Structure-config from URL: https://github.com/Jiayi-Mao1027/Structure-config
+2026-04-05T20:33:38.738Z [DEBUG] Failed to stat directory /etc/claude-code/.claude/output-styles: ENOENT: no such file or directory, statx '/etc/claude-code/.claude/output-styles'
+2026-04-05T20:33:38.738Z [DEBUG] Total plugin output styles loaded: 0
+2026-04-05T20:33:38.738Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-04-05T20:33:38.767Z [WARN] [3P telemetry] Event dropped (no event logger initialized): user_prompt
+2026-04-05T20:33:38.768Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-04-05T20:33:38.769Z [DEBUG] autocompact: tokens=421 threshold=167000 effectiveWindow=180000
+2026-04-05T20:33:38.771Z [DEBUG] Tool search disabled: ToolSearchTool is not available (may have been disallowed via disallowedTools).
+2026-04-05T20:33:38.772Z [DEBUG] [ToolSearch:optimistic] mode=tst, ENABLE_TOOL_SEARCH=true, result=true
+2026-04-05T20:33:38.773Z [DEBUG] attribution header x-anthropic-billing-header: cc_version=2.1.91.1cd; cc_entrypoint=sdk-py; cch=00000;
+2026-04-05T20:33:38.773Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-04-05T20:33:38.774Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-04-05T20:33:38.774Z [DEBUG] [API:request] Creating client, ANTHROPIC_CUSTOM_HEADERS present: false, has Authorization header: false
+2026-04-05T20:33:38.774Z [DEBUG] [API:auth] OAuth token check starting
+2026-04-05T20:33:38.775Z [DEBUG] [API:auth] OAuth token check complete
+2026-04-05T20:33:38.776Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-04-05T20:33:38.778Z [DEBUG] [API REQUEST] /v1/messages source=sdk
+2026-04-05T20:33:41.351Z [DEBUG] Stream started - received first chunk
+2026-04-05T20:33:43.155Z [DEBUG] autocompact: tokens=11194 threshold=167000 effectiveWindow=180000
+2026-04-05T20:33:43.156Z [DEBUG] Tool search disabled: ToolSearchTool is not available (may have been disallowed via disallowedTools).
+2026-04-05T20:33:43.156Z [DEBUG] attribution header x-anthropic-billing-header: cc_version=2.1.91.1cd; cc_entrypoint=sdk-py; cch=00000;
+2026-04-05T20:33:43.156Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-04-05T20:33:43.156Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-04-05T20:33:43.157Z [DEBUG] [API:request] Creating client, ANTHROPIC_CUSTOM_HEADERS present: false, has Authorization header: false
+2026-04-05T20:33:43.157Z [DEBUG] [API:auth] OAuth token check starting
+2026-04-05T20:33:43.157Z [DEBUG] [API:auth] OAuth token check complete
+2026-04-05T20:33:43.157Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-04-05T20:33:43.159Z [DEBUG] [API REQUEST] /v1/messages source=sdk
+2026-04-05T20:33:45.234Z [DEBUG] Stream started - received first chunk
+2026-04-05T20:34:40.881Z [DEBUG] Fast mode unavailable: Fast mode is not available in the Agent SDK
+2026-04-05T20:34:40.886Z [DEBUG] Metrics export disabled by organization setting
+2026-04-05T20:34:40.886Z [DEBUG] BigQuery metrics exporter flush complete
+2026-04-05T20:34:40.886Z [DEBUG] BigQuery metrics exporter flush complete
+2026-04-05T20:34:40.886Z [DEBUG] BigQuery metrics exporter shutdown complete

@@ -519,6 +519,11 @@ The orchestrator must reason with the following priority:
 2. user-level Codex config and protocol helpers
 3. user-level skill definitions under `~/.agents/skills/`
 
+Path resolution rule:
+- in this deployment, `~/.codex` resolves to `/data03/liang/mjy/.codex`
+- in this deployment, `~/.agents` resolves to `/data03/liang/mjy/.agents`
+- control-plane code and runtime state must not silently fall back to `/root/.codex`
+
 ### Project-level truth
 4. repo-level `AGENTS.md`
 5. repo-level `CLAUDE.md`
@@ -856,6 +861,11 @@ Minimum durable state should include:
 - manifests
 - anomaly outputs when triggered
 
+When Claude leaf workers are invoked through the shared bridge, durable state should also include:
+- run-local protocol outputs under `artifacts/runs/<run_id>/...`
+- runner-side debug evidence when bridge or provider failures occur
+- enough failure evidence to distinguish bridge defects from upstream API defects
+
 ---
 
 ## 13. Model Policy for the Orchestrator
@@ -892,6 +902,13 @@ The skill must carry:
 - output validation rules
 - artifact writeback rules
 
+Runtime bridge rule for Claude-owned workers:
+- the shared Claude bridge under user-level `.codex` is the authoritative runtime path
+- the bridge must force the dedicated settings file under `/data03/liang/mjy/.claude-isolated/settings.json`
+- the bridge should run Claude in `--bare` mode in this deployment to avoid workspace-side discovery and sandbox instability
+- canonical model names must be used when talking to the provider bridge; for example `claude-sonnet-4-6`, not `claude-sonnet4-6`
+- if the bridge fails, the runner must preserve enough raw debug evidence for later diagnosis
+
 ---
 
 ## 15. Execution Safety and Process Ownership
@@ -902,6 +919,11 @@ This is especially important for execution workers.
 
 Hard rule:
 - never terminate shells, jobs, or GPU processes that were not launched by the current owned execution action
+
+Owned-action rule:
+- ownership is not limited to a single explicit PID
+- if a managed worker wrapper launches a runner, the wrapper PID, the registered runner PID, and descendant worker processes launched from that runner are part of the same owned execution action
+- process guards should therefore evaluate effective owned stacks, not only the narrow explicitly registered PID set
 
 For GPU-bound execution:
 - inspect available GPUs before launching

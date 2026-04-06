@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,9 +15,10 @@ def resolve_codex_root() -> Path:
 RUNTIME_STATE = resolve_codex_root() / 'runtime_state'
 OWNED_PATH = RUNTIME_STATE / 'process_guard' / 'owned.json'
 GPU_PROBED_FLAG = RUNTIME_STATE / 'gpu_probed'
-
-KILL_RE = re.compile(r'\b(kill|pkill|killall|skill)\b', re.IGNORECASE)
-KILL_PID_RE = re.compile(r'\bkill\s+(?:-\d+\s+)?(\d+)', re.IGNORECASE)
+MANAGED_ANCESTOR_MARKERS = (
+    '/.agents/skills/cc-',
+    'claude_skill_runner.py',
+)
 
 DESTRUCTIVE_RE = re.compile(
     r'\brm\s+.*-[^\s]*r[^\s]*f|'
@@ -51,13 +54,99 @@ def read_json(path: Path, default=None):
         return default
 
 
-def owned_pids() -> set[int]:
+def live_owned_records() -> list[dict]:
     payload = read_json(OWNED_PATH, {'items': []})
-    return {
+    mapping = pid_ppid_map()
+    live_pids = set(mapping)
+    records: list[dict] = []
+    for item in payload.get('items', []):
+        pid_raw = item.get('pid')
+        if not str(pid_raw).isdigit():
+            continue
+        pid = int(pid_raw)
+        if pid not in live_pids:
+            continue
+        current_cmd = proc_cmdline(pid)
+        saved_cmd = str(item.get('cmdline', '')).strip()
+        if saved_cmd and current_cmd and current_cmd != saved_cmd:
+            continue
+
+        wrapper_raw = item.get('wrapper_pid')
+        if str(wrapper_raw).isdigit():
+            wrapper_pid = int(wrapper_raw)
+            if wrapper_pid not in live_pids:
+                item = dict(item)
+                item.pop('wrapper_pid', None)
+                item.pop('wrapper_cmdline', None)
+            else:
+                wrapper_cmd = proc_cmdline(wrapper_pid)
+                saved_wrapper_cmd = str(item.get('wrapper_cmdline', '')).strip()
+                if saved_wrapper_cmd and wrapper_cmd and wrapper_cmd != saved_wrapper_cmd:
+                    item = dict(item)
+                    item.pop('wrapper_pid', None)
+                    item.pop('wrapper_cmdline', None)
+
+        records.append(item)
+    return records
+
+
+def pid_ppid_map() -> dict[int, int]:
+    out = subprocess.check_output(['ps', '-e', '-o', 'pid=,ppid='], text=True)
+    mapping: dict[int, int] = {}
+    for raw in out.splitlines():
+        parts = raw.strip().split()
+        if len(parts) != 2:
+            continue
+        pid_s, ppid_s = parts
+        if pid_s.isdigit() and ppid_s.isdigit():
+            mapping[int(pid_s)] = int(ppid_s)
+    return mapping
+
+
+def proc_cmdline(pid: int) -> str:
+    try:
+        raw = Path(f'/proc/{pid}/cmdline').read_bytes()
+    except Exception:
+        return ''
+    return raw.replace(b'\x00', b' ').decode('utf-8', errors='replace').strip()
+
+
+def effective_owned_pids() -> set[int]:
+    records = live_owned_records()
+    explicit = {
         int(item['pid'])
-        for item in payload.get('items', [])
+        for item in records
         if str(item.get('pid', '')).isdigit()
     }
+    if not explicit:
+        return set()
+
+    mapping = pid_ppid_map()
+    wrapper_pids = {
+        int(item['wrapper_pid'])
+        for item in records
+        if str(item.get('wrapper_pid', '')).isdigit()
+    }
+    descendants = set(explicit) | wrapper_pids
+    frontier = set(explicit) | wrapper_pids
+    while frontier:
+        next_frontier: set[int] = set()
+        for pid, ppid in mapping.items():
+            if ppid in frontier and pid not in descendants:
+                descendants.add(pid)
+                next_frontier.add(pid)
+        frontier = next_frontier
+
+    ancestors: set[int] = set()
+    for pid in explicit:
+        current = mapping.get(pid)
+        while current and current > 1 and current not in ancestors:
+            cmd = proc_cmdline(current)
+            if any(marker in cmd for marker in MANAGED_ANCESTOR_MARKERS):
+                ancestors.add(current)
+            current = mapping.get(current)
+
+    return descendants | ancestors
 
 
 def deny(reason: str) -> int:
@@ -77,14 +166,45 @@ def warn(message: str) -> int:
 
 
 def check_kill_safety(command: str) -> str | None:
-    if not KILL_RE.search(command):
+    try:
+        argv = shlex.split(command)
+    except Exception:
+        argv = command.split()
+    if not argv:
         return None
 
-    pids_in_cmd = {int(m) for m in KILL_PID_RE.findall(command)}
+    tool_index = 0
+    while tool_index < len(argv) and '=' in argv[tool_index] and not argv[tool_index].startswith('-'):
+        name, _, value = argv[tool_index].partition('=')
+        if name and value and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name):
+            tool_index += 1
+            continue
+        break
+
+    if tool_index >= len(argv):
+        return None
+
+    tool = argv[tool_index].lower()
+    if tool not in {'kill', 'pkill', 'killall', 'skill'}:
+        return None
+
+    if tool in {'pkill', 'killall', 'skill'}:
+        return (
+            f'Blocked: pattern-based process termination via "{tool}" is not allowed by default. '
+            'Use explicit numeric PIDs from the current owned stack only.'
+        )
+
+    pids_in_cmd: set[int] = set()
+    for arg in argv[tool_index + 1:]:
+        if arg.startswith('-'):
+            continue
+        if arg.isdigit():
+            pids_in_cmd.add(int(arg))
+
     if not pids_in_cmd:
-        return None
+        return 'Blocked: kill command must use explicit numeric PIDs from the current owned stack.'
 
-    owned = owned_pids()
+    owned = effective_owned_pids()
     foreign = pids_in_cmd - owned
     if foreign:
         return (

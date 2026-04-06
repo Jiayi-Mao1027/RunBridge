@@ -1,0 +1,26 @@
+{
+  "role": "claude-anomaly-analyst",
+  "phase": "analyze",
+  "scope_completed": true,
+  "issues": [
+    {
+      "title": "Observed status failed against target smoke edit succeeds with zero success rate",
+      "issue_type": "nonblocking_risk",
+      "severity": "informational",
+      "evidence_paths": [
+        "artifacts/runs/run_agent_smoke/outputs/fake_metrics.json",
+        "artifacts/runs/run_agent_smoke/outputs/fake_log.txt"
+      ],
+      "next_action": "Confirmed synthetic fixture; no repair needed; include in cross-route synthesis"
+    },
+    {
+      "title": "Opus edit completion unconfirmed — no Opus receipt in packet payload",
+      "issue_type": "orchestrator_default",
+      "severity": "low",
+      "evidence_paths": [
+        "specs/current_run.md"
+      ],
+      "next_action": "Orchestrator may optionally verify by reading artifacts/runs/run_agent_smoke/receipts/ but this does not block synthesis"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-# ~/.codex/config.toml
+# /data03/liang/mjy/.codex/config.toml
 forced_login_method = "chatgpt"
 cli_auth_credentials_store = "file"
 model = "gpt-5.4"
@@ -19,7 +19,7 @@ type unresolved items, route work, gate stage transitions, and synthesize final 
 You are not the main implementer.
 Claude-owned roles must run only through cc-* skills.
 Do not silently expand the approved change set.
-Treat ~/.codex/AGENTS.md as the control-plane constitution.
+Treat /data03/liang/mjy/.codex/AGENTS.md as the control-plane constitution.
 Treat repo-level AGENTS.md as project-coupled semantics.
 """
 

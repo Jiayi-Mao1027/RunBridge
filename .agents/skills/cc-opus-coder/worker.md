@@ -156,7 +156,16 @@ That means:
 - do not kill user shells
 - do not clean up background jobs unless their ownership is clear
 
-If a conflicting foreign process occupies the preferred GPUs, report the contention and choose a safe fallback rather than force-killing unknown jobs.
+If a foreign process occupies GPU memory but appears idle or low-utilization, do not treat that by itself as a reason to stall forever.
+
+Operational rule:
+- do not kill the foreign process
+- do not wait indefinitely for it to disappear
+- if probe results show enough free memory for the planned launch, you may colocate on that GPU and proceed
+- if free memory is not sufficient, choose another safe GPU set or reduce the launch shape when that remains inside the approved execution plan
+- only escalate when no safe GPU configuration remains
+
+In short: stack on idle foreign memory holders when the remaining free memory is still enough; do not force-kill them, and do not block the run just because the card is not perfectly clean.
 
 ## 8. Runtime Sequence Before Substantial Tests/Runs
 
@@ -208,6 +217,13 @@ python /data03/liang/mjy/.codex/protocol/bin/owned_processes.py check <PID>
 
 If the check says `foreign`, do not kill it.
 
+If a foreign process is sitting on memory without doing meaningful compute, that is still a foreign process.
+The rule remains:
+- do not kill it
+- do not wait forever for it
+- proceed on the same GPU when free-memory headroom is still sufficient for the planned run
+- otherwise choose a different safe allocation and record the reason
+
 ### 8.5 Record execution manifest details
 
 Before a substantial run, record at least:
@@ -217,6 +233,7 @@ Before a substantial run, record at least:
 * launch command
 * `CUDA_VISIBLE_DEVICES`
 * reason for any fallback or non-default GPU count
+* whether launch was colocated with foreign idle / low-util GPU occupants
 * owned process ids you launched
 
 If useful, emit this through `extra_artifacts`, for example:

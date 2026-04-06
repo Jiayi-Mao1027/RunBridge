@@ -11,10 +11,10 @@ forbid_kill_foreign_process = true
 allow_fallback_when_preferred_unavailable = true
 
 [commands]
-probe = "python3 ~/.codex/protocol/bin/gpu_probe.py --requested {requested} --max-gpus {max_gpus} --json"
-ownership_snapshot = "python3 ~/.codex/protocol/bin/owned_processes.py snapshot"
-ownership_check = "python3 ~/.codex/protocol/bin/owned_processes.py check {pid}"
-ownership_register = "python3 ~/.codex/protocol/bin/owned_processes.py register {pid} --label {label}"
+probe = "python3 /data03/liang/mjy/.codex/protocol/bin/gpu_probe.py --requested {requested} --max-gpus {max_gpus} --json"
+ownership_snapshot = "python3 /data03/liang/mjy/.codex/protocol/bin/owned_processes.py snapshot"
+ownership_check = "python3 /data03/liang/mjy/.codex/protocol/bin/owned_processes.py check {pid}"
+ownership_register = "python3 /data03/liang/mjy/.codex/protocol/bin/owned_processes.py register {pid} --label {label}"
 
 [notes]
 platform = "default"

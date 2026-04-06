@@ -1,0 +1,69 @@
+{
+  "assistant_markdown": "## Refresher — run_agent_smoke_refresher_fixed\n\n**Phase:** refresh  \n**Run ID:** run_agent_smoke  \n**Date:** 2026-04-06\n\n### What was done\n\n`specs/current_run.md` has been refreshed. The file previously had no explicit run ID field, no active run area declaration, and no inline constraints. All three gaps were resolved in place without altering the bounded smoke-test objective or the done-when criteria.\n\n**Changes made to `specs/current_run.md`:**\n- Added `## Run ID` section explicitly naming `run_agent_smoke`\n- Added `## Active Run Area` pointing to `artifacts/runs/run_agent_smoke/`\n- Added `## Constraints` inline (carried from `specs/learned_constraints.md` and packet) to make the doc self-contained for downstream execution roles\n- Added `## Refresh Date` stamped 2026-04-06\n\n**Unchanged files:**\n- `specs/mission.md` — already accurate; no update needed\n- `specs/learned_constraints.md` — already accurate; no update needed\n\n### Unresolved items after refresh\n\nNone blocking. The execution-facing spec is now usable for downstream roles (Curator, Preflight, Opus).",
+  "report_markdown": "# Refresher Report\n\n**Run ID:** run_agent_smoke  \n**Refresher Run ID:** run_agent_smoke_refresher_fixed  \n**Phase:** refresh  \n**Date:** 2026-04-06\n\n---\n\n## Requested Scope Items\n\n| Item | Status |\n|---|---|\n| Make `specs/current_run.md` explicitly mention run id `run_agent_smoke` | ✅ Completed |\n| Preserve the bounded smoke-test objective | ✅ Preserved |\n| Surface unresolved items honestly if any remain | ✅ None found; stated explicitly |\n\n---\n\n## File-Level Changes\n\n### `specs/current_run.md` — Updated\n\nPre-refresh state:\n- No Run ID field\n- No Active Run Area field\n- No inline constraints\n- Done-when criteria present and accurate\n- Objective present and accurate\n\nPost-refresh state:\n- `## Run ID` = `run_agent_smoke` (new)\n- `## Active Run Area` = `artifacts/runs/run_agent_smoke/` (new)\n- `## Constraints` section added inline from `learned_constraints.md` + packet (new)\n- `## Refresh Date` = 2026-04-06 (new)\n- Objective and done-when criteria preserved verbatim\n\n### `specs/mission.md` — No change\n\nContent accurate. No update required.\n\n### `specs/learned_constraints.md` — No change\n\nContent accurate. Constraints were echoed into `current_run.md` for downstream self-containment; source file unchanged.\n\n---\n\n## Unresolved Items\n\nNone. All packet-requested scope items are complete. No blocking issues detected.\n\n---\n\n## Evidence Paths\n\n- `specs/current_run.md` (refreshed)\n- `specs/mission.md` (read, no change)\n- `specs/learned_constraints.md` (read, no change)\n- `artifacts/runs/run_agent_smoke/context/refresher_packet.md` (read)",
+  "handoff_markdown": "# Refresher Handoff → Orchestrator\n\n**Run ID:** run_agent_smoke  \n**Phase complete:** refresh  \n**Date:** 2026-04-06\n\n---\n\n## Authoritative Spec State\n\n`specs/current_run.md` is now the authoritative execution-facing source of truth for run `run_agent_smoke`.\n\nIt contains:\n- Explicit Run ID (`run_agent_smoke`)\n- Active Run Area (`artifacts/runs/run_agent_smoke/`)\n- Objective (unchanged, preserved verbatim)\n- Done-when criteria (unchanged, preserved verbatim)\n- Inline constraints (carried from `learned_constraints.md` and packet)\n- Refresh date stamp\n\n`specs/mission.md` and `specs/learned_constraints.md` were read and confirmed accurate; no changes made.\n\n---\n\n## What Changed Materially\n\n`specs/current_run.md` had no run-ID field. This was the primary gap. It is now resolved. Three new sections were added; no existing content was removed or altered.\n\n---\n\n## Remaining Unresolved Items\n\nNone. All packet-requested scope items are complete.\n\n---\n\n## Routing Suggestion\n\nRefresher gate is clear. The Orchestrator may advance to the next stage (Curator if workspace hygiene is needed, or Preflight `initial_readiness` if workspace is clean).\n\nNo items require Layer-1 escalation.\nNo items require orchestrator defaulting at this time.",
+  "orchestrator_summary": {
+    "headline": "Refresher complete — specs/current_run.md now explicitly identifies run_agent_smoke",
+    "status": "success",
+    "next_action_owner": "Orchestrator",
+    "next_action": "Advance to next stage (Curator or Preflight initial_readiness); no blocking items remain",
+    "key_points": [
+      "specs/current_run.md updated: added Run ID, Active Run Area, Constraints, and Refresh Date sections",
+      "Bounded smoke-test objective and done-when criteria preserved verbatim",
+      "specs/mission.md and specs/learned_constraints.md confirmed accurate, no changes made",
+      "No unresolved items remain after refresh",
+      "Refresher gate is clear for downstream dispatch"
+    ],
+    "evidence_paths": [
+      "specs/current_run.md",
+      "specs/mission.md",
+      "specs/learned_constraints.md",
+      "artifacts/runs/run_agent_smoke/context/refresher_packet.md"
+    ]
+  },
+  "receipt": {
+    "role": "refresher",
+    "phase": "refresh",
+    "scope_completed": true,
+    "requested_scope_items": [
+      "make specs/current_run.md explicitly mention the smoke run id run_agent_smoke",
+      "preserve the bounded smoke-test objective",
+      "surface unresolved items honestly if any remain"
+    ],
+    "completed_scope_items": [
+      "made specs/current_run.md explicitly mention the smoke run id run_agent_smoke",
+      "preserved the bounded smoke-test objective verbatim",
+      "surfaced unresolved items honestly — none found"
+    ],
+    "uncompleted_scope_items": [],
+    "strongly_related_docs_updated": [
+      "specs/current_run.md"
+    ],
+    "stale_context_dependencies_remaining": [],
+    "blocking_unresolved_items": [],
+    "issues": []
+  },
+  "extra_artifacts": {
+    "artifacts/runs/run_agent_smoke/reports/refresher_report.md": "# Refresher Report\n\n**Run ID:** run_agent_smoke  \n**Refresher Run ID:** run_agent_smoke_refresher_fixed  \n**Phase:** refresh  \n**Date:** 2026-04-06\n\n## Scope Summary\n\n| Item | Status |\n|---|---|\n| Make specs/current_run.md explicitly mention run id run_agent_smoke | Completed |\n| Preserve bounded smoke-test objective | Completed |\n| Surface unresolved items honestly | Completed — none found |\n\n## Changes\n\n- specs/current_run.md: added Run ID, Active Run Area, Constraints, Refresh Date sections\n- specs/mission.md: read, no change\n- specs/learned_constraints.md: read, no change\n\n## Unresolved Items\n\nNone.\n",
+    "artifacts/runs/run_agent_smoke/handoffs/refresher_handoff.md": "# Refresher Handoff → Orchestrator\n\n**Run ID:** run_agent_smoke  \n**Phase complete:** refresh  \n**Date:** 2026-04-06\n\nspecs/current_run.md is now authoritative and self-contained for run run_agent_smoke.\n\nRefresher gate is clear. Advance to Curator or Preflight initial_readiness.\n\nNo Layer-1 escalation required. No orchestrator defaulting required.\n",
+    "artifacts/runs/run_agent_smoke/receipts/refresher_receipt.json": {
+      "role": "refresher",
+      "phase": "refresh",
+      "run_id": "run_agent_smoke",
+      "refresher_run_id": "run_agent_smoke_refresher_fixed",
+      "date": "2026-04-06",
+      "scope_completed": true,
+      "completed_scope_items": [
+        "made specs/current_run.md explicitly mention the smoke run id run_agent_smoke",
+        "preserved the bounded smoke-test objective verbatim",
+        "surfaced unresolved items honestly — none found"
+      ],
+      "uncompleted_scope_items": [],
+      "strongly_related_docs_updated": [
+        "specs/current_run.md"
+      ],
+      "blocking_unresolved_items": [],
+      "issues": []
+    }
+  }
+}

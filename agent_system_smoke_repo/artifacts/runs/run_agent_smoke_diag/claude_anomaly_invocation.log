@@ -1,0 +1,29 @@
+Initialized bootstrap state under: /data03/liang/mjy/agent_system_smoke_repo
+Fatal error in message reader: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+Traceback (most recent call last):
+  File "/data03/liang/mjy/.codex/protocol/bin/claude_skill_runner.py", line 794, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/data03/liang/mjy/.codex/protocol/bin/claude_skill_runner.py", line 790, in main
+    return asyncio.run(run_sdk(args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/conda/envs/mjy/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/data/conda/envs/mjy/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/conda/envs/mjy/lib/python3.11/asyncio/base_events.py", line 650, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/data03/liang/mjy/.codex/protocol/bin/claude_skill_runner.py", line 686, in run_sdk
+    async for message in query(prompt=user_prompt, options=sdk_options):
+  File "/data/conda/envs/mjy/lib/python3.11/site-packages/claude_agent_sdk/query.py", line 122, in query
+    async for message in client.process_query(
+  File "/data/conda/envs/mjy/lib/python3.11/site-packages/claude_agent_sdk/_internal/client.py", line 147, in process_query
+    async for data in query.receive_messages():
+  File "/data/conda/envs/mjy/lib/python3.11/site-packages/claude_agent_sdk/_internal/query.py", line 726, in receive_messages
+    raise Exception(message.get("error", "Unknown error"))
+Exception: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details

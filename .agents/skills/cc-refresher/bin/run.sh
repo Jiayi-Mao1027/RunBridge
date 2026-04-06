@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 USER_ROOT="$(cd -- "$SKILL_DIR/../../.." && pwd)"
 RUNNER="$USER_ROOT/.codex/protocol/bin/claude_skill_runner.py"
+OWNED_HELPER="$USER_ROOT/.codex/protocol/bin/owned_processes.py"
 
 if [[ -z "$PACKET_PATH" ]]; then
   echo "missing packet path" >&2
@@ -91,4 +92,7 @@ if [[ -n "$CLAUDE_EXTRA_ARGS" ]]; then
   done
 fi
 
-python3 "$RUNNER" "${ARGS[@]}"
+python3 "$RUNNER" "${ARGS[@]}" &
+CHILD_PID=$!
+python3 "$OWNED_HELPER" register "$CHILD_PID" --label "cc-refresher:${RUN_ID:-manual}" --wrapper-pid "$BASHPID"
+wait "$CHILD_PID"

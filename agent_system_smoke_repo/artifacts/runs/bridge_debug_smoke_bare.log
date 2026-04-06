@@ -1,0 +1,13 @@
+2026-04-05T20:15:58.607Z [DEBUG] MDM settings load completed in 1ms
+2026-04-05T20:15:58.638Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /etc/claude-code/managed-settings.json
+2026-04-05T20:15:58.639Z [DEBUG] Broken symlink or missing file encountered for settings.json at path: /data03/liang/mjy/agent_system_smoke_repo/.claude/settings.json
+2026-04-05T20:15:58.640Z [DEBUG] CA certs: Config fallback - globalEnv keys: , settingsEnv keys: ANTHROPIC_AUTH_TOKEN,ANTHROPIC_BASE_URL,API_TIMEOUT_MS,ANTHROPIC_DEFAULT_HAIKU_MODEL,ANTHROPIC_DEFAULT_SONNET_MODEL,ANTHROPIC_DEFAULT_OPUS_MODEL
+2026-04-05T20:15:58.641Z [DEBUG] [init] configureGlobalMTLS starting
+2026-04-05T20:15:58.641Z [DEBUG] [init] configureGlobalMTLS complete
+2026-04-05T20:15:58.641Z [DEBUG] [init] configureGlobalAgents starting
+2026-04-05T20:15:58.641Z [DEBUG] CA certs: useSystemCA=false, extraCertsPath=undefined
+2026-04-05T20:15:58.643Z [DEBUG] [init] configureGlobalAgents complete
+2026-04-05T20:15:58.644Z [DEBUG] Error log sink initialized
+2026-04-05T20:15:58.646Z [DEBUG] [STARTUP] Loading MCP configs...
+2026-04-05T20:15:58.650Z [DEBUG] [STARTUP] Running setup()...
+2026-04-05T20:15:58.651Z [DEBUG] Error log sink initialized

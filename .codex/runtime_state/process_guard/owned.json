@@ -1,0 +1,17 @@
+{
+  "items": [
+    {
+      "pid": 2971823,
+      "label": "cc-claude-anomaly:run_agent_smoke_ownedcheck",
+      "registered_at": "2026-04-05T20:33:37.337319+00:00",
+      "ppid": 2971818
+    },
+    {
+      "pid": 2988972,
+      "label": "cc-claude-anomaly:run_agent_smoke_ownedcheck2",
+      "registered_at": "2026-04-05T20:36:04.058124+00:00",
+      "ppid": 2988967,
+      "wrapper_pid": 2988967
+    }
+  ]
+}

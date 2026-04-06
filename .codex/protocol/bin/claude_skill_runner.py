@@ -45,6 +45,18 @@ def now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def tail_text(path: pathlib.Path, max_lines: int = 120) -> str:
+    if not path.exists():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return ""
+    if not lines:
+        return ""
+    return "\n".join(lines[-max_lines:]).rstrip()
+
+
 def role_slug(role: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]+", "_", role.strip()).strip("_") or "role"
 
@@ -151,11 +163,25 @@ def resolved_cli_path(bridge_cfg: dict[str, Any]) -> str | None:
     return value or None
 
 
+def normalize_model_name(model: str | None) -> str | None:
+    if model is None:
+        return None
+    value = model.strip()
+    if not value:
+        return None
+    aliases = {
+        "claude-sonnet4-6": "claude-sonnet-4-6",
+        "claude-opus4-6": "claude-opus-4-6",
+        "claude-haiku4-5": "claude-haiku-4-5",
+    }
+    return aliases.get(value, value)
+
+
 def resolved_model(args_model: str | None, bridge_cfg: dict[str, Any]) -> str | None:
     if args_model:
-        return args_model
+        return normalize_model_name(args_model)
     value = str(bridge_cfg.get("model", "")).strip()
-    return value or None
+    return normalize_model_name(value)
 
 
 def resolved_settings_path(bridge_cfg: dict[str, Any]) -> str | None:
@@ -514,13 +540,21 @@ def write_failure_artifacts(
     role: str,
     phase: str | None,
     error_text: str,
+    debug_log_path: pathlib.Path | None = None,
 ) -> None:
     slug = role_slug(role)
     (output_dir / "output").mkdir(parents=True, exist_ok=True)
     (run_root / "completion_receipts").mkdir(parents=True, exist_ok=True)
     (run_root / "orchestrator_summaries").mkdir(parents=True, exist_ok=True)
+    protocol_error = error_text.rstrip()
+    if debug_log_path is not None:
+        protocol_error += f"\n\nClaude debug log: {debug_log_path}"
+        debug_tail = tail_text(debug_log_path)
+        if debug_tail:
+            protocol_error += f"\n\nLast Claude debug lines:\n{debug_tail}"
+    protocol_error += "\n"
 
-    write_text(output_dir / "output" / "protocol_error.md", error_text.rstrip() + "\n")
+    write_text(output_dir / "output" / "protocol_error.md", protocol_error)
 
     receipt = {
         "role": role,
@@ -584,7 +618,12 @@ async def run_sdk(args: argparse.Namespace) -> int:
     settings_path = resolved_settings_path(bridge_cfg)
     setting_sources = resolved_setting_sources(bridge_cfg)
     runtime_env = build_runtime_env(bridge_cfg)
+    debug_log_path = raw_dir / "claude_debug.log"
     cli_extra_args = build_cli_extra_args(bridge_cfg, args.extra_arg)
+    # Always run in bare mode so the bridge does not depend on workspace-side
+    # CLAUDE discovery or bubblewrap permission plumbing in this environment.
+    cli_extra_args.setdefault("bare", None)
+    cli_extra_args.setdefault("debug-file", str(debug_log_path))
 
     system_prompt = build_system_prompt(skill_dir, repo_root, bridge_cfg)
     user_prompt = build_user_prompt(
@@ -742,6 +781,7 @@ async def run_sdk(args: argparse.Namespace) -> int:
             role=args.role,
             phase=args.phase,
             error_text=error_text,
+            debug_log_path=debug_log_path,
         )
         append_jsonl(
             run_root / "stage_journal.jsonl",

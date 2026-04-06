@@ -1,0 +1,8 @@
+{
+  "target": "smoke edit succeeds",
+  "observed_status": "failed",
+  "success_rate": 0.0,
+  "notes": [
+    "prepared anomaly case for role smoke testing"
+  ]
+}

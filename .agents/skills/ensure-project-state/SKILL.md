@@ -20,13 +20,13 @@ Missing `specs/` or `artifacts/` should not by itself be treated as a hard failu
 Run:
 
 ```bash
-~/.codex/protocol/bin/ensure_project_state.sh "$(pwd)"
+/data03/liang/mjy/.codex/protocol/bin/ensure_project_state.sh "$(pwd)"
 ```
 
 Then snapshot the pre-run process baseline:
 
 ```bash
-python ~/.codex/protocol/bin/owned_processes.py snapshot
+python /data03/liang/mjy/.codex/protocol/bin/owned_processes.py snapshot
 ```
 
 ## What this should leave behind

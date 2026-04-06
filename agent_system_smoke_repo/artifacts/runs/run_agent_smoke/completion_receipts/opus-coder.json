@@ -1,0 +1,16 @@
+{
+  "role": "opus-coder",
+  "phase": "implement",
+  "scope_completed": false,
+  "issues": [
+    {
+      "title": "claude_skill_runner_failure",
+      "issue_type": "hard_stop",
+      "severity": "high",
+      "evidence_paths": [
+        "/data03/liang/mjy/agent_system_smoke_repo/artifacts/runs/run_agent_smoke/opus/output/output/protocol_error.md"
+      ],
+      "next_action": "inspect runner failure and worker output"
+    }
+  ]
+}
