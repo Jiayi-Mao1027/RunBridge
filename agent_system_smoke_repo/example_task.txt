@@ -1,3 +1,0 @@
-status: smoke-tested
-note: opus should flip this file to smoke-tested and add one short note.
-agent: opus-coder

@@ -12,6 +12,11 @@ SKILL_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 USER_ROOT="$(cd -- "$SKILL_DIR/../../.." && pwd)"
 RUNNER="$USER_ROOT/.codex/protocol/bin/claude_skill_runner.py"
 OWNED_HELPER="$USER_ROOT/.codex/protocol/bin/owned_processes.py"
+PYTHON_BIN="${CLAUDE_PYTHON_BIN:-/data/conda/envs/mjy/bin/python3}"
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="$(command -v python3)"
+fi
 
 if [[ -z "$PACKET_PATH" ]]; then
   echo "missing packet path" >&2
@@ -23,9 +28,10 @@ if [[ ! -f "$RUNNER" ]]; then
   exit 2
 fi
 
-CLAUDE_MAX_THINKING_TOKENS="${CLAUDE_MAX_THINKING_TOKENS:-10000}"
-CLAUDE_MAX_TURNS="${CLAUDE_MAX_TURNS:-8}"
+CLAUDE_MAX_THINKING_TOKENS="${CLAUDE_MAX_THINKING_TOKENS:-24000}"
+CLAUDE_MAX_TURNS="${CLAUDE_MAX_TURNS:-96}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-acceptEdits}"
+CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-4-6}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}"
 CLAUDE_ADD_DIRS="${CLAUDE_ADD_DIRS:-}"
 
@@ -36,6 +42,7 @@ ARGS=(
   --packet "$PACKET_PATH"
   --max-thinking-tokens "$CLAUDE_MAX_THINKING_TOKENS"
   --max-turns "$CLAUDE_MAX_TURNS"
+  --model "$CLAUDE_MODEL"
   --permission-mode "$CLAUDE_PERMISSION_MODE"
 
   --allowed-tool "Read"
@@ -92,7 +99,7 @@ if [[ -n "$CLAUDE_EXTRA_ARGS" ]]; then
   done
 fi
 
-python3 "$RUNNER" "${ARGS[@]}" &
+"$PYTHON_BIN" "$RUNNER" "${ARGS[@]}" &
 CHILD_PID=$!
-python3 "$OWNED_HELPER" register "$CHILD_PID" --label "cc-refresher:${RUN_ID:-manual}" --wrapper-pid "$BASHPID"
+"$PYTHON_BIN" "$OWNED_HELPER" register "$CHILD_PID" --label "cc-refresher:${RUN_ID:-manual}" --wrapper-pid "$BASHPID"
 wait "$CHILD_PID"

@@ -1,2 +1,0 @@
-{"ts": "2026-04-05T19:54:26Z", "role": "refresher", "phase": "refresh", "state": "started", "output_dir": "/data03/liang/mjy/agent_system_smoke_repo/artifacts/runs/run_agent_smoke_refresher_retry/refresher/output"}
-{"ts": "2026-04-05T19:57:33Z", "role": "refresher", "phase": "refresh", "state": "failed", "output_dir": "/data03/liang/mjy/agent_system_smoke_repo/artifacts/runs/run_agent_smoke_refresher_retry/refresher/output", "error": "Exception: Command failed with exit code 1 (exit code: 1)\nError output: Check stderr output for details"}

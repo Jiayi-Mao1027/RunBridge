@@ -12,15 +12,21 @@ SKILL_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 USER_ROOT="$(cd -- "$SKILL_DIR/../../.." && pwd)"
 RUNNER="$USER_ROOT/.codex/protocol/bin/claude_skill_runner.py"
 OWNED_HELPER="$USER_ROOT/.codex/protocol/bin/owned_processes.py"
+PYTHON_BIN="${CLAUDE_PYTHON_BIN:-/data/conda/envs/mjy/bin/python3}"
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="$(command -v python3)"
+fi
 
 if [[ -z "$PACKET_PATH" ]]; then
   echo "missing packet path" >&2
   exit 2
 fi
 
-CLAUDE_MAX_THINKING_TOKENS="${CLAUDE_MAX_THINKING_TOKENS:-14000}"
-CLAUDE_MAX_TURNS="${CLAUDE_MAX_TURNS:-12}"
+CLAUDE_MAX_THINKING_TOKENS="${CLAUDE_MAX_THINKING_TOKENS:-32000}"
+CLAUDE_MAX_TURNS="${CLAUDE_MAX_TURNS:-144}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-acceptEdits}"
+CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-4-6}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}"
 CLAUDE_ADD_DIRS="${CLAUDE_ADD_DIRS:-}"
 
@@ -48,6 +54,7 @@ ARGS=(
   --disallowed-tool "Task"
   --disallowed-tool "WebFetch"
   --disallowed-tool "WebSearch"
+  --model "$CLAUDE_MODEL"
 )
 
 if [[ -n "$PHASE" ]]; then
@@ -98,7 +105,7 @@ if [[ -n "$CLAUDE_EXTRA_ARGS" ]]; then
   done
 fi
 
-python3 "$RUNNER" "${ARGS[@]}" &
+"$PYTHON_BIN" "$RUNNER" "${ARGS[@]}" &
 CHILD_PID=$!
-python3 "$OWNED_HELPER" register "$CHILD_PID" --label "cc-opus-coder:${RUN_ID:-manual}" --wrapper-pid "$BASHPID"
+"$PYTHON_BIN" "$OWNED_HELPER" register "$CHILD_PID" --label "cc-opus-coder:${RUN_ID:-manual}" --wrapper-pid "$BASHPID"
 wait "$CHILD_PID"

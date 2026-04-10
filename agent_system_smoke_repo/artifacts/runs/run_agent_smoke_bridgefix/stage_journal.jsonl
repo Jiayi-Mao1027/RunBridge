@@ -1,2 +1,0 @@
-{"ts": "2026-04-05T20:17:44Z", "role": "claude-anomaly-analyst", "phase": "analyze", "state": "started", "output_dir": "/data03/liang/mjy/agent_system_smoke_repo/artifacts/runs/run_agent_smoke_bridgefix/claude_anomaly/output"}
-{"ts": "2026-04-05T20:20:54Z", "role": "claude-anomaly-analyst", "phase": "analyze", "state": "failed", "output_dir": "/data03/liang/mjy/agent_system_smoke_repo/artifacts/runs/run_agent_smoke_bridgefix/claude_anomaly/output", "error": "Exception: Command failed with exit code 1 (exit code: 1)\nError output: Check stderr output for details"}
