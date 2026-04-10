@@ -1,7 +1,0 @@
-{
-  "written_at": "2026-04-10T09:54:47.952923+00:00",
-  "hook_payload": {
-    "source": "startup",
-    "model": "claude-sonnet-4-6"
-  }
-}
