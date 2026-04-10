@@ -1,0 +1,2 @@
+{"type": "task_created", "timestamp": "2026-04-10T09:54:49.328081+00:00", "project_root": "/data03/liang/mjy/safe_opd", "task_id": "task-demo", "layer": "L3", "team_name": "bridge-team", "teammate_name": "refresher"}
+{"type": "teammate_idle", "timestamp": "2026-04-10T09:56:31.734577+00:00", "project_root": "/data03/liang/mjy/safe_opd", "task_id": "task-demo", "team_name": "bridge-team", "teammate_name": "refresher", "result_kind": "partial"}
