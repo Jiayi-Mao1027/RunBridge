@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "agent": "leader-orchestrator",
+  "env": {
+    "ANTHROPIC_BASE_URL": "__REPLACE_BASE_URL__",
+    "ANTHROPIC_AUTH_TOKEN": "__REPLACE_AUTH_TOKEN__",
+    "API_TIMEOUT_MS": "600000",
+    "HTTP_PROXY": "",
+    "HTTPS_PROXY": ""
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"/data03/liang/mjy/.claude/hooks/session_start_summary.py\""
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"/data03/liang/mjy/.claude/hooks/task_created.py\""
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"/data03/liang/mjy/.claude/hooks/teammate_idle.py\""
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"/data03/liang/mjy/.claude/hooks/task_completed.py\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"/data03/liang/mjy/.claude/hooks/pre_bash_guard.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"/data03/liang/mjy/.claude/hooks/pre_edit_guard.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"/data03/liang/mjy/.claude/hooks/post_bash_check.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"/data03/liang/mjy/.claude/hooks/post_edit_check.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"/data03/liang/mjy/.claude/hooks/stop_guard.py\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"/data03/liang/mjy/.claude/hooks/session_end_checkpoint.py\""
+          }
+        ]
+      }
+    ]
+  },
+  "model": "gpt-5.4"
+}

@@ -1,0 +1,189 @@
+{
+  "schema_version": "0.3.0",
+  "workflow_name": "task_grouped_default",
+  "categories": {
+    "intra_group_default": {
+      "description": "Allowed by default inside the current phase group when frozen meaning is unchanged.",
+      "requires_user_approval": false,
+      "default_run_status": "in_progress",
+      "allowed_task_actions": [
+        "create_task",
+        "start_task",
+        "move_task_to_waiting",
+        "block_task",
+        "retry_task",
+        "complete_task",
+        "fail_task",
+        "abort_task",
+        "noop_task"
+      ],
+      "allowed_run_actions": [],
+      "must_record_transition": true,
+      "must_attach_reason": false
+    },
+    "cross_group_advance_default": {
+      "description": "Allowed by default when phase exit conditions are satisfied and control advances to the next allowed group.",
+      "requires_user_approval": false,
+      "default_run_status": "in_progress",
+      "allowed_task_actions": [
+        "complete_task",
+        "noop_task"
+      ],
+      "allowed_run_actions": [
+        "advance_phase"
+      ],
+      "must_record_transition": true,
+      "must_attach_reason": false
+    },
+    "cross_group_reroute_default": {
+      "description": "Allowed by default for reroutes between groups when frozen meaning is unchanged.",
+      "requires_user_approval": false,
+      "default_run_status": "in_progress",
+      "allowed_task_actions": [
+        "create_task",
+        "retry_task",
+        "block_task"
+      ],
+      "allowed_run_actions": [
+        "reroute_phase"
+      ],
+      "must_record_transition": true,
+      "must_attach_reason": true
+    },
+    "scope_change_requires_approval": {
+      "description": "Any change that modifies frozen meaning, target boundary, success definition, or intended change set requires explicit approval.",
+      "requires_user_approval": true,
+      "default_run_status": "awaiting_approval",
+      "allowed_task_actions": [],
+      "allowed_run_actions": [
+        "request_approval",
+        "resolve_approval"
+      ],
+      "must_record_transition": true,
+      "must_attach_reason": true
+    },
+    "external_side_effect_requires_approval": {
+      "description": "Actions with meaningful external side effects require explicit approval.",
+      "requires_user_approval": true,
+      "default_run_status": "awaiting_approval",
+      "allowed_task_actions": [],
+      "allowed_run_actions": [
+        "request_approval",
+        "resolve_approval"
+      ],
+      "must_record_transition": true,
+      "must_attach_reason": true
+    },
+    "hard_stop": {
+      "description": "Unsafe or policy-denied conditions block progress and move the run into blocked state.",
+      "requires_user_approval": true,
+      "default_run_status": "blocked",
+      "allowed_task_actions": [],
+      "allowed_run_actions": [
+        "mark_hard_stop",
+        "clear_hard_stop",
+        "request_approval",
+        "resolve_approval"
+      ],
+      "must_record_transition": true,
+      "must_attach_reason": true
+    }
+  },
+  "reason_code_mapping": {
+    "routine_fix_inside_group": "intra_group_default",
+    "phase_exit_condition_met": "cross_group_advance_default",
+    "reroute_without_semantic_change": "cross_group_reroute_default",
+    "frozen_semantics_changed": "scope_change_requires_approval",
+    "success_criteria_changed": "scope_change_requires_approval",
+    "target_boundary_changed": "scope_change_requires_approval",
+    "new_external_write_target": "external_side_effect_requires_approval",
+    "external_process_interference": "external_side_effect_requires_approval",
+    "unsafe_runtime_state": "hard_stop",
+    "policy_denied": "hard_stop",
+    "illegal_phase_transition": "hard_stop",
+    "illegal_task_transition": "hard_stop"
+  },
+  "phase_specific_rules": {
+    "leader_freeze": {
+      "allowed_categories": [
+        "intra_group_default",
+        "cross_group_advance_default",
+        "scope_change_requires_approval",
+        "hard_stop"
+      ]
+    },
+    "l2_advisory": {
+      "allowed_categories": [
+        "intra_group_default",
+        "cross_group_advance_default",
+        "cross_group_reroute_default",
+        "scope_change_requires_approval",
+        "hard_stop"
+      ]
+    },
+    "l3_bridge": {
+      "allowed_categories": [
+        "intra_group_default",
+        "cross_group_advance_default",
+        "cross_group_reroute_default",
+        "scope_change_requires_approval",
+        "hard_stop"
+      ]
+    },
+    "l4_implement": {
+      "allowed_categories": [
+        "intra_group_default",
+        "cross_group_advance_default",
+        "cross_group_reroute_default",
+        "scope_change_requires_approval",
+        "external_side_effect_requires_approval",
+        "hard_stop"
+      ]
+    },
+    "l4_execute": {
+      "allowed_categories": [
+        "intra_group_default",
+        "cross_group_advance_default",
+        "cross_group_reroute_default",
+        "scope_change_requires_approval",
+        "external_side_effect_requires_approval",
+        "hard_stop"
+      ]
+    },
+    "l4_anomaly": {
+      "allowed_categories": [
+        "intra_group_default",
+        "cross_group_advance_default",
+        "cross_group_reroute_default",
+        "scope_change_requires_approval",
+        "hard_stop"
+      ]
+    }
+  },
+  "default_decision_rules": [
+    {
+      "rule_id": "same_group_no_semantic_change_defaults_allowed",
+      "description": "Task transitions inside the same phase group default to intra_group_default when frozen meaning is unchanged."
+    },
+    {
+      "rule_id": "phase_exit_default_advance",
+      "description": "When all required phase-gate exit conditions are satisfied, advance_phase defaults to cross_group_advance_default."
+    },
+    {
+      "rule_id": "reroute_without_refreeze_defaults_allowed",
+      "description": "Reroute across groups without semantic change defaults to cross_group_reroute_default."
+    },
+    {
+      "rule_id": "semantic_change_requires_approval",
+      "description": "Any change to frozen meaning, success contract, or intended boundary must request approval."
+    },
+    {
+      "rule_id": "external_side_effect_requires_approval",
+      "description": "Meaningful external effects require approval before execution."
+    },
+    {
+      "rule_id": "unsafe_or_policy_denied_causes_hard_stop",
+      "description": "Unsafe runtime state or policy denial activates hard stop."
+    }
+  ]
+}

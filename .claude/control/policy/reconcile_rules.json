@@ -1,0 +1,233 @@
+{
+  "schema_version": "0.3.0",
+  "name": "task_grouped_reconcile_rules",
+  "description": "Deterministic reconciliation rules for deriving authoritative run state from task ledgers, transition records, phase graph, and approval matrix.",
+  "principles": [
+    "reconcile_is_deterministic",
+    "reconcile_is_not_a_planner",
+    "reconcile_does_not_create_hidden_phase_transitions",
+    "reconcile_derives_run_truth_from_task_truth",
+    "transition_record_precedes_state_change",
+    "run_completion_is_not_a_phase"
+  ],
+  "modes": {
+    "authoritative": {
+      "requires": [
+        "run_ledger",
+        "task_ledgers",
+        "transition_records",
+        "phase_graph",
+        "approval_matrix"
+      ]
+    },
+    "recovery": {
+      "requires": [
+        "run_ledger",
+        "task_ledgers",
+        "phase_graph",
+        "approval_matrix"
+      ],
+      "optional": [
+        "transition_records",
+        "checkpoint_snapshot",
+        "artifact_index"
+      ],
+      "must_emit_integrity_alert_if_missing_transition_records": true
+    }
+  },
+  "non_goals": [
+    "semantic_freeze",
+    "user_intent_interpretation",
+    "task_creation",
+    "implicit_phase_advance",
+    "prose_handoff_generation",
+    "hook_execution"
+  ],
+  "rebuild_indexes": {
+    "task_index": [
+      "all_task_ids",
+      "open_task_ids",
+      "active_task_ids",
+      "waiting_task_ids",
+      "blocked_task_ids",
+      "retryable_task_ids",
+      "completed_task_ids",
+      "failed_task_ids",
+      "aborted_task_ids",
+      "noop_task_ids",
+      "phase_gate_task_ids"
+    ],
+    "phase_task_index": [
+      "leader_freeze",
+      "l2_advisory",
+      "l3_bridge",
+      "l4_implement",
+      "l4_execute",
+      "l4_anomaly"
+    ]
+  },
+  "derive_rules": [
+    {
+      "rule_id": "derive_task_index_from_task_status",
+      "description": "All task index buckets are derived from task_ledger.status and task_ledger.phase_gate."
+    },
+    {
+      "rule_id": "derive_phase_task_index_from_task_group",
+      "description": "Per-phase task buckets are derived from task_ledger.task_group."
+    },
+    {
+      "rule_id": "derive_pending_approval",
+      "description": "If any active approval record is pending, run_status candidate becomes awaiting_approval unless hard_stop is active."
+    },
+    {
+      "rule_id": "derive_hard_stop",
+      "description": "If hard_stop.active is true, run_status candidate becomes blocked."
+    },
+    {
+      "rule_id": "derive_phase_exit_readiness",
+      "description": "A phase is exit-ready only when all required phase-gate tasks for that phase are in completed or noop state and none are blocked or failed."
+    },
+    {
+      "rule_id": "derive_completion_eligibility",
+      "description": "Run completion eligibility requires no open required phase-gate tasks, no pending required approval, and no active hard stop."
+    },
+    {
+      "rule_id": "derive_allowed_next_phases",
+      "description": "Allowed next phases are derived from phase_graph for the current phase, filtered by exit readiness and global rules."
+    },
+    {
+      "rule_id": "derive_allowed_next_actions",
+      "description": "Allowed next actions are derived from current phase, phase exit readiness, completion eligibility, approval state, and hard stop state."
+    }
+  ],
+  "invariants": [
+    {
+      "invariant_id": "current_phase_must_exist",
+      "description": "run_ledger.current_phase must exist in phase_graph.phases."
+    },
+    {
+      "invariant_id": "task_group_must_exist",
+      "description": "Each task_ledger.task_group must exist in phase_graph.phases."
+    },
+    {
+      "invariant_id": "depends_on_targets_must_exist",
+      "description": "Every task_id listed in depends_on must exist in the run task set."
+    },
+    {
+      "invariant_id": "l3_before_any_l4",
+      "description": "No L4 phase may be treated as valid if L3 bridge has not completed when downstream execution-facing work exists."
+    },
+    {
+      "invariant_id": "completion_requires_no_open_required_phase_gate_tasks",
+      "description": "Run may not be completion-eligible if required phase-gate tasks remain open, blocked, or failed."
+    },
+    {
+      "invariant_id": "illegal_phase_transition_is_alert",
+      "description": "If current phase is not reachable under phase_graph and prior transition history, reconcile must emit an integrity alert."
+    }
+  ],
+  "status_derivation_priority": [
+    "hard_stop",
+    "pending_approval",
+    "explicit_terminal_run_status",
+    "default_in_progress"
+  ],
+  "run_status_candidates": {
+    "hard_stop": "blocked",
+    "pending_approval": "awaiting_approval",
+    "completion_eligible_and_explicitly_completed": "completed",
+    "explicitly_aborted": "aborted",
+    "explicitly_failed": "failed",
+    "otherwise": "in_progress"
+  },
+  "allowed_next_actions_rules": [
+    {
+      "when": "hard_stop_active",
+      "allow": [
+        "clear_hard_stop",
+        "request_approval",
+        "resolve_approval",
+        "abort_run"
+      ]
+    },
+    {
+      "when": "pending_approval",
+      "allow": [
+        "resolve_approval",
+        "abort_run"
+      ]
+    },
+    {
+      "when": "phase_exit_not_ready",
+      "allow": [
+        "create_task",
+        "retry_task",
+        "complete_task",
+        "noop_task",
+        "fail_task",
+        "abort_task",
+        "request_approval",
+        "pause_run",
+        "abort_run"
+      ]
+    },
+    {
+      "when": "phase_exit_ready_and_completion_eligible",
+      "allow": [
+        "advance_phase",
+        "reroute_phase",
+        "create_task",
+        "request_approval",
+        "pause_run",
+        "complete_run",
+        "abort_run"
+      ]
+    },
+    {
+      "when": "phase_exit_ready_and_not_completion_eligible",
+      "allow": [
+        "advance_phase",
+        "reroute_phase",
+        "create_task",
+        "request_approval",
+        "pause_run",
+        "abort_run"
+      ]
+    }
+  ],
+  "reconcile_steps": [
+    "load_run_ledger",
+    "load_all_task_ledgers_for_run",
+    "load_transition_records_if_required_by_mode",
+    "validate_phase_and_task_group_membership",
+    "validate_task_dependency_targets",
+    "rebuild_task_index",
+    "rebuild_phase_task_index",
+    "derive_approval_and_hard_stop_state",
+    "derive_phase_exit_readiness",
+    "derive_completion_eligibility",
+    "derive_allowed_next_phases",
+    "derive_allowed_next_actions",
+    "emit_integrity_alerts",
+    "write_reconcile_result",
+    "write_run_ledger"
+  ],
+  "writeback_rules": [
+    {
+      "rule_id": "reconcile_may_update_run_ledger",
+      "description": "Reconcile writes derived fields back into run_ledger."
+    },
+    {
+      "rule_id": "reconcile_must_not_implicitly_advance_phase",
+      "description": "Reconcile may declare advance_phase allowed but may not itself change current_phase without an explicit transition record."
+    },
+    {
+      "rule_id": "reconcile_must_not_create_tasks",
+      "description": "Reconcile may recommend create_task but may not create tasks."
+    },
+    {
+      "rule_id": "reconcile_may_emit_followup_recommendations",
+      "description": "Reconcile may emit required_followup_actions when integrity alerts or hard-stop conditions exist."
+    }
+  ]
+}

@@ -1,0 +1,608 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "control/schemas/run_ledger.schema.json",
+  "title": "Run Ledger",
+  "description": "Authoritative workflow-level state for a phase-grouped, task-centric control runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "workflow_name",
+    "workflow_version",
+    "run_status",
+    "current_phase",
+    "phase_history",
+    "task_index",
+    "phase_task_index",
+    "allowed_next_actions",
+    "allowed_next_phases",
+    "approval_state",
+    "hard_stop",
+    "authoritative_artifacts",
+    "checkpoint_ref",
+    "last_transition_id",
+    "phase_exit_readiness",
+    "completion_summary",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.3.0"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[A-Za-z0-9._-]+$"
+    },
+    "workflow_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workflow_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_status": {
+      "type": "string",
+      "enum": [
+        "initialized",
+        "in_progress",
+        "awaiting_approval",
+        "paused",
+        "blocked",
+        "failed",
+        "completed",
+        "aborted"
+      ]
+    },
+    "current_phase": {
+      "type": "string",
+      "enum": [
+        "leader_freeze",
+        "l2_advisory",
+        "l3_bridge",
+        "l4_implement",
+        "l4_execute",
+        "l4_anomaly"
+      ]
+    },
+    "phase_history": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "phase",
+          "entered_at",
+          "status"
+        ],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "leader_freeze",
+              "l2_advisory",
+              "l3_bridge",
+              "l4_implement",
+              "l4_execute",
+              "l4_anomaly"
+            ]
+          },
+          "entered_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "exited_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "entered",
+              "completed",
+              "noop",
+              "rerouted",
+              "blocked",
+              "failed"
+            ]
+          },
+          "entry_reason": {
+            "type": "string"
+          },
+          "exit_reason": {
+            "type": "string"
+          },
+          "trigger_task_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^task_[A-Za-z0-9._-]+$"
+          },
+          "transition_in_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^tr_[A-Za-z0-9._-]+$"
+          },
+          "transition_out_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^tr_[A-Za-z0-9._-]+$"
+          }
+        }
+      }
+    },
+    "task_index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "all_task_ids",
+        "open_task_ids",
+        "active_task_ids",
+        "waiting_task_ids",
+        "blocked_task_ids",
+        "retryable_task_ids",
+        "completed_task_ids",
+        "failed_task_ids",
+        "aborted_task_ids",
+        "noop_task_ids",
+        "phase_gate_task_ids"
+      ],
+      "properties": {
+        "all_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "open_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "active_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "waiting_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "blocked_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "retryable_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "completed_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "failed_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "aborted_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "noop_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "phase_gate_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        }
+      }
+    },
+    "phase_task_index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "leader_freeze",
+        "l2_advisory",
+        "l3_bridge",
+        "l4_implement",
+        "l4_execute",
+        "l4_anomaly"
+      ],
+      "properties": {
+        "leader_freeze": {
+          "$ref": "#/$defs/phaseTaskBucket"
+        },
+        "l2_advisory": {
+          "$ref": "#/$defs/phaseTaskBucket"
+        },
+        "l3_bridge": {
+          "$ref": "#/$defs/phaseTaskBucket"
+        },
+        "l4_implement": {
+          "$ref": "#/$defs/phaseTaskBucket"
+        },
+        "l4_execute": {
+          "$ref": "#/$defs/phaseTaskBucket"
+        },
+        "l4_anomaly": {
+          "$ref": "#/$defs/phaseTaskBucket"
+        }
+      }
+    },
+    "allowed_next_actions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "create_task",
+          "complete_task",
+          "noop_task",
+          "fail_task",
+          "abort_task",
+          "retry_task",
+          "advance_phase",
+          "reroute_phase",
+          "pause_run",
+          "resume_run",
+          "request_approval",
+          "resolve_approval",
+          "mark_hard_stop",
+          "clear_hard_stop",
+          "complete_run",
+          "abort_run"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "allowed_next_phases": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "leader_freeze",
+          "l2_advisory",
+          "l3_bridge",
+          "l4_implement",
+          "l4_execute",
+          "l4_anomaly"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "approval_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pending",
+        "active_approval_ids",
+        "records"
+      ],
+      "properties": {
+        "pending": {
+          "type": "boolean"
+        },
+        "active_approval_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^apr_[A-Za-z0-9._-]+$"
+          },
+          "uniqueItems": true
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/approvalRecord"
+          }
+        }
+      }
+    },
+    "hard_stop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active"
+      ],
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "reason_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "unsafe_runtime_state",
+            "policy_denied",
+            "missing_required_evidence",
+            "illegal_phase_transition",
+            "illegal_task_transition",
+            "external_side_effect_blocked",
+            "manual_stop",
+            null
+          ]
+        },
+        "details": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^task_[A-Za-z0-9._-]+$"
+        },
+        "raised_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "authoritative_artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifactRef"
+      }
+    },
+    "checkpoint_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "last_transition_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^tr_[A-Za-z0-9._-]+$"
+    },
+    "phase_exit_readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current_phase",
+        "exit_ready",
+        "blocking_phase_gate_task_ids"
+      ],
+      "properties": {
+        "current_phase": {
+          "type": "string",
+          "enum": [
+            "leader_freeze",
+            "l2_advisory",
+            "l3_bridge",
+            "l4_implement",
+            "l4_execute",
+            "l4_anomaly"
+          ]
+        },
+        "exit_ready": {
+          "type": "boolean"
+        },
+        "blocking_phase_gate_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        }
+      }
+    },
+    "completion_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "completion_eligible",
+        "blocking_open_required_phase_gate_task_ids",
+        "pending_approval_blocks_completion",
+        "hard_stop_blocks_completion",
+        "finalized_at"
+      ],
+      "properties": {
+        "completion_eligible": {
+          "type": "boolean"
+        },
+        "blocking_open_required_phase_gate_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "pending_approval_blocks_completion": {
+          "type": "boolean"
+        },
+        "hard_stop_blocks_completion": {
+          "type": "boolean"
+        },
+        "finalized_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "closed_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "taskIdArray": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^task_[A-Za-z0-9._-]+$"
+      },
+      "uniqueItems": true
+    },
+    "phaseTaskBucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "all_task_ids",
+        "open_task_ids",
+        "active_task_ids",
+        "blocked_task_ids",
+        "completed_task_ids"
+      ],
+      "properties": {
+        "all_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "open_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "active_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "blocked_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        },
+        "completed_task_ids": {
+          "$ref": "#/$defs/taskIdArray"
+        }
+      }
+    },
+    "approvalRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approval_id",
+        "category",
+        "status",
+        "created_at"
+      ],
+      "properties": {
+        "approval_id": {
+          "type": "string",
+          "pattern": "^apr_[A-Za-z0-9._-]+$"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "intra_group_default",
+            "cross_group_advance_default",
+            "cross_group_reroute_default",
+            "scope_change_requires_approval",
+            "external_side_effect_requires_approval",
+            "hard_stop"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved",
+            "rejected",
+            "expired"
+          ]
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "leader_freeze",
+            "l2_advisory",
+            "l3_bridge",
+            "l4_implement",
+            "l4_execute",
+            "l4_anomaly",
+            null
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^task_[A-Za-z0-9._-]+$"
+        },
+        "details": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resolved_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "path",
+        "kind"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^art_[A-Za-z0-9._-]+$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "log",
+            "report",
+            "patch",
+            "config",
+            "result",
+            "checkpoint",
+            "evidence",
+            "other"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^task_[A-Za-z0-9._-]+$"
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "leader_freeze",
+            "l2_advisory",
+            "l3_bridge",
+            "l4_implement",
+            "l4_execute",
+            "l4_anomaly",
+            null
+          ]
+        },
+        "authoritative": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,213 @@
+{
+  "schema_version": "0.3.0",
+  "workflow_name": "task_grouped_default",
+  "workflow_version": "0.3.0",
+  "phases": [
+    {
+      "name": "leader_freeze",
+      "description": "Leader freezes execution-relevant meaning and defines the initial run basis.",
+      "optional": false,
+      "noop_allowed": false,
+      "retry_allowed": true,
+      "reroute_allowed": false,
+      "completion_allowed": false,
+      "entry_conditions": [],
+      "exit_conditions": [
+        "all_required_leader_freeze_phase_gate_tasks_closed"
+      ],
+      "required_task_kinds": [
+        "freeze_contract"
+      ],
+      "default_task_kinds": [
+        "freeze_contract"
+      ],
+      "allowed_next_phases": [
+        "l2_advisory",
+        "l3_bridge"
+      ],
+      "global_rules_applied": [
+        "phase_transition_requires_transition_record"
+      ]
+    },
+    {
+      "name": "l2_advisory",
+      "description": "Optional upstream advisory pass for challenge, planning, and semantic sharpening without changing frozen meaning by default.",
+      "optional": true,
+      "noop_allowed": true,
+      "retry_allowed": true,
+      "reroute_allowed": true,
+      "completion_allowed": false,
+      "entry_conditions": [
+        "phase_leader_freeze_completed"
+      ],
+      "exit_conditions": [
+        "all_required_l2_phase_gate_tasks_closed"
+      ],
+      "required_task_kinds": [],
+      "default_task_kinds": [
+        "advisory_pass"
+      ],
+      "allowed_next_phases": [
+        "l3_bridge"
+      ],
+      "global_rules_applied": [
+        "l2_may_noop"
+      ]
+    },
+    {
+      "name": "l3_bridge",
+      "description": "Mandatory bridge before any L4 downstream execution-facing work. This is the earliest completion-eligible phase.",
+      "optional": false,
+      "noop_allowed": true,
+      "retry_allowed": true,
+      "reroute_allowed": true,
+      "completion_allowed": true,
+      "entry_conditions": [
+        "phase_leader_freeze_completed"
+      ],
+      "exit_conditions": [
+        "all_required_l3_phase_gate_tasks_closed"
+      ],
+      "required_task_kinds": [
+        "bridge_preflight_gate"
+      ],
+      "default_task_kinds": [
+        "bridge_refresh",
+        "bridge_curation",
+        "bridge_preflight_gate"
+      ],
+      "allowed_next_phases": [
+        "l4_implement",
+        "l4_execute"
+      ],
+      "global_rules_applied": [
+        "l3_required_before_any_l4"
+      ]
+    },
+    {
+      "name": "l4_implement",
+      "description": "Implementation-facing downstream work. May produce code/config/file changes and may loop back or forward.",
+      "optional": true,
+      "noop_allowed": true,
+      "retry_allowed": true,
+      "reroute_allowed": true,
+      "completion_allowed": false,
+      "entry_conditions": [
+        "phase_l3_bridge_completed"
+      ],
+      "exit_conditions": [
+        "all_required_l4_implement_phase_gate_tasks_closed"
+      ],
+      "required_task_kinds": [],
+      "default_task_kinds": [
+        "implement_change",
+        "implement_run_gate"
+      ],
+      "allowed_next_phases": [
+        "l4_execute",
+        "l4_anomaly"
+      ],
+      "global_rules_applied": [
+        "l4_must_not_start_without_l3"
+      ]
+    },
+    {
+      "name": "l4_execute",
+      "description": "Execution-facing downstream work and postrun checks.",
+      "optional": true,
+      "noop_allowed": true,
+      "retry_allowed": true,
+      "reroute_allowed": true,
+      "completion_allowed": true,
+      "entry_conditions": [
+        "phase_l3_bridge_completed"
+      ],
+      "exit_conditions": [
+        "all_required_l4_execute_phase_gate_tasks_closed"
+      ],
+      "required_task_kinds": [],
+      "default_task_kinds": [
+        "execute_run",
+        "execute_postrun_check"
+      ],
+      "allowed_next_phases": [
+        "l4_anomaly",
+        "l4_implement"
+      ],
+      "global_rules_applied": [
+        "l4_must_not_start_without_l3"
+      ]
+    },
+    {
+      "name": "l4_anomaly",
+      "description": "Conditional anomaly analysis phase. May send control back to implement or execute, or allow run completion.",
+      "optional": true,
+      "noop_allowed": true,
+      "retry_allowed": true,
+      "reroute_allowed": true,
+      "completion_allowed": true,
+      "entry_conditions": [],
+      "exit_conditions": [
+        "all_required_l4_anomaly_phase_gate_tasks_closed"
+      ],
+      "required_task_kinds": [],
+      "default_task_kinds": [
+        "anomaly_analysis"
+      ],
+      "allowed_next_phases": [
+        "l4_implement",
+        "l4_execute"
+      ],
+      "global_rules_applied": [
+        "anomaly_is_conditional"
+      ]
+    }
+  ],
+  "global_rules": [
+    {
+      "rule_id": "phase_transition_requires_transition_record",
+      "description": "No run phase change is valid without an allowed transition record."
+    },
+    {
+      "rule_id": "task_transition_requires_transition_record",
+      "description": "No task state change is authoritative without an allowed transition record."
+    },
+    {
+      "rule_id": "l2_may_noop",
+      "description": "L2 may noop or be omitted."
+    },
+    {
+      "rule_id": "l3_required_before_any_l4",
+      "description": "No L4 phase may begin before L3 bridge has completed once downstream execution-facing work exists."
+    },
+    {
+      "rule_id": "l4_must_not_start_without_l3",
+      "description": "Both l4_implement and l4_execute require a completed l3_bridge phase."
+    },
+    {
+      "rule_id": "anomaly_is_conditional",
+      "description": "Run completion does not require l4_anomaly unless anomaly-triggering conditions are present."
+    },
+    {
+      "rule_id": "run_completion_is_not_a_phase",
+      "description": "Run completion is represented by run_status=completed, not by a terminal phase node."
+    },
+    {
+      "rule_id": "completion_requires_no_open_required_phase_gate_tasks",
+      "description": "Run may not complete while required phase-gate tasks remain open, blocked, or failed without explicit override."
+    }
+  ],
+  "completion_policy": {
+    "completion_is_phase_external": true,
+    "run_may_complete_from_phases": [
+      "l3_bridge",
+      "l4_execute",
+      "l4_anomaly"
+    ],
+    "completion_requires": [
+      "no_open_required_phase_gate_tasks",
+      "no_pending_required_approval",
+      "no_active_hard_stop"
+    ]
+  }
+}
