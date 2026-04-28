@@ -1,0 +1,129 @@
+{
+  "schema_version": "0.4.0",
+  "name": "bridge_window_reconcile_rules",
+  "description": "Deterministic reconciliation rules for deriving RuntimeSnapshot from runtime events, lifecycle transitions, bridge bindings, approvals, and hard-stop state.",
+  "principles": [
+    "runtime_events_are_append_only",
+    "check_update_notify_is_the_only_authoritative_mutation_path",
+    "reconcile_is_deterministic",
+    "reconcile_is_not_a_planner",
+    "phase_changes_are_explicit_events",
+    "bridge_window_lifecycle_is_auditable",
+    "failure_and_denial_events_are_first_class"
+  ],
+  "source_records": [
+    "run_ledger.json",
+    "event_log.jsonl",
+    "check_ledger.jsonl",
+    "update_ledger.jsonl",
+    "transitions.jsonl",
+    "main_leader_inbox.jsonl"
+  ],
+  "snapshot_fields": [
+    "semantic",
+    "scope",
+    "route",
+    "lifecycle",
+    "bindings",
+    "allowed_actions",
+    "allowed_routes",
+    "integrity",
+    "last_bridge_result",
+    "phase_exit_readiness"
+  ],
+  "derive_rules": [
+    {
+      "rule_id": "derive_lifecycle_status_index",
+      "description": "For each bridge_window_id, the latest accepted lifecycle transition defines lifecycle.status_index[bridge_window_id]."
+    },
+    {
+      "rule_id": "derive_open_bridge_windows",
+      "description": "Bridge windows whose latest status is not terminal remain in lifecycle.open_bridge_window_ids."
+    },
+    {
+      "rule_id": "derive_bindings",
+      "description": "BridgeWindowBinding, TeamBinding, TaskBinding, and ToolUseBinding are derived from accepted events and packet/binding fields."
+    },
+    {
+      "rule_id": "derive_phase_exit_readiness",
+      "description": "A phase is exit-ready only when there are no open bridge windows and no blocking integrity alert."
+    },
+    {
+      "rule_id": "derive_allowed_actions",
+      "description": "Allowed actions are derived from hard_stop, pending approval, and open bridge windows."
+    },
+    {
+      "rule_id": "derive_notify_items",
+      "description": "Notify items are emitted from check denials, update rejections, integrity state, bridge result status, timeout, partial, and orphan events."
+    }
+  ],
+  "invariants": [
+    {
+      "invariant_id": "one_team_per_bridge_window",
+      "description": "A bridge window may bind zero or one team while opening, and exactly one team after team_create_succeeded."
+    },
+    {
+      "invariant_id": "one_task_per_bridge_window",
+      "description": "A bridge window may bind zero or one task while opening, and exactly one task after taskcreated_hook_accepted."
+    },
+    {
+      "invariant_id": "task_team_mapping_is_singular",
+      "description": "BridgePacket.task_team_mapping must describe one task assigned to the bridge-owned team, not multiple independent tasks."
+    },
+    {
+      "invariant_id": "main_leader_does_not_contact_teammates",
+      "description": "Only bridge-leader may create teams, create tasks, dispatch teammate messages, complete tasks, or delete teams."
+    },
+    {
+      "invariant_id": "team_idle_is_not_completion",
+      "description": "TeamIdle/team_waiting never implies completion by itself; completion requires completion_contract_satisfied."
+    },
+    {
+      "invariant_id": "terminal_status_has_no_open_window",
+      "description": "Terminal bridge statuses remove the window from open_bridge_window_ids."
+    }
+  ],
+  "terminal_lifecycle_statuses": [
+    "bridge_call_denied",
+    "bridge_call_failed",
+    "bridge_window_returned",
+    "bridge_window_partial_returned",
+    "bridge_window_failed",
+    "bridge_window_orphaned"
+  ],
+  "allowed_next_actions_rules": [
+    {
+      "when": "hard_stop_active",
+      "allow": [
+        "clear_hard_stop",
+        "abort_run"
+      ]
+    },
+    {
+      "when": "pending_approval",
+      "allow": [
+        "resolve_approval",
+        "abort_run"
+      ]
+    },
+    {
+      "when": "open_bridge_windows_exist",
+      "allow": [
+        "record_bridge_event",
+        "mark_bridge_orphaned",
+        "abort_run"
+      ]
+    },
+    {
+      "when": "no_open_bridge_windows",
+      "allow": [
+        "call_bridge_sdk",
+        "record_bridge_event",
+        "advance_phase",
+        "reroute_phase",
+        "request_approval",
+        "abort_run"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "agent": "main-leader",
+  "env": {
+    "ANTHROPIC_BASE_URL": "__REPLACE_BASE_URL__",
+    "ANTHROPIC_AUTH_TOKEN": "__REPLACE_AUTH_TOKEN__",
+    "API_TIMEOUT_MS": "600000",
+    "HTTP_PROXY": "",
+    "HTTPS_PROXY": ""
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_user_prompt_submit.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "call_bridge_sdk|mcp__bridge__call_bridge_sdk|team_create|task_create|send_messages|send_message|task_complete|team_delete",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_pre_tool_use.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "call_bridge_sdk|mcp__bridge__call_bridge_sdk|team_create|task_create|send_messages|send_message|team_delete",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_post_tool_use.py"
+          }
+        ]
+      }
+    ],
+    "BridgeWindowOpened": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_bridge_event.py"
+          }
+        ]
+      }
+    ],
+    "BridgePacketAccepted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_bridge_event.py"
+          }
+        ]
+      }
+    ],
+    "BridgePacketRejected": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_bridge_event.py"
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_task_created.py"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_task_completed.py"
+          }
+        ]
+      }
+    ],
+    "TeamIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_team_idle.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_stop.py"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/hook_session_end.py"
+          }
+        ]
+      }
+    ]
+  }
+}

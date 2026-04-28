@@ -1,0 +1,112 @@
+{
+  "schema_version": "0.4.0",
+  "workflow_name": "bridge_window_workflow",
+  "categories": {
+    "control_default": {
+      "description": "Runtime control events that do not open or mutate a bridge window lifecycle directly.",
+      "requires_user_approval": false,
+      "allowed_event_kinds": [
+        "user_prompt_submitted",
+        "phase_advanced",
+        "route_rerouted"
+      ],
+      "must_record_transition": true
+    },
+    "bridge_call_default": {
+      "description": "Main-leader may call bridge when frozen semantics/scope are current, no hard stop exists, and no approval is pending.",
+      "requires_user_approval": false,
+      "allowed_event_kinds": [
+        "bridge_call_intended",
+        "pretooluse_allowed_by_main_leader",
+        "pretooluse_denied_by_main_leader",
+        "call_bridge_sdk_started"
+      ],
+      "must_record_transition": true
+    },
+    "bridge_window_internal_default": {
+      "description": "Bridge-leader may operate inside the one bridge window named by the accepted packet.",
+      "requires_user_approval": false,
+      "allowed_event_kinds": [
+        "bridge_window_opened",
+        "bridge_packet_accepted",
+        "team_create_started",
+        "team_create_succeeded",
+        "task_create_started",
+        "task_create_succeeded",
+        "taskcreated_hook_accepted",
+        "message_dispatch_started",
+        "message_dispatch_succeeded",
+        "team_idle_waiting",
+        "artifacts_ready",
+        "completion_contract_satisfied",
+        "team_delete_started",
+        "team_delete_succeeded",
+        "bridge_result_returned"
+      ],
+      "must_record_transition": true
+    },
+    "failure_recovery_default": {
+      "description": "Failure, denial, timeout, partial, rejected completion, and orphan facts are persisted even when they block normal progress.",
+      "requires_user_approval": false,
+      "allowed_event_kinds": [
+        "pretooluse_denied_by_main_leader",
+        "call_bridge_sdk_error",
+        "bridge_packet_rejected",
+        "team_create_failed",
+        "task_create_failed",
+        "taskcreated_hook_denied",
+        "message_dispatch_failed",
+        "wait_timeout_or_process_lost",
+        "completion_contract_rejected",
+        "bridge_leader_fails_task",
+        "task_failed_by_bridge_leader",
+        "team_delete_failed",
+        "bridge_result_returned_with_cleanup_required",
+        "orphan_timeout_without_bridge_return",
+        "orphan_timeout_without_heartbeat"
+      ],
+      "must_record_transition": true
+    },
+    "scope_change_requires_approval": {
+      "description": "Changing frozen semantics, frozen scope, success criteria, writable scope, approval requirements, or task/team boundary requires explicit user approval.",
+      "requires_user_approval": true,
+      "allowed_event_kinds": [
+        "request_approval",
+        "resolve_approval"
+      ],
+      "must_record_transition": true
+    },
+    "hard_stop": {
+      "description": "Unsafe or policy-denied runtime state blocks new bridge calls until explicitly cleared.",
+      "requires_user_approval": true,
+      "allowed_event_kinds": [
+        "mark_hard_stop",
+        "clear_hard_stop",
+        "abort_run"
+      ],
+      "must_record_transition": true
+    }
+  },
+  "default_decision_rules": [
+    {
+      "rule_id": "packet_scope_must_match_frozen_scope",
+      "description": "BridgePacket.frozen_scope must match RuntimeSnapshot.scope.frozen unless approval has been recorded."
+    },
+    {
+      "rule_id": "packet_semantics_must_match_frozen_semantics",
+      "description": "BridgePacket.frozen_semantics must match RuntimeSnapshot.semantic.frozen unless refresh/approval has been recorded."
+    },
+    {
+      "rule_id": "external_process_interference_requires_approval",
+      "description": "No role may terminate or interfere with a process it does not own without explicit authorization."
+    },
+    {
+      "rule_id": "approval_pending_blocks_bridge_call",
+      "description": "Pending approval blocks new bridge calls."
+    },
+    {
+      "rule_id": "hard_stop_blocks_bridge_call",
+      "description": "Hard stop blocks new bridge calls and scoped mutations."
+    }
+  ]
+}

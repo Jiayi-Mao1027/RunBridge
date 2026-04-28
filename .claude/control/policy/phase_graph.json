@@ -1,0 +1,137 @@
+{
+  "schema_version": "0.4.0",
+  "workflow_name": "bridge_window_workflow",
+  "workflow_version": "0.4.0",
+  "description": "Phase routing for the main-leader -> bridge-window -> bridge-leader workflow. Phase legality is route-level; bridge/team/task lifecycle legality is owned by lifecycle_transition_table.json and workflow_runtime.py.",
+  "phases": [
+    {
+      "name": "leader_freeze",
+      "description": "Main-leader reads runtime truth, accepts new user input, and freezes execution-relevant semantics/scope.",
+      "optional": false,
+      "completion_allowed": false,
+      "allowed_next_phases": [
+        "l2_advisory",
+        "l3_bridge"
+      ],
+      "exit_conditions": [
+        "frozen_semantics_exists",
+        "no_hard_stop",
+        "no_pending_approval"
+      ]
+    },
+    {
+      "name": "l2_advisory",
+      "description": "Optional advisory route for sharpening plan/semantics without downstream mutation.",
+      "optional": true,
+      "completion_allowed": false,
+      "allowed_next_phases": [
+        "l3_bridge"
+      ],
+      "exit_conditions": [
+        "advisory_complete_or_noop",
+        "no_hard_stop",
+        "no_pending_approval"
+      ]
+    },
+    {
+      "name": "l3_bridge",
+      "description": "Main-leader may open exactly one bridge window per bridge invocation. Bridge-leader owns the team/task lifecycle inside that window.",
+      "optional": false,
+      "completion_allowed": true,
+      "allowed_next_phases": [
+        "l4_implement",
+        "l4_execute",
+        "l4_anomaly"
+      ],
+      "exit_conditions": [
+        "no_open_bridge_windows",
+        "no_orphaned_dependent_window",
+        "no_hard_stop",
+        "no_pending_approval"
+      ]
+    },
+    {
+      "name": "l4_implement",
+      "description": "Implementation-facing work requested through bridge windows.",
+      "optional": true,
+      "completion_allowed": false,
+      "allowed_next_phases": [
+        "l4_execute",
+        "l4_anomaly"
+      ],
+      "exit_conditions": [
+        "no_open_bridge_windows",
+        "completion_contracts_satisfied_or_rerouted"
+      ]
+    },
+    {
+      "name": "l4_execute",
+      "description": "Execution-facing work, validation, and postrun checks requested through bridge windows.",
+      "optional": true,
+      "completion_allowed": true,
+      "allowed_next_phases": [
+        "l4_anomaly",
+        "l4_implement"
+      ],
+      "exit_conditions": [
+        "no_open_bridge_windows",
+        "execution_reports_collected"
+      ]
+    },
+    {
+      "name": "l4_anomaly",
+      "description": "Recovery/anomaly route for failed, partial, blocked, or orphaned bridge windows.",
+      "optional": true,
+      "completion_allowed": true,
+      "allowed_next_phases": [
+        "l3_bridge",
+        "l4_implement",
+        "l4_execute"
+      ],
+      "exit_conditions": [
+        "anomaly_resolved_or_reported",
+        "no_unaccounted_open_window"
+      ]
+    }
+  ],
+  "global_rules": [
+    {
+      "rule_id": "runtime_snapshot_is_truth",
+      "description": "Main-leader must read runtime_snapshot before dispatching the next bridge invocation."
+    },
+    {
+      "rule_id": "bridge_invocation_is_singular",
+      "description": "One bridge invocation window binds exactly one team and one task."
+    },
+    {
+      "rule_id": "main_leader_only_calls_bridge",
+      "description": "Main-leader does not directly create teams, tasks, or teammate messages."
+    },
+    {
+      "rule_id": "bridge_leader_owns_window_lifecycle",
+      "description": "Bridge-leader owns team_create, task_create, send_messages, task completion, and team_delete inside the bridge window."
+    },
+    {
+      "rule_id": "state_mutation_requires_event_check_update",
+      "description": "Authoritative runtime mutation must pass through RuntimeEvent -> CheckResult -> UpdateResult -> NotifyResult."
+    },
+    {
+      "rule_id": "failure_events_are_authoritative",
+      "description": "Denied, failed, partial, timeout, and orphaned lifecycle facts must be persisted instead of erased."
+    }
+  ],
+  "completion_policy": {
+    "completion_is_phase_external": true,
+    "run_may_complete_from_phases": [
+      "l3_bridge",
+      "l4_execute",
+      "l4_anomaly"
+    ],
+    "completion_requires": [
+      "no_open_bridge_windows",
+      "no_pending_required_approval",
+      "no_active_hard_stop",
+      "last_required_bridge_result_satisfied_report_contract"
+    ]
+  }
+}
