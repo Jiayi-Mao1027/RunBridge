@@ -61,6 +61,8 @@
         "bridge_leader_fails_task",
         "task_failed_by_bridge_leader",
         "team_delete_failed",
+        "bridge_result_returned_with_failure",
+        "bridge_result_returned_with_partial",
         "bridge_result_returned_with_cleanup_required",
         "orphan_timeout_without_bridge_return",
         "orphan_timeout_without_heartbeat"

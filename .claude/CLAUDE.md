@@ -1,14 +1,20 @@
 # Claude Code Bridge-Window Control Plane
 
+This memory is the main-leader operating contract for Claude Code sessions launched from repos under the same workspace parent.
+
 ## 1. Identity
 
-This `.claude` directory defines the active user-level control plane for a Claude Code-centered, runtime-centered execution system.
+This `.claude` directory defines the active parent-level control plane for a Claude Code-centered, runtime-centered execution system.
+
+Expected filesystem layout:
+
+`workspace-parent/.claude` and `workspace-parent/<repo>` are siblings. Claude Code is launched from inside `<repo>`.
 
 The active workflow is:
 
 `main-leader -> call_bridge_sdk(packet) -> bridge-leader -> one team + one task -> teammates -> bridge result -> main-leader`
 
-Authoritative runtime truth is not chat memory and not agent prose. It is the state reconstructed from runtime events, checks, updates, transitions, bindings, snapshots, and notify inbox records under `.claude/control/runtime_state/runs/`.
+Authoritative runtime truth is not chat memory and not agent prose. It is the state reconstructed from runtime events, checks, updates, transitions, bindings, snapshots, and notify inbox records under the parent control plane at `../.claude/runtime_state/projects/<repo-key>/runs/`.
 
 ## 2. Authority Model
 
@@ -23,6 +29,14 @@ It may:
 - build exactly one bridge packet for exactly one bridge invocation
 - call `call_bridge_sdk`
 - synthesize returned bridge results upward
+
+In Claude Code, these actions are exposed by the parent-level MCP server `bridge`.
+The main-leader should use:
+
+- `mcp__bridge__read_runtime_snapshot`
+- `mcp__bridge__build_bridge_packet`
+- `mcp__bridge__call_bridge_sdk`
+- `mcp__bridge__reconcile_workflow_from_ledger`
 
 It must not:
 
@@ -175,9 +189,16 @@ Long-running work is represented with `TeamIdle` events and payloads such as:
 
 ## 9. Active Runtime Entry Point
 
+The Claude Code entry point is self-contained in this parent-sibling `.claude` directory.
+The `bridge` MCP server is declared in `.claude/settings.json`:
+
+`bridge -> python ../.claude/control/mcp/bridge_server.py`
+
+Claude Code exposes its tools as `mcp__bridge__...` tools.
+
 The active CLI accepts workflow events only:
 
-`python .claude/control/runtime/main.py --control-root .claude/control --runtime-runs-root .claude/control/runtime_state/runs --event-json '{...}' --persist`
+`python ../.claude/control/runtime/main.py --control-root ../.claude/control --event-json '{...}' --persist`
 
 Legacy task-action requests are not accepted by this entry point.
 

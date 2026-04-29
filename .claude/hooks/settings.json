@@ -5,29 +5,29 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_user_prompt_submit.py"
+            "command": "python ../.claude/hooks/hook_user_prompt_submit.py"
           }
         ]
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "call_bridge_sdk|mcp__bridge__call_bridge_sdk|team_create|task_create|send_messages|send_message|task_complete|team_delete",
+        "matcher": "mcp__bridge__call_bridge_sdk|call_bridge_sdk|team_create|task_create|send_messages|send_message|task_complete|team_delete",
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_pre_tool_use.py"
+            "command": "python ../.claude/hooks/hook_pre_tool_use.py"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "call_bridge_sdk|mcp__bridge__call_bridge_sdk|team_create|task_create|send_messages|send_message|team_delete",
+        "matcher": "mcp__bridge__call_bridge_sdk|call_bridge_sdk|team_create|task_create|send_messages|send_message|team_delete",
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_post_tool_use.py"
+            "command": "python ../.claude/hooks/hook_post_tool_use.py"
           }
         ]
       }
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_bridge_event.py"
+            "command": "python ../.claude/hooks/hook_bridge_event.py"
           }
         ]
       }
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_bridge_event.py"
+            "command": "python ../.claude/hooks/hook_bridge_event.py"
           }
         ]
       }
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_bridge_event.py"
+            "command": "python ../.claude/hooks/hook_bridge_event.py"
           }
         ]
       }
@@ -67,7 +67,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_task_created.py"
+            "command": "python ../.claude/hooks/hook_task_created.py"
           }
         ]
       }
@@ -77,7 +77,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_task_completed.py"
+            "command": "python ../.claude/hooks/hook_task_completed.py"
           }
         ]
       }
@@ -87,7 +87,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_team_idle.py"
+            "command": "python ../.claude/hooks/hook_team_idle.py"
           }
         ]
       }
@@ -97,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_stop.py"
+            "command": "python ../.claude/hooks/hook_stop.py"
           }
         ]
       }
@@ -107,7 +107,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/hook_session_end.py"
+            "command": "python ../.claude/hooks/hook_session_end.py"
           }
         ]
       }

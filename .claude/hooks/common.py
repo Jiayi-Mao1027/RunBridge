@@ -45,7 +45,19 @@ def runtime_main() -> Path:
 
 
 def runtime_runs_root() -> Path:
-    return control_root() / "runtime_state" / "runs"
+    configured = os.environ.get("BRIDGE_RUNTIME_RUNS_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    project_root = Path(os.environ.get("BRIDGE_PROJECT_ROOT") or os.getcwd()).resolve()
+    return claude_root() / "runtime_state" / "projects" / project_state_key(project_root) / "runs"
+
+
+def project_state_key(project_root: Path) -> str:
+    import hashlib
+
+    normalized = str(project_root).lower()
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"{project_root.name}_{digest}"
 
 
 def detect_run_id(payload: dict[str, Any]) -> str | None:
@@ -53,6 +65,27 @@ def detect_run_id(payload: dict[str, Any]) -> str | None:
         value = payload.get(key) or os.environ.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    nested = _find_nested_run_id(payload)
+    if nested:
+        return nested
+    return None
+
+
+def _find_nested_run_id(value: Any) -> str | None:
+    if isinstance(value, dict):
+        binding = value.get("binding")
+        if isinstance(binding, dict):
+            run_id = binding.get("run_id")
+            if isinstance(run_id, str) and run_id.strip():
+                return run_id.strip()
+        for key in ("packet", "tool_input", "arguments", "event", "payload"):
+            nested = value.get(key)
+            found = _find_nested_run_id(nested)
+            if found:
+                return found
+        run_id = value.get("run_id")
+        if isinstance(run_id, str) and run_id.strip():
+            return run_id.strip()
     return None
 
 

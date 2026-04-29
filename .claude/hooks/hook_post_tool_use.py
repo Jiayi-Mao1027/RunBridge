@@ -29,15 +29,18 @@ def main() -> int:
     tool_name = str(payload.get("tool_name") or "").strip()
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     tool_response = payload.get("tool_response") if isinstance(payload.get("tool_response"), dict) else {}
+    tool_arguments = tool_input.get("arguments") if isinstance(tool_input.get("arguments"), dict) else {}
     status = str(payload.get("status") or tool_response.get("status") or "").lower()
     error = payload.get("error") or tool_response.get("error") or tool_response.get("error_or_null")
     failed = bool(error) or status in {"error", "failed", "failure"}
 
     packet = tool_input.get("packet") if isinstance(tool_input.get("packet"), dict) else {}
+    if not packet and isinstance(tool_arguments.get("packet"), dict):
+        packet = tool_arguments["packet"]
     binding = packet.get("binding", {}) if isinstance(packet, dict) else {}
     event_base = {
         "run_id": run_id,
-        "main_session_id": payload.get("main_session_id") or payload.get("session_id") or tool_input.get("main_session_id"),
+        "main_session_id": payload.get("main_session_id") or payload.get("session_id") or tool_input.get("main_session_id") or binding.get("main_session_id"),
         "sub_session_id": payload.get("sub_session_id") or tool_input.get("sub_session_id") or binding.get("sub_session_id"),
         "bridge_window_id": payload.get("bridge_window_id") or tool_input.get("bridge_window_id") or binding.get("bridge_window_id"),
         "team_id": payload.get("team_id") or tool_input.get("team_id") or tool_response.get("team_id"),
@@ -48,6 +51,12 @@ def main() -> int:
         "tool_use_id": payload.get("tool_use_id") or tool_input.get("tool_use_id"),
         "timestamp": now_iso(),
     }
+
+    if tool_name.startswith("mcp__bridge__") and tool_name in BRIDGE_TOOL_NAMES:
+        # The MCP bridge server records the bridge-window return from inside
+        # the bridge runtime. PostToolUse is retained for observability but
+        # must not append a second terminal lifecycle event.
+        return 0
 
     if tool_name in BRIDGE_TOOL_NAMES:
         event_kind = "call_bridge_sdk_error" if failed else "bridge_result_returned"

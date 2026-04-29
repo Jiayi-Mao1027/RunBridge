@@ -26,6 +26,9 @@ def main() -> int:
 
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     packet = tool_input.get("packet") if isinstance(tool_input, dict) else None
+    tool_arguments = tool_input.get("arguments") if isinstance(tool_input.get("arguments"), dict) else {}
+    if packet is None and isinstance(tool_arguments, dict):
+        packet = tool_arguments.get("packet")
     bridge_window_id = (
         tool_input.get("bridge_window_id")
         or payload.get("bridge_window_id")
@@ -41,7 +44,7 @@ def main() -> int:
     if tool_name in START_BY_TOOL:
         event = {
             "run_id": run_id,
-            "main_session_id": payload.get("main_session_id") or payload.get("session_id") or tool_input.get("main_session_id"),
+            "main_session_id": payload.get("main_session_id") or payload.get("session_id") or tool_input.get("main_session_id") or (packet or {}).get("binding", {}).get("main_session_id"),
             "sub_session_id": sub_session_id,
             "bridge_window_id": bridge_window_id,
             "team_id": payload.get("team_id") or tool_input.get("team_id"),
@@ -65,7 +68,7 @@ def main() -> int:
 
     intent_event = {
         "run_id": run_id,
-        "main_session_id": payload.get("main_session_id") or payload.get("session_id") or tool_input.get("main_session_id"),
+        "main_session_id": payload.get("main_session_id") or payload.get("session_id") or tool_input.get("main_session_id") or (packet or {}).get("binding", {}).get("main_session_id"),
         "sub_session_id": sub_session_id,
         "bridge_window_id": bridge_window_id,
         "agent_id": payload.get("agent_id") or "main-leader",

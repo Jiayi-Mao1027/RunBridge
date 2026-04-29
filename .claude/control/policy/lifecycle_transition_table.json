@@ -63,6 +63,8 @@
     ["team_delete_started", "team_delete_succeeded", "team_delete_completed"],
     ["team_delete_started", "team_delete_failed", "team_delete_failed"],
     ["team_delete_completed", "bridge_result_returned", "bridge_window_returned"],
+    ["team_delete_completed", "bridge_result_returned_with_failure", "bridge_window_failed"],
+    ["team_delete_completed", "bridge_result_returned_with_partial", "bridge_window_partial_returned"],
     ["team_delete_failed", "bridge_result_returned_with_cleanup_required", "bridge_window_partial_returned"]
   ]
 }

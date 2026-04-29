@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 import uuid
 
+from bridge_sdk import call_bridge_sdk
+from claude_cli_executor import simulated_team_executor
+from main_leader import decide_next_bridge_packet
 from workflow_runtime import dispatch_workflow_event
+from workflow_runtime import reconcile_workflow_from_ledger
 
 
 def _now() -> str:
@@ -225,6 +229,97 @@ def run_orphan(control_root: Path, runs_root: Path) -> dict:
     return dispatch(control_root, runs_root, event("orphan_timeout_without_bridge_return", bw, ss, agent_type="runtime", agent_id="orphan_scanner", payload={"last_known_event_ref": "call_bridge_sdk_started"}))
 
 
+def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
+    packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="run sdk bridge smoke task",
+        task_spec={"task_subject": "sdk bridge smoke", "task_kind": "bridge_window_smoke"},
+        team_spec={"team_name": "sdk_team"},
+    )
+    bridge_result = call_bridge_sdk(str(control_root), packet, runtime_runs_root=str(runs_root), persist=True, team_executor=simulated_team_executor)
+    if bridge_result.get("status") != "succeeded":
+        raise AssertionError(json.dumps(bridge_result, ensure_ascii=False, indent=2))
+    replay = reconcile_workflow_from_ledger(str(control_root), "run_demo", runtime_runs_root=str(runs_root), persist=True)
+    status = replay["runtime_snapshot"]["lifecycle"]["status_index"][packet["binding"]["bridge_window_id"]]
+    if status != "bridge_window_returned":
+        raise AssertionError(json.dumps(replay, ensure_ascii=False, indent=2))
+    failed_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="run failed sdk bridge smoke task",
+        task_spec={"task_subject": "sdk bridge failure smoke", "task_kind": "bridge_window_smoke"},
+        team_spec={"team_name": "sdk_failure_team"},
+    )
+    failed_result = call_bridge_sdk(
+        str(control_root),
+        failed_packet,
+        runtime_runs_root=str(runs_root),
+        persist=True,
+        team_executor=lambda _: {"status": "failed", "reports": [{"summary": "failed"}], "error_or_null": {"message": "intentional failure"}},
+    )
+    if failed_result.get("status") != "failed":
+        raise AssertionError(json.dumps(failed_result, ensure_ascii=False, indent=2))
+
+    partial_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="run partial sdk bridge smoke task",
+        task_spec={"task_subject": "sdk bridge partial smoke", "task_kind": "bridge_window_smoke"},
+        team_spec={"team_name": "sdk_partial_team"},
+    )
+    partial_result = call_bridge_sdk(
+        str(control_root),
+        partial_packet,
+        runtime_runs_root=str(runs_root),
+        persist=True,
+        team_executor=lambda _: {"status": "partial", "reports": [{"summary": "partial"}], "evidence": {"reason": "intentional partial"}},
+    )
+    if partial_result.get("status") != "partial_or_failed":
+        raise AssertionError(json.dumps(partial_result, ensure_ascii=False, indent=2))
+
+    reject_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="run rejected completion sdk bridge smoke task",
+        task_spec={"task_subject": "sdk bridge reject smoke", "task_kind": "bridge_window_smoke"},
+        team_spec={"team_name": "sdk_reject_team"},
+        completion_contract={
+            "required_outputs": ["report"],
+            "required_artifacts": ["artifact"],
+            "validation_requirements": [],
+            "success_criteria": ["artifact required"],
+            "allowed_partial_result": False,
+            "timeout_policy": None,
+        },
+    )
+    reject_result = call_bridge_sdk(str(control_root), reject_packet, runtime_runs_root=str(runs_root), persist=True, team_executor=simulated_team_executor)
+    if reject_result.get("status") != "failed":
+        raise AssertionError(json.dumps(reject_result, ensure_ascii=False, indent=2))
+
+    replay = reconcile_workflow_from_ledger(str(control_root), "run_demo", runtime_runs_root=str(runs_root), persist=True)
+    failed_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][failed_packet["binding"]["bridge_window_id"]]
+    partial_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][partial_packet["binding"]["bridge_window_id"]]
+    reject_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][reject_packet["binding"]["bridge_window_id"]]
+    return {
+        "bridge_window_id": packet["binding"]["bridge_window_id"],
+        "bridge_result_status": bridge_result["status"],
+        "replay_status": status,
+        "failed_status": failed_status,
+        "partial_status": partial_status,
+        "reject_status": reject_status,
+        "replayed_events": replay["source_summary"]["event_count"],
+    }
+
+
 def assert_denied(control_root: Path, runs_root: Path, payload: dict, expected_reason: str) -> None:
     result = dispatch_workflow_event(str(control_root), payload, runtime_runs_root=str(runs_root), persist=True)
     reasons = result.check_result.get("reasons", [])
@@ -304,11 +399,17 @@ def main() -> None:
         success = run_success(control_root, runs_root)
         failure = run_failure(control_root, runs_root)
         orphan = run_orphan(control_root, runs_root)
+        sdk = run_sdk_roundtrip(control_root, runs_root)
         negative = run_negative_tests(control_root, runs_root)
         summary = {
             "success_status": success["lifecycle"]["status_index"]["bw_success"],
             "failure_status": failure["lifecycle"]["status_index"]["bw_failed"],
             "orphan_status": orphan["lifecycle"]["status_index"]["bw_orphan"],
+            "sdk_status": sdk["bridge_result_status"],
+            "sdk_replay_status": sdk["replay_status"],
+            "sdk_failed_status": sdk["failed_status"],
+            "sdk_partial_status": sdk["partial_status"],
+            "sdk_reject_status": sdk["reject_status"],
             "negative_tests": negative["negative_tests"],
             "open_bridge_window_ids": orphan["lifecycle"]["open_bridge_window_ids"],
             "inbox_exists": (runs_root / "run_demo" / "main_leader_inbox.jsonl").exists(),
@@ -317,6 +418,11 @@ def main() -> None:
         assert summary["success_status"] == "bridge_window_returned"
         assert summary["failure_status"] == "bridge_call_failed"
         assert summary["orphan_status"] == "bridge_window_orphaned"
+        assert summary["sdk_status"] == "succeeded"
+        assert summary["sdk_replay_status"] == "bridge_window_returned"
+        assert summary["sdk_failed_status"] == "bridge_window_failed"
+        assert summary["sdk_partial_status"] == "bridge_window_partial_returned"
+        assert summary["sdk_reject_status"] == "bridge_window_failed"
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     finally:
         shutil.rmtree(runtime_dir, ignore_errors=True)

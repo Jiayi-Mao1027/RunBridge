@@ -8,7 +8,7 @@ Active path:
 
 The hooks do not write authoritative state directly. They call:
 
-`python .claude/control/runtime/main.py --event-json ... --persist`
+`python ../.claude/control/runtime/main.py --event-json ... --persist`
 
 Included hooks:
 

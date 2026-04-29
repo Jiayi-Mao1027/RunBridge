@@ -28,6 +28,7 @@ BRIDGE_LEADER_EVENTS = {
     "message_dispatch_succeeded",
     "message_dispatch_failed",
     "artifacts_ready",
+    "partial_evidence_collected",
     "bridge_leader_fails_task",
     "task_failed_by_bridge_leader",
     "team_delete_started",
@@ -125,7 +126,11 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "team_delete_succeeded": "team_delete_completed",
         "team_delete_failed": "team_delete_failed",
     },
-    "team_delete_completed": {"bridge_result_returned": "bridge_window_returned"},
+    "team_delete_completed": {
+        "bridge_result_returned": "bridge_window_returned",
+        "bridge_result_returned_with_failure": "bridge_window_failed",
+        "bridge_result_returned_with_partial": "bridge_window_partial_returned",
+    },
     "team_delete_failed": {"bridge_result_returned_with_cleanup_required": "bridge_window_partial_returned"},
 }
 
@@ -155,6 +160,8 @@ EVENT_TO_UPDATE_KIND = {
     "team_delete_succeeded": "persist_team_deleted",
     "team_delete_failed": "persist_team_delete_failed",
     "bridge_result_returned": "persist_bridge_result_returned",
+    "bridge_result_returned_with_failure": "persist_bridge_result_returned",
+    "bridge_result_returned_with_partial": "persist_bridge_result_returned",
     "bridge_result_returned_with_cleanup_required": "persist_bridge_result_returned",
     "orphan_timeout_without_bridge_return": "persist_bridge_window_orphaned",
     "orphan_timeout_without_heartbeat": "persist_bridge_window_orphaned",
@@ -687,6 +694,96 @@ def load_recent_workflow_events(paths: ControlPaths, run_id: str, *, limit: int 
     return records[-limit:]
 
 
+def reconcile_workflow_from_ledger(
+    control_root: str | Path,
+    run_id: str,
+    *,
+    runtime_runs_root: str | Path | None = None,
+    persist: bool = False,
+) -> dict[str, Any]:
+    paths = ControlPaths.from_root(control_root, runtime_runs_root)
+    current_run = load_json_file(paths.run_ledger_path(run_id), default={}) or {}
+    event_records = load_jsonl(paths.run_root(run_id) / "event_log.jsonl")
+    if not event_records:
+        base = _base_run_for_replay(current_run, run_id)
+        snapshot = build_runtime_snapshot(paths, base)
+        result = {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": run_id,
+            "mode": "ledger_replay",
+            "reconciled_at": _now_iso(),
+            "source_summary": {"event_count": 0, "transition_count": 0},
+            "runtime_snapshot": snapshot,
+            "integrity_alerts": [
+                {
+                    "level": "warn",
+                    "category": "empty_event_ledger",
+                    "message": "event_log.jsonl is empty; snapshot was derived from run_ledger only",
+                    "related_ids": {"run_id": run_id},
+                }
+            ],
+        }
+        if persist:
+            _persist_reconcile_replay(paths, run_id, base, snapshot, result)
+        return result
+
+    replay_run = _base_run_for_replay(current_run, run_id, first_event=event_records[0])
+    lifecycle_transitions = load_lifecycle_transitions(paths)
+    allowed_policy_events = load_allowed_policy_events(paths)
+    replayed: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+
+    for raw_event in event_records:
+        event = WorkflowEvent.from_payload(raw_event, replay_run)
+        snapshot_before = build_runtime_snapshot(paths, replay_run)
+        check_result = check_event(event, snapshot_before, lifecycle_transitions, allowed_policy_events)
+        update_kind = EVENT_TO_UPDATE_KIND.get(event.event_kind, "generic_runtime_update")
+        should_apply = check_result.decision == "allow" or update_kind in FAILURE_UPDATE_KINDS
+        if should_apply:
+            replay_run, transitions = update_runtime(event, replay_run, check_result, update_kind, lifecycle_transitions)
+        else:
+            transitions = []
+            replay_run.setdefault("recent_events", []).append(event.as_record())
+            replay_run["recent_events"] = replay_run["recent_events"][-50:]
+            rejected.append(
+                {
+                    "event_id": event.event_id,
+                    "event_kind": event.event_kind,
+                    "decision": check_result.decision,
+                    "reasons": check_result.reasons,
+                }
+            )
+        replayed.append(
+            {
+                "event_id": event.event_id,
+                "event_kind": event.event_kind,
+                "decision": check_result.decision,
+                "transition_ids": [transition["transition_id"] for transition in transitions],
+            }
+        )
+
+    snapshot = build_runtime_snapshot(paths, replay_run)
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "mode": "ledger_replay",
+        "reconciled_at": _now_iso(),
+        "source_summary": {
+            "event_count": len(event_records),
+            "transition_count": len(replay_run.get("workflow_transitions", [])),
+            "rejected_event_count": len(rejected),
+        },
+        "replayed_events": replayed,
+        "rejected_events": rejected,
+        "runtime_snapshot": snapshot,
+        "integrity_alerts": snapshot.get("integrity", {}).get("open_alerts", []),
+    }
+    replay_run["updated_at"] = result["reconciled_at"]
+    if persist:
+        _persist_reconcile_replay(paths, run_id, replay_run, snapshot, result)
+    return result
+
+
 def load_lifecycle_transitions(paths: ControlPaths) -> dict[str | None, dict[str, str]]:
     table_path = paths.control_root / "policy" / "lifecycle_transition_table.json"
     payload = load_json_file(table_path, default={}) or {}
@@ -794,22 +891,28 @@ def _apply_transition_to_run(run: dict[str, Any], event: WorkflowEvent, to_statu
         run["lifecycle"]["open_bridge_window_ids"] = sorted(open_ids)
 
     if event.team_id:
-        run["bindings"]["teams"].setdefault(
+        team_binding = run["bindings"]["teams"].setdefault(
             event.team_id,
             {
                 "run_id": event.run_id,
                 "sub_session_id": event.sub_session_id,
                 "bridge_window_id": event.bridge_window_id,
                 "team_id": event.team_id,
-                "team_name": event.payload.get("team_name") or event.team_id,
-                "teammate_ids": event.payload.get("teammate_ids", []),
+                "team_name": event.team_id,
+                "teammate_ids": [],
                 "owner_agent_id": event.agent_id,
                 "owner_agent_type": "bridge-leader",
             },
         )
+        if event.payload.get("team_name"):
+            team_binding["team_name"] = event.payload["team_name"]
+        if isinstance(event.payload.get("teammate_ids"), list):
+            team_binding["teammate_ids"] = event.payload["teammate_ids"]
+        if event.agent_type == "bridge-leader":
+            team_binding["owner_agent_id"] = event.agent_id
 
     if event.task_id:
-        run["bindings"]["tasks"].setdefault(
+        task_binding = run["bindings"]["tasks"].setdefault(
             event.task_id,
             {
                 "run_id": event.run_id,
@@ -821,6 +924,11 @@ def _apply_transition_to_run(run: dict[str, Any], event: WorkflowEvent, to_statu
                 "owner_agent_type": "bridge-leader" if event.agent_type == "bridge-leader" else event.agent_type,
             },
         )
+        if event.team_id:
+            task_binding["team_id"] = event.team_id
+        if event.agent_type == "bridge-leader":
+            task_binding["owner_agent_id"] = event.agent_id
+            task_binding["owner_agent_type"] = "bridge-leader"
 
     if event.tool_use_id:
         run["bindings"]["tool_uses"][event.tool_use_id] = {
@@ -836,7 +944,6 @@ def _apply_transition_to_run(run: dict[str, Any], event: WorkflowEvent, to_statu
         }
 
     run["workflow_transitions"].append(transition)
-    run["workflow_transitions"] = run["workflow_transitions"][-200:]
 
 
 def _new_bridge_binding(event: WorkflowEvent) -> dict[str, Any]:
@@ -1138,6 +1245,74 @@ def _changed_top_level_fields(before: dict[str, Any], after: dict[str, Any]) -> 
 
 def _empty_bindings() -> dict[str, Any]:
     return {"bridge_windows": {}, "teams": {}, "tasks": {}, "tool_uses": {}}
+
+
+def _base_run_for_replay(
+    current_run: dict[str, Any],
+    run_id: str,
+    *,
+    first_event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event_payload = first_event or {}
+    embedded_payload = event_payload.get("payload") if isinstance(event_payload.get("payload"), dict) else {}
+    packet = embedded_payload.get("packet") if isinstance(embedded_payload.get("packet"), dict) else {}
+    route = packet.get("phase_route") if isinstance(packet.get("phase_route"), list) else []
+    timestamp = str(event_payload.get("timestamp") or current_run.get("created_at") or _now_iso())
+    pure_replay = first_event is not None
+    main_session_id = str(event_payload.get("main_session_id") or (None if pure_replay else current_run.get("main_session_id")) or run_id)
+    semantic_seed = {"frozen": packet.get("frozen_semantics"), "frozen_at": timestamp if packet.get("frozen_semantics") is not None else None, "requires_refresh": False}
+    scope_seed = {"frozen": packet.get("frozen_scope"), "frozen_at": timestamp if packet.get("frozen_scope") is not None else None, "requires_refresh": False}
+    route_seed = {
+        "current_route": route,
+        "target_phase": packet.get("target_phase"),
+        "is_stale": False,
+        "decided_by_event_id": None,
+    }
+    base = {
+        "schema_version": SCHEMA_VERSION if pure_replay else current_run.get("schema_version") or SCHEMA_VERSION,
+        "run_id": run_id,
+        "main_session_id": main_session_id,
+        "workflow_name": "bridge_window_workflow" if pure_replay else current_run.get("workflow_name") or "bridge_window_workflow",
+        "workflow_version": SCHEMA_VERSION if pure_replay else current_run.get("workflow_version") or SCHEMA_VERSION,
+        "run_status": "in_progress" if pure_replay else current_run.get("run_status") if current_run.get("run_status") in {"completed", "aborted", "failed"} else "in_progress",
+        "current_phase": str(route[0]) if route else ("leader_freeze" if pure_replay else current_run.get("current_phase") or "leader_freeze"),
+        "semantic": deepcopy(semantic_seed if pure_replay else current_run.get("semantic") or semantic_seed),
+        "scope": deepcopy(scope_seed if pure_replay else current_run.get("scope") or scope_seed),
+        "route": deepcopy(route_seed if pure_replay else current_run.get("route") or route_seed),
+        "approval_state": deepcopy({"pending": False, "active_approval_ids": [], "records": []} if pure_replay else current_run.get("approval_state") or {"pending": False, "active_approval_ids": [], "records": []}),
+        "hard_stop": deepcopy({"active": False, "reason_code": None, "details": None, "task_id": None, "raised_at": None} if pure_replay else current_run.get("hard_stop") or {"active": False, "reason_code": None, "details": None, "task_id": None, "raised_at": None}),
+        "created_at": timestamp if pure_replay else current_run.get("created_at") or timestamp,
+        "updated_at": timestamp,
+        "closed_at": None if pure_replay else current_run.get("closed_at"),
+    }
+    _ensure_workflow_indexes(base)
+    return base
+
+
+def _persist_reconcile_replay(
+    paths: ControlPaths,
+    run_id: str,
+    run_ledger: dict[str, Any],
+    snapshot: dict[str, Any],
+    reconcile_result: dict[str, Any],
+) -> None:
+    run_root = paths.run_root(run_id)
+    atomic_write_json(paths.run_ledger_path(run_id), run_ledger)
+    atomic_write_json(run_root / "runtime_snapshot.json", snapshot)
+    atomic_write_json(run_root / "reconcile_result.json", reconcile_result)
+    transitions = run_ledger.get("workflow_transitions", [])
+    transitions_path = paths.transitions_path(run_id)
+    transitions_path.parent.mkdir(parents=True, exist_ok=True)
+    transitions_path.write_text(
+        "".join(f"{json_line}\n" for json_line in [_json_dumps(record) for record in transitions]),
+        encoding="utf-8",
+    )
+
+
+def _json_dumps(payload: dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _optional_str(value: Any) -> str | None:
