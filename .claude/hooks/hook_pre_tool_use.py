@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from common import detect_run_id, invoke_runtime_event, now_iso, pretool_deny, read_hook_input
+from common import detect_run_id, invoke_runtime_event, load_last_bridge_packet, now_iso, pretool_deny, read_hook_input
 
 
 BRIDGE_TOOL_NAMES = {"call_bridge_sdk", "mcp__bridge__call_bridge_sdk"}
@@ -16,19 +16,20 @@ START_BY_TOOL = {
 
 def main() -> int:
     payload = read_hook_input()
-    run_id = detect_run_id(payload)
-    if not run_id:
-        return 0
-
     tool_name = str(payload.get("tool_name") or "").strip()
     if tool_name not in BRIDGE_TOOL_NAMES and tool_name not in START_BY_TOOL:
         return 0
+    run_id = detect_run_id(payload)
+    if not run_id:
+        return pretool_deny("runtime run binding missing; SessionStart active-run is required before bridge lifecycle tools")
 
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     packet = tool_input.get("packet") if isinstance(tool_input, dict) else None
     tool_arguments = tool_input.get("arguments") if isinstance(tool_input.get("arguments"), dict) else {}
     if packet is None and isinstance(tool_arguments, dict):
         packet = tool_arguments.get("packet")
+    if packet is None and tool_name in BRIDGE_TOOL_NAMES:
+        packet = load_last_bridge_packet() or None
     bridge_window_id = (
         tool_input.get("bridge_window_id")
         or payload.get("bridge_window_id")

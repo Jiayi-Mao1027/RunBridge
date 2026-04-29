@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import uuid
@@ -19,7 +19,7 @@ WRITE_TOOLS = [*READ_ONLY_TOOLS, "Bash", "Edit", "Write"]
 DEFAULT_BRIDGE_LEADER_TOOLS = ["Agent", *WRITE_TOOLS]
 PHASE_BRIDGE_TOOLS = {
     "l2_advisory": ["Agent", *RESEARCH_TOOLS],
-    "l3_bridge": ["Agent", *READ_CHECK_TOOLS],
+    "l3_bridge": DEFAULT_BRIDGE_LEADER_TOOLS,
     "l4_implement": DEFAULT_BRIDGE_LEADER_TOOLS,
     "l4_execute": ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "Write"],
     "l4_anomaly": ["Agent", *READ_CHECK_TOOLS],
@@ -31,7 +31,7 @@ DEFAULT_FORBIDDEN_ACTIONS = [
 ]
 PHASE_OWNERSHIP_DEFAULTS = {
     "l2_advisory": {"readable_scopes": ["."], "writable_scopes": []},
-    "l3_bridge": {"readable_scopes": ["."], "writable_scopes": []},
+    "l3_bridge": {"readable_scopes": ["."], "writable_scopes": ["README.md", "docs/", "*.md"]},
     "l4_implement": {"readable_scopes": ["."], "writable_scopes": ["."]},
     "l4_execute": {"readable_scopes": ["."], "writable_scopes": ["."]},
     "l4_anomaly": {"readable_scopes": ["."], "writable_scopes": []},
@@ -95,13 +95,7 @@ def decide_next_bridge_packet(
     main_session_id: str | None = None,
     user_instruction: str | None = None,
     task_spec: dict[str, Any] | None = None,
-    team_spec: dict[str, Any] | None = None,
-    completion_contract: dict[str, Any] | None = None,
-    report_contract: dict[str, Any] | None = None,
     target_phase: str | None = None,
-    phase_route: list[str] | None = None,
-    approval_requirements: list[dict[str, Any]] | None = None,
-    expires_in_seconds: int | None = None,
 ) -> dict[str, Any]:
     snapshot = read_runtime_snapshot(control_root, run_id, runtime_runs_root=runtime_runs_root)
     return build_bridge_instruction_packet_for_this_invoke(
@@ -109,13 +103,7 @@ def decide_next_bridge_packet(
         main_session_id=main_session_id,
         user_instruction=user_instruction,
         task_spec=task_spec,
-        team_spec=team_spec,
-        completion_contract=completion_contract,
-        report_contract=report_contract,
         target_phase=target_phase,
-        phase_route=phase_route,
-        approval_requirements=approval_requirements,
-        expires_in_seconds=expires_in_seconds,
     )
 
 
@@ -125,13 +113,7 @@ def build_bridge_instruction_packet_for_this_invoke(
     main_session_id: str | None = None,
     user_instruction: str | None = None,
     task_spec: dict[str, Any] | None = None,
-    team_spec: dict[str, Any] | None = None,
-    completion_contract: dict[str, Any] | None = None,
-    report_contract: dict[str, Any] | None = None,
     target_phase: str | None = None,
-    phase_route: list[str] | None = None,
-    approval_requirements: list[dict[str, Any]] | None = None,
-    expires_in_seconds: int | None = None,
 ) -> dict[str, Any]:
     if snapshot.get("integrity", {}).get("has_hard_stop"):
         raise ValueError("cannot build bridge packet while hard_stop is active")
@@ -148,11 +130,11 @@ def build_bridge_instruction_packet_for_this_invoke(
     now = _now_iso()
 
     resolved_target_phase = _resolve_target_phase(snapshot, target_phase)
-    resolved_route = phase_route or _resolve_phase_route(snapshot, resolved_target_phase)
-    resolved_completion = completion_contract or _default_completion_contract()
-    resolved_report = report_contract or _default_report_contract()
+    resolved_route = _resolve_phase_route(snapshot, resolved_target_phase)
+    resolved_completion = _default_completion_contract()
+    resolved_report = _default_report_contract()
     bridge_allowed_tools = _default_bridge_tools(resolved_target_phase)
-    resolved_team = _normalize_team_spec(team_spec, target_phase=resolved_target_phase)
+    resolved_team = _normalize_team_spec(target_phase=resolved_target_phase)
     resolved_task = _normalize_task_spec(
         task_spec,
         user_instruction=user_instruction,
@@ -193,9 +175,9 @@ def build_bridge_instruction_packet_for_this_invoke(
         "report_contract": resolved_report,
         "allowed_actions": list(DEFAULT_BRIDGE_ACTIONS),
         "allowed_tools": list(bridge_allowed_tools),
-        "approval_requirements": list(approval_requirements or []),
+        "approval_requirements": [],
         "created_at": now,
-        "expires_at": _expiry(now, expires_in_seconds),
+        "expires_at": None,
     }
     return packet
 
@@ -214,31 +196,25 @@ def _resolve_target_phase(snapshot: dict[str, Any], requested: str | None) -> st
 
 def _resolve_phase_route(snapshot: dict[str, Any], target_phase: str) -> list[str]:
     route = snapshot.get("route", {}).get("current_route")
-    if isinstance(route, list) and route:
+    if isinstance(route, list) and route and str(route[-1]) == target_phase:
         return [str(item) for item in route]
     current = str(snapshot.get("current_phase") or "leader_freeze")
     return [current] if current == target_phase else [current, target_phase]
 
 
 def _normalize_team_spec(
-    team_spec: dict[str, Any] | None,
     *,
     target_phase: str,
 ) -> dict[str, Any]:
-    source = deepcopy(team_spec or {})
     if target_phase in PHASE_TEAM_DEFAULTS:
         teammates = _default_teammate_specs(target_phase)
         ownership = _default_ownership_boundary(target_phase)
     else:
-        teammates = source.get("teammate_specs")
-        if not isinstance(teammates, list) or not teammates:
-            teammates = _default_teammate_specs(target_phase)
-        ownership = source.get("ownership_boundary")
-        if not isinstance(ownership, dict):
-            ownership = _default_ownership_boundary(target_phase)
+        teammates = _default_teammate_specs(target_phase)
+        ownership = _default_ownership_boundary(target_phase)
     return {
-        "team_id_or_null": source.get("team_id_or_null"),
-        "team_name": str(source.get("team_name") or f"bridge-{target_phase}-team"),
+        "team_id_or_null": None,
+        "team_name": f"bridge-{target_phase}-team",
         "teammate_specs": teammates,
         "ownership_boundary": ownership,
     }
@@ -301,9 +277,9 @@ def _normalize_task_spec(
         "task_subject": subject,
         "task_description": description,
         "task_kind": str(source.get("task_kind") or "bridge_window_task"),
-        "target_phase": str(source.get("target_phase") or target_phase),
-        "completion_contract": deepcopy(source.get("completion_contract") or completion_contract),
-        "report_contract": deepcopy(source.get("report_contract") or report_contract),
+        "target_phase": target_phase,
+        "completion_contract": deepcopy(completion_contract),
+        "report_contract": deepcopy(report_contract),
     }
 
 
@@ -349,13 +325,6 @@ def _default_report_contract() -> dict[str, Any]:
         "include_failure_reason": True,
         "include_next_action_recommendation": True,
     }
-
-
-def _expiry(created_at: str, expires_in_seconds: int | None) -> str | None:
-    if expires_in_seconds is None:
-        return None
-    created = datetime.fromisoformat(created_at)
-    return (created + timedelta(seconds=expires_in_seconds)).isoformat()
 
 
 def _now_iso() -> str:

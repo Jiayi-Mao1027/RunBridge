@@ -199,9 +199,16 @@ class BridgeLeaderRuntime:
         result = self.team_executor(execution_input)
         if not isinstance(result, dict):
             raise BridgeExecutionError("task_complete", "team executor must return a dict")
-        result.setdefault("status", "succeeded")
-        result.setdefault("reports", [{"summary": "team executor completed", "event_ids": list(self.event_ids)}])
-        result.setdefault("artifact_refs", [])
+        status = result.get("status")
+        if status not in {"succeeded", "failed", "partial", "partial_or_failed"}:
+            raise BridgeExecutionError("task_complete", "team executor result must include a valid status")
+        reports = result.get("reports")
+        if not isinstance(reports, list):
+            raise BridgeExecutionError("task_complete", "team executor result must include reports list")
+        if status in {"succeeded", "partial", "partial_or_failed"} and not reports:
+            raise BridgeExecutionError("task_complete", "team executor result requires reports for non-failed status")
+        if not isinstance(result.get("artifact_refs"), list):
+            result["artifact_refs"] = []
         return result
 
     def _team_waiting(self, execution: dict[str, Any]) -> None:

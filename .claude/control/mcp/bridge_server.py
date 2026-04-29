@@ -179,13 +179,7 @@ def _tools() -> list[dict[str, Any]]:
                     "main_session_id": {"type": "string"},
                     "user_instruction": {"type": "string"},
                     "task_spec": {"type": "object"},
-                    "team_spec": {"type": "object"},
-                    "completion_contract": {"type": "object"},
-                    "report_contract": {"type": "object"},
                     "target_phase": {"type": "string"},
-                    "phase_route": {"type": "array", "items": {"type": "string"}},
-                    "approval_requirements": {"type": "array", "items": {"type": "object"}},
-                    "expires_in_seconds": {"type": "integer"},
                 },
                 "required": [],
                 "additionalProperties": False,
@@ -236,28 +230,24 @@ def _tools() -> list[dict[str, Any]]:
 def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     runtime_runs_root = _effective_runtime_runs_root(arguments)
     if tool_name == "read_runtime_snapshot":
-        result = read_runtime_snapshot(CONTROL_ROOT, _resolve_run_id(arguments, runtime_runs_root), runtime_runs_root=runtime_runs_root)
+        result = read_runtime_snapshot(CONTROL_ROOT, _resolve_run_id(arguments, runtime_runs_root, require_active=False), runtime_runs_root=runtime_runs_root)
     elif tool_name == "build_bridge_packet":
+        run_id = _resolve_run_id(arguments, runtime_runs_root, require_active=True)
+        _freeze_semantics_if_needed(arguments, run_id, runtime_runs_root)
         packet = decide_next_bridge_packet(
             CONTROL_ROOT,
-            _resolve_run_id(arguments, runtime_runs_root),
+            run_id,
             runtime_runs_root=runtime_runs_root,
             main_session_id=arguments.get("main_session_id"),
             user_instruction=arguments.get("user_instruction"),
             task_spec=arguments.get("task_spec"),
-            team_spec=arguments.get("team_spec"),
-            completion_contract=arguments.get("completion_contract"),
-            report_contract=arguments.get("report_contract"),
             target_phase=arguments.get("target_phase"),
-            phase_route=arguments.get("phase_route"),
-            approval_requirements=arguments.get("approval_requirements"),
-            expires_in_seconds=arguments.get("expires_in_seconds"),
         )
         _save_last_packet(runtime_runs_root, packet)
         result = {"packet": packet}
     elif tool_name == "call_bridge_sdk":
+        _resolve_run_id(arguments, runtime_runs_root, require_active=True)
         packet = arguments.get("packet") if isinstance(arguments.get("packet"), dict) else None
-        used_cached_packet = packet is None
         if packet is None:
             packet = _load_last_packet(runtime_runs_root)
         if packet is None:
@@ -268,7 +258,7 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
                 packet,
                 runtime_runs_root=runtime_runs_root,
                 persist=bool(arguments.get("persist", True)),
-                record_main_lifecycle=used_cached_packet,
+                record_main_lifecycle=False,
             )
         }
     elif tool_name == "dispatch_workflow_event":
@@ -292,7 +282,7 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     elif tool_name == "reconcile_workflow_from_ledger":
         result = reconcile_workflow_from_ledger(
             CONTROL_ROOT,
-            _resolve_run_id(arguments, runtime_runs_root),
+            _resolve_run_id(arguments, runtime_runs_root, require_active=True),
             runtime_runs_root=runtime_runs_root,
             persist=bool(arguments.get("persist", True)),
         )
@@ -342,7 +332,7 @@ def _last_packet_path(runtime_runs_root: str | Path) -> Path:
     return Path(runtime_runs_root) / ".last_bridge_packet.json"
 
 
-def _resolve_run_id(arguments: dict[str, Any], runtime_runs_root: str | Path) -> str:
+def _resolve_run_id(arguments: dict[str, Any], runtime_runs_root: str | Path, *, require_active: bool) -> str:
     run_id = str(arguments.get("run_id") or "").strip()
     if run_id:
         return run_id
@@ -353,7 +343,83 @@ def _resolve_run_id(arguments: dict[str, Any], runtime_runs_root: str | Path) ->
     active_run_id = str(active.get("run_id") or "").strip()
     if active_run_id:
         return active_run_id
+    if require_active:
+        raise ValueError("active run is required; SessionStart must create .active_run.json before this tool can run")
     return "current"
+
+
+def _freeze_semantics_if_needed(arguments: dict[str, Any], run_id: str, runtime_runs_root: str | Path) -> None:
+    snapshot = read_runtime_snapshot(CONTROL_ROOT, run_id, runtime_runs_root=runtime_runs_root)
+    semantic = snapshot.get("semantic", {}) if isinstance(snapshot.get("semantic"), dict) else {}
+    if semantic.get("frozen") is not None and not semantic.get("requires_refresh"):
+        return
+    frozen = _build_frozen_semantics(arguments)
+    event = {
+        "run_id": run_id,
+        "main_session_id": arguments.get("main_session_id") or snapshot.get("main_session_id") or run_id,
+        "agent_id": "mcp.build_bridge_packet",
+        "agent_type": "main-leader",
+        "event_kind": "semantic_frozen",
+        "timestamp": _now_iso(),
+        "payload": {
+            "frozen_semantics": frozen,
+            "reason": "build_bridge_packet requires current frozen semantics before bridge dispatch",
+        },
+    }
+    result = dispatch_workflow_event(CONTROL_ROOT, event, runtime_runs_root=runtime_runs_root, persist=True)
+    if not result.ok:
+        raise ValueError(f"semantic_frozen rejected by runtime: {result.check_result.get('reasons')}")
+
+
+def _build_frozen_semantics(arguments: dict[str, Any]) -> dict[str, Any]:
+    task_spec = arguments.get("task_spec") if isinstance(arguments.get("task_spec"), dict) else {}
+    return {
+        "user_instruction": _repair_mojibake(arguments.get("user_instruction")),
+        "task_subject": _repair_mojibake(task_spec.get("task_subject") or task_spec.get("subject")),
+        "task_kind": _repair_mojibake(task_spec.get("task_kind")),
+        "target_phase": _repair_mojibake(arguments.get("target_phase")),
+        "freeze_source": "mcp_build_bridge_packet",
+    }
+
+
+def _repair_mojibake(value: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        return value
+    markers = ("锛", "涓", "绯", "娴", "鎵", "閿", "€", "�")
+    if not any(marker in value for marker in markers):
+        return value
+    best = value
+    best_score = _text_quality_score(value)
+    for encoding in ("gbk", "cp936"):
+        for errors in ("strict", "ignore", "replace"):
+            try:
+                repaired = value.encode(encoding, errors=errors).decode("utf-8", errors="replace")
+            except UnicodeError:
+                continue
+            score = _text_quality_score(repaired)
+            if score > best_score:
+                best = repaired
+                best_score = score
+    return best
+
+
+def _text_quality_score(value: str) -> int:
+    mojibake_markers = ("锛", "涓", "绯", "娴", "鎵", "閿", "€", "�", "", "")
+    expected_terms = ("系统", "测试", "当前", "项目", "搭建", "框架", "执行", "报错", "失败")
+    score = _cjk_score(value)
+    score += sum(value.count(term) for term in expected_terms) * 20
+    score -= sum(value.count(marker) for marker in mojibake_markers) * 12
+    return score
+
+
+def _cjk_score(value: str) -> int:
+    return sum(1 for char in value if "\u4e00" <= char <= "\u9fff") - value.count("�") * 5 - value.count("?") * 2
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _load_active_run(runtime_runs_root: str | Path) -> dict[str, Any]:

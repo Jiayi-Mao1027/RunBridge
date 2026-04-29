@@ -14,7 +14,13 @@ def now_iso() -> str:
 
 
 def read_hook_input() -> dict[str, Any]:
-    raw = sys.stdin.read()
+    raw_bytes = sys.stdin.buffer.read()
+    if not raw_bytes.strip():
+        return {}
+    try:
+        raw = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raw = raw_bytes.decode(sys.stdin.encoding or "utf-8", errors="replace")
     if not raw.strip():
         return {}
     try:
@@ -76,6 +82,21 @@ def read_active_run(payload: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def write_active_run(payload: dict[str, Any]) -> None:
     write_json(active_run_path(), payload)
+
+
+def last_bridge_packet_path() -> Path:
+    return runtime_runs_root() / ".last_bridge_packet.json"
+
+
+def load_last_bridge_packet() -> dict[str, Any]:
+    path = last_bridge_packet_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def project_state_key(project_root: Path) -> str:
@@ -152,11 +173,14 @@ def invoke_runtime_event(event_payload: dict[str, Any], *, persist: bool = True)
     if persist:
         cmd.append("--persist")
 
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     proc = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env=env,
     )
 
     stdout = proc.stdout.strip()

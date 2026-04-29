@@ -12,14 +12,13 @@ HOOK_TO_EVENT = {
 
 def main() -> int:
     payload = read_hook_input()
-    run_id = detect_run_id(payload)
-    if not run_id:
-        return 0
-
     hook_name = str(payload.get("hook_event_name") or payload.get("hook_name") or "").strip()
     event_kind = str(payload.get("event_kind") or HOOK_TO_EVENT.get(hook_name) or "").strip()
     if event_kind not in set(HOOK_TO_EVENT.values()):
         return simple_block("Bridge event blocked: missing or unsupported event_kind.")
+    run_id = detect_run_id(payload)
+    if not run_id:
+        return simple_block("Bridge event blocked: runtime run binding missing; SessionStart active-run is required.")
 
     packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else {}
     binding = packet.get("binding", {}) if isinstance(packet, dict) else {}

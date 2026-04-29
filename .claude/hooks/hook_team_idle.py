@@ -7,7 +7,7 @@ def main() -> int:
     payload = read_hook_input()
     run_id = detect_run_id(payload)
     if not run_id:
-        return 0
+        return simple_block("TeamIdle blocked: runtime run binding missing; SessionStart active-run is required.")
 
     timed_out = bool(payload.get("timed_out") or payload.get("timeout") or payload.get("owned_process_lost"))
     event = {

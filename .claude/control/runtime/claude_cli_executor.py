@@ -45,25 +45,25 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     project_root = Path(os.environ.get("BRIDGE_PROJECT_ROOT") or Path.cwd()).resolve()
     packet = execution_input["packet"]
     prompt = _bridge_leader_prompt(packet, execution_input)
-    prompt_arg = _bridge_prompt_argument(project_root, prompt, execution_input)
+    prompt_path = _write_bridge_prompt_file(project_root, prompt, execution_input)
+    teammate_names = _teammate_agent_names(packet)
+    _ensure_project_agent_files(project_root, ["bridge-leader", *teammate_names])
     cmd = _claude_command_prefix() + [
         "-p",
-        prompt_arg,
+        "--agent",
+        "bridge-leader",
         "--output-format",
         "json",
         "--json-schema",
         json.dumps(BRIDGE_RESULT_SCHEMA, separators=(",", ":")),
         "--append-system-prompt",
-        _bridge_leader_system_prompt(),
+        "Return structured JSON only.",
         "--add-dir",
         str(project_root),
     ]
-    allowed_tools = _allowed_tools(packet)
+    allowed_tools = _allowed_tools(packet, teammate_names)
     if allowed_tools:
         cmd.extend(["--allowedTools", ",".join(allowed_tools)])
-    teammate_agents = _load_teammate_agents(packet)
-    if teammate_agents:
-        cmd.extend(["--agents", json.dumps(teammate_agents, ensure_ascii=False, separators=(",", ":"))])
 
     too_long = _command_too_long_for_windows(cmd)
     if too_long:
@@ -73,7 +73,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
             "artifact_refs": [],
             "evidence": {
                 "command_length": too_long,
-                "prompt_file": prompt_arg,
+                "prompt_file": str(prompt_path),
                 "platform": "windows",
             },
             "error_or_null": {"message": "claude cli command line would exceed Windows limit", "type": "CommandLineTooLong"},
@@ -83,6 +83,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     proc = subprocess.run(
         cmd,
         cwd=str(project_root),
+        input=prompt,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -108,7 +109,9 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
             "error_or_null": {"message": "claude cli bridge executor returned non-json output"},
             "cleanup_required": False,
         }
-    if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
+    if isinstance(payload, dict) and isinstance(payload.get("structured_output"), dict):
+        payload = payload["structured_output"]
+    elif isinstance(payload, dict) and isinstance(payload.get("result"), dict):
         payload = payload["result"]
     if not isinstance(payload, dict):
         return {
@@ -119,12 +122,41 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
             "error_or_null": {"message": "claude cli bridge executor returned invalid payload"},
             "cleanup_required": False,
         }
-    payload.setdefault("status", "succeeded")
-    payload.setdefault("reports", [])
-    payload.setdefault("artifact_refs", [])
-    payload.setdefault("evidence", {"bridge_window_id": execution_input["bridge_window_id"]})
-    payload.setdefault("error_or_null", None)
-    payload.setdefault("cleanup_required", False)
+    if payload.get("status") not in {"succeeded", "failed", "partial", "partial_or_failed"}:
+        return {
+            "status": "failed",
+            "reports": [{"summary": "claude cli bridge executor returned missing or invalid status"}],
+            "artifact_refs": [],
+            "evidence": {"stdout": proc.stdout[-4000:], "stderr": proc.stderr[-4000:]},
+            "error_or_null": {"message": "claude cli bridge executor returned missing or invalid status"},
+            "cleanup_required": False,
+        }
+    if not isinstance(payload.get("reports"), list):
+        return {
+            "status": "failed",
+            "reports": [{"summary": "claude cli bridge executor returned missing or invalid reports"}],
+            "artifact_refs": [],
+            "evidence": {"stdout": proc.stdout[-4000:], "stderr": proc.stderr[-4000:]},
+            "error_or_null": {"message": "claude cli bridge executor returned missing or invalid reports"},
+            "cleanup_required": False,
+        }
+    if payload["status"] in {"succeeded", "partial", "partial_or_failed"} and not payload["reports"]:
+        return {
+            "status": "failed",
+            "reports": [{"summary": "claude cli bridge executor returned no reports for non-failed status"}],
+            "artifact_refs": [],
+            "evidence": {"stdout": proc.stdout[-4000:], "stderr": proc.stderr[-4000:]},
+            "error_or_null": {"message": "claude cli bridge executor returned no reports for non-failed status"},
+            "cleanup_required": False,
+        }
+    if not isinstance(payload.get("artifact_refs"), list):
+        payload["artifact_refs"] = []
+    if "evidence" not in payload:
+        payload["evidence"] = {"bridge_window_id": execution_input["bridge_window_id"]}
+    if "error_or_null" not in payload:
+        payload["error_or_null"] = None
+    if "cleanup_required" not in payload:
+        payload["cleanup_required"] = False
     return payload
 
 
@@ -160,15 +192,12 @@ def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any
     )
 
 
-def _bridge_prompt_argument(project_root: Path, prompt: str, execution_input: dict[str, Any]) -> str:
-    """Keep the Windows process command line short by moving large packet text to a file."""
+def _write_bridge_prompt_file(project_root: Path, prompt: str, execution_input: dict[str, Any]) -> Path:
+    """Persist the prompt for audit while sending it to Claude through stdin."""
     prompt_path = _bridge_prompt_path(project_root, execution_input)
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
-    return (
-        "Read the bridge-window instruction packet from this UTF-8 file, then execute it and return only "
-        f"the requested JSON: {prompt_path}"
-    )
+    return prompt_path
 
 
 def _bridge_prompt_path(project_root: Path, execution_input: dict[str, Any]) -> Path:
@@ -219,25 +248,72 @@ def _load_teammate_agents(packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
         name = str(teammate.get("teammate_name") or "").strip()
         if name not in TEAMMATE_AGENT_NAMES:
             continue
+        frontmatter, _body = _load_agent_markdown(name)
         responsibilities = teammate.get("responsibilities")
         if not isinstance(responsibilities, list):
             responsibilities = []
         role = str(teammate.get("role") or "bridge teammate")
-        prompt = (
-            f"You are {name}, a {role} teammate for one bridge window. "
-            "Stay inside the BridgePacket assignment, tool boundary, and ownership boundary. "
-            "Return concise evidence and findings to bridge-leader. Responsibilities: "
-            + "; ".join(str(item) for item in responsibilities)
-        )
+        prompt = _compact_teammate_prompt(name, role, responsibilities)
         agent_config = {
-            "description": f"{name} teammate for this bridge packet",
+            "description": frontmatter.get("description") or f"{name} teammate for this bridge packet",
             "prompt": prompt,
         }
+        if frontmatter.get("model"):
+            agent_config["model"] = frontmatter["model"]
         tools = [str(item) for item in teammate.get("allowed_tools", []) if str(item).strip()]
         if tools:
             agent_config["tools"] = tools
         loaded[name] = agent_config
     return loaded
+
+
+def _teammate_agent_names(packet: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    teammate_specs = packet.get("team_spec", {}).get("teammate_specs", [])
+    if not isinstance(teammate_specs, list):
+        return names
+    for teammate in teammate_specs:
+        if not isinstance(teammate, dict):
+            continue
+        name = str(teammate.get("teammate_name") or "").strip()
+        if name in TEAMMATE_AGENT_NAMES and name not in names:
+            names.append(name)
+    return names
+
+
+def _ensure_project_agent_files(project_root: Path, names: list[str]) -> None:
+    source_dir = Path(__file__).resolve().parents[2] / "agents"
+    target_dir = project_root / ".claude" / "agents"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        source = source_dir / f"{name}.md"
+        if not source.exists():
+            continue
+        target = target_dir / source.name
+        source_text = source.read_text(encoding="utf-8")
+        if target.exists() and target.read_text(encoding="utf-8") == source_text:
+            continue
+        target.write_text(source_text, encoding="utf-8")
+
+
+def _compact_teammate_prompt(name: str, role: str, responsibilities: list[Any]) -> str:
+    responsibility_text = "; ".join(str(item) for item in responsibilities)
+    agent_path = f".claude/agents/{name}.md"
+    return (
+        f"You are {name}, a {role} teammate for one bridge window. "
+        f"Before acting, read {agent_path} and follow that static agent instruction. "
+        "The BridgePacket assignment, tool boundary, and ownership boundary override any broader default behavior. "
+        "Return concise evidence and findings to bridge-leader. "
+        f"Packet responsibilities: {responsibility_text}"
+    )
+
+
+def _load_agent_markdown(name: str) -> tuple[dict[str, str], str]:
+    agent_path = Path(__file__).resolve().parents[2] / "agents" / f"{name}.md"
+    if not agent_path.exists():
+        return {}, ""
+    text = agent_path.read_text(encoding="utf-8")
+    return _split_agent_markdown(text)
 
 
 def _parse_tools(raw: str) -> list[str]:
@@ -258,15 +334,26 @@ def _split_agent_markdown(text: str) -> tuple[dict[str, str], str]:
     return frontmatter, text.strip()
 
 
-def _allowed_tools(packet: dict[str, Any]) -> list[str]:
+def _allowed_tools(packet: dict[str, Any], teammate_names: list[str] | None = None) -> list[str]:
+    teammate_names = teammate_names if teammate_names is not None else _teammate_agent_names(packet)
+    agent_tool = _agent_tool_name(teammate_names)
     configured = packet.get("allowed_tools")
     if isinstance(configured, list) and configured:
-        tools = [str(item) for item in configured]
-        teammates = packet.get("team_spec", {}).get("teammate_specs", [])
-        if isinstance(teammates, list) and teammates and "Agent" not in tools:
-            return ["Agent", *tools]
+        tools = [str(item) for item in configured if str(item).strip()]
+        tools = [agent_tool if item == "Agent" or item.startswith("Agent(") else item for item in tools]
+        if teammate_names and agent_tool not in tools:
+            return [agent_tool, *tools]
         return tools
-    return ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"]
+    return [agent_tool, "Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"]
+
+
+def _agent_tool_name(teammate_names: list[str]) -> str:
+    if not teammate_names:
+        return "Agent"
+    allowed = [name for name in teammate_names if name in TEAMMATE_AGENT_NAMES]
+    if not allowed:
+        return "Agent"
+    return f"Agent({','.join(allowed)})"
 
 
 def _timeout_seconds(packet: dict[str, Any]) -> int:

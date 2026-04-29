@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from common import detect_run_id, invoke_runtime_event, now_iso, read_hook_input, simple_block
+from common import detect_run_id, invoke_runtime_event, load_last_bridge_packet, now_iso, read_hook_input, simple_block
 
 
 BRIDGE_TOOL_NAMES = {"call_bridge_sdk", "mcp__bridge__call_bridge_sdk"}
@@ -22,11 +22,13 @@ FAILURE_BY_TOOL = {
 
 def main() -> int:
     payload = read_hook_input()
+    tool_name = str(payload.get("tool_name") or "").strip()
+    if tool_name not in BRIDGE_TOOL_NAMES and tool_name not in SUCCESS_BY_TOOL:
+        return 0
     run_id = detect_run_id(payload)
     if not run_id:
-        return 0
+        return simple_block("PostToolUse blocked: runtime run binding missing; SessionStart active-run is required.")
 
-    tool_name = str(payload.get("tool_name") or "").strip()
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     tool_response = payload.get("tool_response") if isinstance(payload.get("tool_response"), dict) else {}
     tool_arguments = tool_input.get("arguments") if isinstance(tool_input.get("arguments"), dict) else {}
@@ -37,6 +39,8 @@ def main() -> int:
     packet = tool_input.get("packet") if isinstance(tool_input.get("packet"), dict) else {}
     if not packet and isinstance(tool_arguments.get("packet"), dict):
         packet = tool_arguments["packet"]
+    if not packet and tool_name in BRIDGE_TOOL_NAMES:
+        packet = load_last_bridge_packet()
     binding = packet.get("binding", {}) if isinstance(packet, dict) else {}
     event_base = {
         "run_id": run_id,
@@ -84,9 +88,6 @@ def main() -> int:
                 "teammate_ids": tool_response.get("teammate_ids") or tool_input.get("teammate_ids") or [],
             },
         }
-    else:
-        return 0
-
     code, result, stderr = invoke_runtime_event(event, persist=True)
     if code != 0:
         return simple_block(f"PostToolUse blocked: runtime invocation failed. {stderr or result!r}")

@@ -24,7 +24,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--main-session-id", default=None, help="Main session id for generated bridge packets")
     parser.add_argument("--user-instruction", default=None, help="User instruction to place in the generated task description")
     parser.add_argument("--task-spec-json", default=None, help="Inline JSON task_spec override for generated bridge packets")
-    parser.add_argument("--team-spec-json", default=None, help="Inline JSON team_spec override for generated bridge packets")
     parser.add_argument("--target-phase", default=None, help="Target phase override for generated bridge packets")
     parser.add_argument("--reconcile-from-ledger", action="store_true", help="Replay event_log.jsonl and rebuild run ledger/snapshot")
     parser.add_argument("--persist", action="store_true", help="Persist event/check/update/notify ledgers and snapshot")
@@ -89,7 +88,6 @@ def main() -> None:
             main_session_id=args.main_session_id,
             user_instruction=args.user_instruction,
             task_spec=load_optional_json(args.task_spec_json),
-            team_spec=load_optional_json(args.team_spec_json),
             target_phase=args.target_phase,
         )
         print(json.dumps({"packet": packet}, ensure_ascii=False, indent=2))

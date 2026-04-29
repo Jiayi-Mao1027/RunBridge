@@ -145,6 +145,7 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
 EVENT_TO_UPDATE_KIND = {
     "session_started": "record_session_started",
     "user_prompt_submitted": "record_user_prompt_submitted",
+    "semantic_frozen": "record_semantic_frozen",
     "phase_advanced": "advance_phase",
     "route_rerouted": "reroute_phase",
     "bridge_call_intended": "record_bridge_call_intent",
@@ -177,7 +178,7 @@ EVENT_TO_UPDATE_KIND = {
     "orphan_timeout_without_heartbeat": "persist_bridge_window_orphaned",
 }
 
-CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE = {"session_started", "user_prompt_submitted", "phase_advanced", "route_rerouted"}
+CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE = {"session_started", "user_prompt_submitted", "semantic_frozen", "phase_advanced", "route_rerouted"}
 
 FAILURE_UPDATE_KINDS = {
     "record_bridge_call_denied",
@@ -460,6 +461,12 @@ def check_event(
         "bridge_packet_missing_allowed_actions",
         "bridge_packet_missing_completion_contract",
         "bridge_packet_missing_report_contract",
+        "bridge_packet_completion_contract_not_policy_owned",
+        "bridge_packet_report_contract_not_policy_owned",
+        "bridge_packet_approval_requirements_not_runtime_owned",
+        "bridge_packet_expiry_not_runtime_owned",
+        "bridge_packet_phase_route_not_policy_owned",
+        "bridge_packet_l3_write_scope_not_policy_owned",
         "bridge_packet_implement_requires_write_authority",
         "taskcreated_payload_incomplete",
         "taskcreated_team_binding_invalid",
@@ -510,6 +517,12 @@ def update_runtime(
     if event.event_kind == "user_prompt_submitted":
         run.setdefault("semantic", {"frozen": None, "frozen_at": None, "requires_refresh": False})
         run["semantic"]["requires_refresh"] = True
+    elif event.event_kind == "semantic_frozen":
+        run.setdefault("semantic", {"frozen": None, "frozen_at": None, "requires_refresh": False})
+        frozen = event.payload.get("frozen_semantics")
+        run["semantic"]["frozen"] = deepcopy(frozen if frozen is not None else {})
+        run["semantic"]["frozen_at"] = event.timestamp
+        run["semantic"]["requires_refresh"] = False
     elif event.event_kind == "phase_advanced":
         target_phase = event.payload.get("target_phase")
         if target_phase:
@@ -1181,9 +1194,53 @@ def _validate_bridge_packet(packet: Any, event: WorkflowEvent, snapshot: dict[st
         reasons.append("bridge_packet_missing_completion_contract")
     if not isinstance(packet.get("report_contract"), dict) or not packet.get("report_contract"):
         reasons.append("bridge_packet_missing_report_contract")
+    reasons.extend(_validate_packet_policy_fields(packet, snapshot))
     if str(target_phase) == "l4_implement" and not _packet_has_write_authority(packet):
         reasons.append("bridge_packet_implement_requires_write_authority")
     return reasons
+
+
+def _validate_packet_policy_fields(packet: dict[str, Any], snapshot: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    completion = packet.get("completion_contract") if isinstance(packet.get("completion_contract"), dict) else {}
+    report = packet.get("report_contract") if isinstance(packet.get("report_contract"), dict) else {}
+    if "report" not in set(completion.get("required_outputs", [])):
+        reasons.append("bridge_packet_completion_contract_not_policy_owned")
+    if not isinstance(completion.get("timeout_policy"), dict) or completion.get("timeout_policy", {}).get("timeout_action") != "ask_main_leader":
+        reasons.append("bridge_packet_completion_contract_not_policy_owned")
+    if not {"summary", "evidence"}.issubset(set(report.get("required_sections", []))):
+        reasons.append("bridge_packet_report_contract_not_policy_owned")
+    if "runtime event ids" not in set(report.get("required_evidence", [])):
+        reasons.append("bridge_packet_report_contract_not_policy_owned")
+    if report.get("include_failure_reason") is not True or report.get("include_next_action_recommendation") is not True:
+        reasons.append("bridge_packet_report_contract_not_policy_owned")
+    if packet.get("approval_requirements") not in (None, []):
+        reasons.append("bridge_packet_approval_requirements_not_runtime_owned")
+    if packet.get("expires_at") is not None:
+        reasons.append("bridge_packet_expiry_not_runtime_owned")
+    if packet.get("phase_route") != _expected_phase_route(snapshot, str(packet.get("target_phase") or "")):
+        reasons.append("bridge_packet_phase_route_not_policy_owned")
+    if str(packet.get("target_phase")) == "l3_bridge" and not _packet_l3_write_scope_policy_owned(packet):
+        reasons.append("bridge_packet_l3_write_scope_not_policy_owned")
+    return reasons
+
+
+def _expected_phase_route(snapshot: dict[str, Any], target_phase: str) -> list[str]:
+    route = snapshot.get("route", {}).get("current_route")
+    if isinstance(route, list) and route and str(route[-1]) == target_phase:
+        return [str(item) for item in route]
+    current = str(snapshot.get("current_phase") or "leader_freeze")
+    return [current] if current == target_phase else [current, target_phase]
+
+
+def _packet_l3_write_scope_policy_owned(packet: dict[str, Any]) -> bool:
+    expected_writable_scopes = {"README.md", "docs/", "*.md"}
+    team_spec = packet.get("team_spec") if isinstance(packet.get("team_spec"), dict) else {}
+    ownership = team_spec.get("ownership_boundary") if isinstance(team_spec, dict) else {}
+    if not isinstance(ownership, dict):
+        return False
+    writable_scopes = {str(item) for item in ownership.get("writable_scopes", []) if str(item)}
+    return writable_scopes == expected_writable_scopes
 
 
 def _packet_has_write_authority(packet: dict[str, Any]) -> bool:

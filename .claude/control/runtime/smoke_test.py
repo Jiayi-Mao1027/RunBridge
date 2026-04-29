@@ -8,6 +8,8 @@ from pathlib import Path
 import uuid
 
 from bridge_sdk import call_bridge_sdk
+from claude_cli_executor import _allowed_tools
+from claude_cli_executor import _ensure_project_agent_files
 from claude_cli_executor import simulated_team_executor
 from main_leader import decide_next_bridge_packet
 from workflow_runtime import dispatch_workflow_event
@@ -108,11 +110,16 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
                 "validation_requirements": ["validated"],
                 "success_criteria": ["done"],
                 "allowed_partial_result": False,
-                "timeout_policy": None,
+                "timeout_policy": {
+                    "heartbeat_interval_seconds": 60,
+                    "soft_timeout_seconds": 900,
+                    "hard_timeout_seconds": 3600,
+                    "timeout_action": "ask_main_leader",
+                },
             },
             "report_contract": {
-                "required_sections": ["summary"],
-                "required_evidence": ["artifact"],
+                "required_sections": ["summary", "evidence"],
+                "required_evidence": ["runtime event ids", "artifact"],
                 "artifact_reporting_format": "list",
                 "include_failure_reason": True,
                 "include_next_action_recommendation": True,
@@ -129,11 +136,16 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
             "validation_requirements": ["validated"],
             "success_criteria": ["done"],
             "allowed_partial_result": False,
-            "timeout_policy": None,
+            "timeout_policy": {
+                "heartbeat_interval_seconds": 60,
+                "soft_timeout_seconds": 900,
+                "hard_timeout_seconds": 3600,
+                "timeout_action": "ask_main_leader",
+            },
         },
         "report_contract": {
-            "required_sections": ["summary"],
-            "required_evidence": ["artifact"],
+            "required_sections": ["summary", "evidence"],
+            "required_evidence": ["runtime event ids", "artifact"],
             "artifact_reporting_format": "list",
             "include_failure_reason": True,
             "include_next_action_recommendation": True,
@@ -243,7 +255,6 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         main_session_id="main_demo",
         user_instruction="run sdk bridge smoke task",
         task_spec={"task_subject": "sdk bridge smoke", "task_kind": "bridge_window_smoke"},
-        team_spec={"team_name": "sdk_team"},
     )
     bridge_result = call_bridge_sdk(str(control_root), packet, runtime_runs_root=str(runs_root), persist=True, team_executor=simulated_team_executor)
     if bridge_result.get("status") != "succeeded":
@@ -259,7 +270,6 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         main_session_id="main_demo",
         user_instruction="run failed sdk bridge smoke task",
         task_spec={"task_subject": "sdk bridge failure smoke", "task_kind": "bridge_window_smoke"},
-        team_spec={"team_name": "sdk_failure_team"},
     )
     failed_result = call_bridge_sdk(
         str(control_root),
@@ -288,7 +298,6 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         main_session_id="main_demo",
         user_instruction="run executor exception sdk bridge smoke task",
         task_spec={"task_subject": "sdk bridge exception smoke", "task_kind": "bridge_window_smoke"},
-        team_spec={"team_name": "sdk_exception_team"},
     )
     exception_result = call_bridge_sdk(
         str(control_root),
@@ -315,7 +324,6 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         main_session_id="main_demo",
         user_instruction="run partial sdk bridge smoke task",
         task_spec={"task_subject": "sdk bridge partial smoke", "task_kind": "bridge_window_smoke"},
-        team_spec={"team_name": "sdk_partial_team"},
     )
     partial_result = call_bridge_sdk(
         str(control_root),
@@ -334,16 +342,9 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         main_session_id="main_demo",
         user_instruction="run rejected completion sdk bridge smoke task",
         task_spec={"task_subject": "sdk bridge reject smoke", "task_kind": "bridge_window_smoke"},
-        team_spec={"team_name": "sdk_reject_team"},
-        completion_contract={
-            "required_outputs": ["report"],
-            "required_artifacts": ["artifact"],
-            "validation_requirements": [],
-            "success_criteria": ["artifact required"],
-            "allowed_partial_result": False,
-            "timeout_policy": None,
-        },
     )
+    reject_packet["completion_contract"]["required_artifacts"] = ["artifact"]
+    reject_packet["completion_contract"]["success_criteria"] = ["artifact required"]
     reject_result = call_bridge_sdk(str(control_root), reject_packet, runtime_runs_root=str(runs_root), persist=True, team_executor=simulated_team_executor)
     if reject_result.get("status") != "failed":
         raise AssertionError(json.dumps(reject_result, ensure_ascii=False, indent=2))
@@ -382,6 +383,86 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         "bridge_packet_frozen_semantics_mismatch",
     )
 
+    weak_contract = packet("bw_weak_contract", "sub_weak_contract")
+    weak_contract["completion_contract"]["required_outputs"] = []
+    weak_contract["task_spec"]["completion_contract"] = weak_contract["completion_contract"]
+    assert_denied(
+        control_root,
+        runs_root,
+        event("bridge_call_intended", "bw_weak_contract", "sub_weak_contract", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_weak_contract", payload={"packet": weak_contract}),
+        "bridge_packet_completion_contract_not_policy_owned",
+    )
+
+    caller_approval = packet("bw_caller_approval", "sub_caller_approval")
+    caller_approval["approval_requirements"] = [{"reason": "caller supplied approval policy"}]
+    assert_denied(
+        control_root,
+        runs_root,
+        event("bridge_call_intended", "bw_caller_approval", "sub_caller_approval", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_caller_approval", payload={"packet": caller_approval}),
+        "bridge_packet_approval_requirements_not_runtime_owned",
+    )
+
+    bad_l3_scope = packet("bw_bad_l3_scope", "sub_bad_l3_scope")
+    bad_l3_scope["target_phase"] = "l3_bridge"
+    bad_l3_scope["phase_route"] = ["l3_bridge"]
+    bad_l3_scope["team_spec"]["ownership_boundary"]["writable_scopes"] = ["."]
+    assert_denied(
+        control_root,
+        runs_root,
+        event("bridge_call_intended", "bw_bad_l3_scope", "sub_bad_l3_scope", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_bad_l3_scope", payload={"packet": bad_l3_scope}),
+        "bridge_packet_l3_write_scope_not_policy_owned",
+    )
+
+    hardened_l3 = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="l3 documentation scope smoke",
+        target_phase="l3_bridge",
+    )
+    l3_boundary = hardened_l3["team_spec"]["ownership_boundary"]
+    if set(l3_boundary.get("writable_scopes", [])) != {"README.md", "docs/", "*.md"}:
+        raise AssertionError(json.dumps(l3_boundary, ensure_ascii=False, indent=2))
+    l3_team_tools = {
+        tool
+        for teammate in hardened_l3["team_spec"]["teammate_specs"]
+        for tool in teammate.get("allowed_tools", [])
+    }
+    if "Write" not in set(hardened_l3.get("allowed_tools", [])) or "Write" not in l3_team_tools:
+        raise AssertionError(json.dumps(hardened_l3["team_spec"], ensure_ascii=False, indent=2))
+    hardened_l3_bw = hardened_l3["binding"]["bridge_window_id"]
+    hardened_l3_sub = hardened_l3["binding"]["sub_session_id"]
+    hardened_l3_tool = hardened_l3["binding"]["parent_tool_use_id"]
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "bridge_call_intended",
+            hardened_l3_bw,
+            hardened_l3_sub,
+            agent_type="main-leader",
+            agent_id="main",
+            tool_name="call_bridge_sdk",
+            tool_use_id=hardened_l3_tool,
+            payload={"packet": hardened_l3},
+        ),
+    )
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "pretooluse_denied_by_main_leader",
+            hardened_l3_bw,
+            hardened_l3_sub,
+            agent_type="main-leader",
+            agent_id="main",
+            tool_name="call_bridge_sdk",
+            tool_use_id=hardened_l3_tool,
+            payload={"reasons": ["l3 documentation scope smoke cleanup"]},
+        ),
+    )
+
     hardened_implement = decide_next_bridge_packet(
         str(control_root),
         "run_demo",
@@ -389,18 +470,6 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         main_session_id="main_demo",
         user_instruction="policy hardening smoke",
         target_phase="l4_implement",
-        team_spec={
-            "team_name": "caller_supplied_read_only_team",
-            "teammate_specs": [
-                {
-                    "teammate_name": "caller-worker",
-                    "role": "implement",
-                    "allowed_tools": ["Read", "Grep", "Glob"],
-                    "responsibilities": ["caller attempted to weaken implementation permissions"],
-                }
-            ],
-            "ownership_boundary": {"readable_scopes": [], "writable_scopes": [], "process_ownership_rules": [], "forbidden_actions": []},
-        },
     )
     hardened_tools = set(hardened_implement.get("allowed_tools", []))
     hardened_team = hardened_implement["team_spec"]
@@ -518,6 +587,29 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     return {"negative_tests": "passed"}
 
 
+def run_cli_executor_policy_tests(root: Path) -> dict:
+    cli_packet = packet("bw_cli_policy", "sub_cli_policy")
+    cli_packet["allowed_tools"] = ["Agent", "Read", "Grep", "Glob", "LS"]
+    cli_packet["team_spec"]["teammate_specs"] = [
+        {"teammate_name": "curator", "role": "curate", "allowed_tools": ["Read", "Write"], "responsibilities": []},
+        {"teammate_name": "preflight-initial", "role": "preflight", "allowed_tools": ["Read"], "responsibilities": []},
+        {"teammate_name": "refresher", "role": "refresh", "allowed_tools": ["Read", "Write"], "responsibilities": []},
+    ]
+    allowed_tools = _allowed_tools(cli_packet)
+    expected_agent_tool = "Agent(curator,preflight-initial,refresher)"
+    if expected_agent_tool not in allowed_tools or "Agent" in allowed_tools:
+        raise AssertionError(json.dumps(allowed_tools, ensure_ascii=False, indent=2))
+
+    project_root = root / "project_agent_sync"
+    _ensure_project_agent_files(project_root, ["bridge-leader", "curator", "preflight-initial", "refresher"])
+    for name in ["bridge-leader", "curator", "preflight-initial", "refresher"]:
+        agent_path = project_root / ".claude" / "agents" / f"{name}.md"
+        text = agent_path.read_text(encoding="utf-8")
+        if "model: gpt-main" not in text:
+            raise AssertionError(str(agent_path))
+    return {"cli_executor_policy": "passed"}
+
+
 def main() -> None:
     workspace_tmp = Path.cwd() / ".runtime_smoke_tmp"
     workspace_tmp.mkdir(parents=True, exist_ok=True)
@@ -530,6 +622,7 @@ def main() -> None:
         orphan = run_orphan(control_root, runs_root)
         sdk = run_sdk_roundtrip(control_root, runs_root)
         negative = run_negative_tests(control_root, runs_root)
+        cli_executor = run_cli_executor_policy_tests(runtime_dir)
         summary = {
             "success_status": success["lifecycle"]["status_index"]["bw_success"],
             "failure_status": failure["lifecycle"]["status_index"]["bw_failed"],
@@ -541,6 +634,7 @@ def main() -> None:
             "sdk_partial_status": sdk["partial_status"],
             "sdk_reject_status": sdk["reject_status"],
             "negative_tests": negative["negative_tests"],
+            "cli_executor_policy": cli_executor["cli_executor_policy"],
             "open_bridge_window_ids": orphan["lifecycle"]["open_bridge_window_ids"],
             "inbox_exists": (runs_root / "run_demo" / "main_leader_inbox.jsonl").exists(),
             "runtime_dir": str(runtime_dir),

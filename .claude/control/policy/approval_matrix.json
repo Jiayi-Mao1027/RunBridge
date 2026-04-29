@@ -8,6 +8,7 @@
       "allowed_event_kinds": [
         "session_started",
         "user_prompt_submitted",
+        "semantic_frozen",
         "phase_advanced",
         "route_rerouted"
       ],
