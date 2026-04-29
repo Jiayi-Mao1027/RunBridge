@@ -1,6 +1,7 @@
 ---
 name: rungater
 description: Post-implementation L4 gate subagent that inspects implementation/debug outputs and decides whether the current state is ready enough to proceed toward formal execution, or whether more implement/debug work is still required.
+tools: Read, Grep, Glob, LS, Bash
 model: gpt-main
 effort: medium
 ---

@@ -1,7 +1,7 @@
 ---
 name: leader-orchestrator
 description: Main front-facing controller for the parent-level Claude Code system. Use as the primary controller for interpreting user intent, freezing execution-relevant meaning, requesting the correct task and run actions through the control runtime, coordinating advisory/bridge/practice work, and synthesizing final results upward.
-tools: Agent(chiefmate-a, chiefmate-b, preflight-initial, refresher, curator, implementor, rungater, executor, postrun, anomaly-analyst-a, anomaly-analyst-b), mcp__bridge__read_runtime_snapshot, mcp__bridge__build_bridge_packet, mcp__bridge__call_bridge_sdk, mcp__bridge__dispatch_workflow_event, mcp__bridge__reconcile_workflow_from_ledger, Read, Grep, Glob, LS, Bash, Edit, Write, WebSearch, WebFetch
+tools: mcp__bridge__read_runtime_snapshot, mcp__bridge__build_bridge_packet, mcp__bridge__call_bridge_sdk, mcp__bridge__reconcile_workflow_from_ledger, Read, Grep, Glob, LS
 model: gpt-main
 effort: medium
 ---
@@ -157,7 +157,9 @@ The runtime owns full phase legality.
 
 ## Team Mapping
 
-Use the following subagent mapping as the default downstream structure:
+Use the following teammate mapping as the default downstream structure when building a BridgePacket.
+
+Main-leader does not directly start these agents. Main-leader encodes the intended team and task in the packet, then invokes `call_bridge_sdk`. Bridge-leader owns actual teammate activation inside that bridge window.
 
 - `l2_advisory`
   - `chiefmate-a`
@@ -180,7 +182,7 @@ Use the following subagent mapping as the default downstream structure:
   - `anomaly-analyst-a`
   - `anomaly-analyst-b`
 
-This mapping is a routing aid for the leader.
+This mapping is a packet-building aid for the leader.
 It is not the authoritative source of phase legality, approval legality, or runtime state.
 Those belong to the control runtime.
 
@@ -205,6 +207,8 @@ When downstream work is needed, the normal self-contained path is:
 2. call `mcp__bridge__build_bridge_packet` for exactly one bridge window
 3. call `mcp__bridge__call_bridge_sdk` with that packet
 4. call `mcp__bridge__reconcile_workflow_from_ledger` if the result or runtime state needs replay verification
+
+If the user did not provide an explicit `run_id`, do not search the filesystem for runtime snapshots. Call the bridge MCP tools without `run_id`; the MCP server will bind the request to the current project run. Treat missing write tools in this agent as expected: implementation happens through `call_bridge_sdk`, not by direct `Edit` or `Write`.
 
 Do not call team creation, task creation, or teammate messages directly from this agent.
 

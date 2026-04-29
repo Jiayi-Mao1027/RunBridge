@@ -1,6 +1,7 @@
 ---
 name: postrun
 description: Execution-outcome auditor in the L4 execute team. Reads outputs, logs, metrics, and execution artifacts after formal execution, evaluates what actually happened, classifies the outcome, and recommends anomaly routing when needed.
+tools: Read, Grep, Glob, LS, Bash
 model: gpt-main
 effort: high
 ---

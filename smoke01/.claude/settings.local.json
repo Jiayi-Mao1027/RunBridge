@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "bridge"
+  ],
+  "enableAllProjectMcpServers": true
+}

@@ -1,6 +1,7 @@
 ---
 name: curator
 description: L3 bridge subagent for curating the active downstream artifact surface, especially logs, datasets, checkpoints, retained outputs, and audit-facing organization before preflight and later execution-facing work proceeds.
+tools: Read, Grep, Glob, LS, Bash, Edit, Write
 model: gpt-main
 effort: high
 ---

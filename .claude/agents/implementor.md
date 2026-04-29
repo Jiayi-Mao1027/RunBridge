@@ -1,6 +1,7 @@
 ---
 name: implementor
 description: Main L4 implement subagent for turning the approved change set into code/config changes, bounded debug evidence, and a handoff-worthy implementation state for rungater. Use when implementation-facing work inside approved scope must actually be done.
+tools: Read, Grep, Glob, LS, Bash, Edit, Write
 model: gpt-main
 effort: high
 ---

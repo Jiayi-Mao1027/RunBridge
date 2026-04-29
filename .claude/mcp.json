@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "bridge": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "../.claude/control/mcp/bridge_server.py"
+      ],
+      "env": {
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    }
+  }
+}

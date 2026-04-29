@@ -1,6 +1,7 @@
 ---
 name: refresher
 description: Low-frequency L3 bridge subagent for refreshing human-facing repository documentation when frozen task meaning requires small README, usage-doc, or explanatory doc updates.
+tools: Read, Grep, Glob, LS, Edit, Write
 model: gpt-main
 effort: low
 ---

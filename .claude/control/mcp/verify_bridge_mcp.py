@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,8 +19,7 @@ REQUIRED_TOOLS = {
 
 def main() -> int:
     project_root = Path(__file__).resolve().parents[3]
-    settings_path = project_root / ".claude" / "settings.json"
-    mcp_config = json.loads(settings_path.read_text(encoding="utf-8"))
+    mcp_config = _load_mcp_config(project_root)
     bridge = mcp_config["mcpServers"]["bridge"]
     command = bridge["command"]
     args = bridge.get("args", [])
@@ -29,6 +29,19 @@ def main() -> int:
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "read_runtime_snapshot", "arguments": {"run_id": "verify_install_run"}}},
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "build_bridge_packet",
+                "arguments": {
+                    "run_id": "verify_install_run",
+                    "target_phase": "l4_implement",
+                    "user_instruction": "系统测试目标冻结为：在当前仓库中搭建一个 DPO 框架；遇到报错立即停止。",
+                },
+            },
+        },
     ]
     env = None
     if isinstance(bridge.get("env"), dict):
@@ -63,8 +76,27 @@ def main() -> int:
     if not call_response or call_response.get("error"):
         print(f"tools/call failed: {call_response}", file=sys.stderr)
         return 1
-    print(json.dumps({"ok": True, "tools": sorted(tools), "tested_tool_call": "read_runtime_snapshot"}, ensure_ascii=False, indent=2))
+    chinese_response = next((item for item in responses if item.get("id") == 4), None)
+    if not chinese_response or chinese_response.get("error"):
+        print(f"chinese build_bridge_packet failed: {chinese_response}", file=sys.stderr)
+        return 1
+    content = chinese_response.get("result", {}).get("content", [])
+    text = content[0].get("text", "") if content and isinstance(content[0], dict) else ""
+    packet_result = json.loads(text)
+    description = packet_result["packet"]["task_spec"]["task_description"]
+    if "系统测试目标冻结为" not in description or "当前仓库" not in description:
+        print(f"chinese roundtrip failed: {description}", file=sys.stderr)
+        return 1
+    print(json.dumps({"ok": True, "tools": sorted(tools), "tested_tool_call": "read_runtime_snapshot", "chinese_roundtrip": "passed"}, ensure_ascii=False, indent=2))
     return 0
+
+
+def _load_mcp_config(project_root: Path) -> dict:
+    mcp_path = project_root / ".claude" / "mcp.json"
+    if mcp_path.exists():
+        return json.loads(mcp_path.read_text(encoding="utf-8"))
+    settings_path = project_root / ".claude" / "settings.json"
+    return json.loads(settings_path.read_text(encoding="utf-8"))
 
 
 def _verify_cwd(project_root: Path, args: list[str]):
@@ -81,7 +113,7 @@ def _verify_cwd(project_root: Path, args: list[str]):
         smoke_repo = project_root / "smoke01"
         if smoke_repo.exists():
             return _StaticCwd(smoke_repo)
-        return _StaticCwd(Path(tempfile.mkdtemp(prefix="bridge_verify_repo_", dir=str(project_root))))
+        return _TemporaryCwd(Path(tempfile.mkdtemp(prefix="bridge_verify_repo_", dir=str(project_root))))
     return _StaticCwd(project_root)
 
 
@@ -93,6 +125,12 @@ class _StaticCwd:
         return self.path
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _TemporaryCwd(_StaticCwd):
+    def __exit__(self, exc_type, exc, tb) -> None:
+        shutil.rmtree(self.path, ignore_errors=True)
         return None
 
 

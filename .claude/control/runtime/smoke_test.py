@@ -23,6 +23,12 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def build_fixture(root: Path) -> tuple[Path, Path]:
     control_root = root / "control"
     runs_root = control_root / "runtime_state" / "runs"
@@ -264,6 +270,43 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
     )
     if failed_result.get("status") != "failed":
         raise AssertionError(json.dumps(failed_result, ensure_ascii=False, indent=2))
+    failed_events = [
+        item
+        for item in _read_jsonl(runs_root / "run_demo" / "event_log.jsonl")
+        if item.get("bridge_window_id") == failed_packet["binding"]["bridge_window_id"]
+    ]
+    failed_event_kinds = [item.get("event_kind") for item in failed_events]
+    if "team_executor_failed" not in failed_event_kinds:
+        raise AssertionError(json.dumps(failed_event_kinds, ensure_ascii=False, indent=2))
+    if "wait_timeout_or_process_lost" in failed_event_kinds:
+        raise AssertionError(json.dumps(failed_event_kinds, ensure_ascii=False, indent=2))
+
+    exception_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="run executor exception sdk bridge smoke task",
+        task_spec={"task_subject": "sdk bridge exception smoke", "task_kind": "bridge_window_smoke"},
+        team_spec={"team_name": "sdk_exception_team"},
+    )
+    exception_result = call_bridge_sdk(
+        str(control_root),
+        exception_packet,
+        runtime_runs_root=str(runs_root),
+        persist=True,
+        team_executor=lambda _: (_ for _ in ()).throw(FileNotFoundError("[WinError 206] file name too long")),
+    )
+    if exception_result.get("status") != "failed" or exception_result.get("failure_stage_or_null") != "team_wait":
+        raise AssertionError(json.dumps(exception_result, ensure_ascii=False, indent=2))
+    exception_events = [
+        item
+        for item in _read_jsonl(runs_root / "run_demo" / "event_log.jsonl")
+        if item.get("bridge_window_id") == exception_packet["binding"]["bridge_window_id"]
+    ]
+    exception_event_kinds = [item.get("event_kind") for item in exception_events]
+    if "team_executor_failed" not in exception_event_kinds or "wait_timeout_or_process_lost" in exception_event_kinds:
+        raise AssertionError(json.dumps(exception_event_kinds, ensure_ascii=False, indent=2))
 
     partial_packet = decide_next_bridge_packet(
         str(control_root),
@@ -307,6 +350,7 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
 
     replay = reconcile_workflow_from_ledger(str(control_root), "run_demo", runtime_runs_root=str(runs_root), persist=True)
     failed_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][failed_packet["binding"]["bridge_window_id"]]
+    exception_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][exception_packet["binding"]["bridge_window_id"]]
     partial_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][partial_packet["binding"]["bridge_window_id"]]
     reject_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][reject_packet["binding"]["bridge_window_id"]]
     return {
@@ -314,6 +358,7 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         "bridge_result_status": bridge_result["status"],
         "replay_status": status,
         "failed_status": failed_status,
+        "exception_status": exception_status,
         "partial_status": partial_status,
         "reject_status": reject_status,
         "replayed_events": replay["source_summary"]["event_count"],
@@ -335,6 +380,90 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         runs_root,
         event("bridge_call_intended", "bw_bad_semantic", "sub_bad_semantic", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_bad_semantic", payload={"packet": bad_semantic}),
         "bridge_packet_frozen_semantics_mismatch",
+    )
+
+    hardened_implement = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="policy hardening smoke",
+        target_phase="l4_implement",
+        team_spec={
+            "team_name": "caller_supplied_read_only_team",
+            "teammate_specs": [
+                {
+                    "teammate_name": "caller-worker",
+                    "role": "implement",
+                    "allowed_tools": ["Read", "Grep", "Glob"],
+                    "responsibilities": ["caller attempted to weaken implementation permissions"],
+                }
+            ],
+            "ownership_boundary": {"readable_scopes": [], "writable_scopes": [], "process_ownership_rules": [], "forbidden_actions": []},
+        },
+    )
+    hardened_tools = set(hardened_implement.get("allowed_tools", []))
+    hardened_team = hardened_implement["team_spec"]
+    hardened_team_tools = {
+        tool
+        for teammate in hardened_team["teammate_specs"]
+        for tool in teammate.get("allowed_tools", [])
+    }
+    if "Write" not in hardened_tools or "Write" not in hardened_team_tools:
+        raise AssertionError(json.dumps(hardened_implement, ensure_ascii=False, indent=2))
+    if not hardened_team["ownership_boundary"].get("writable_scopes"):
+        raise AssertionError(json.dumps(hardened_team["ownership_boundary"], ensure_ascii=False, indent=2))
+    hardened_bw = hardened_implement["binding"]["bridge_window_id"]
+    hardened_sub = hardened_implement["binding"]["sub_session_id"]
+    hardened_tool = hardened_implement["binding"]["parent_tool_use_id"]
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "bridge_call_intended",
+            hardened_bw,
+            hardened_sub,
+            agent_type="main-leader",
+            agent_id="main",
+            tool_name="call_bridge_sdk",
+            tool_use_id=hardened_tool,
+            payload={"packet": hardened_implement},
+        ),
+    )
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "pretooluse_denied_by_main_leader",
+            hardened_bw,
+            hardened_sub,
+            agent_type="main-leader",
+            agent_id="main",
+            tool_name="call_bridge_sdk",
+            tool_use_id=hardened_tool,
+            payload={"reasons": ["policy hardening smoke cleanup"]},
+        ),
+    )
+
+    bad_implement = packet("bw_bad_implement", "sub_bad_implement")
+    bad_implement["target_phase"] = "l4_implement"
+    bad_implement["phase_route"] = ["l4_implement"]
+    bad_implement["allowed_tools"] = ["Read", "Grep", "Glob"]
+    bad_implement["team_spec"]["teammate_specs"] = [
+        {
+            "teammate_id_or_null": None,
+            "teammate_name": "implementor",
+            "role": "implement",
+            "allowed_tools": ["Read", "Grep", "Glob"],
+            "responsibilities": ["attempt implementation without write authority"],
+        }
+    ]
+    bad_implement["team_spec"]["ownership_boundary"]["writable_scopes"] = []
+    assert_denied(
+        control_root,
+        runs_root,
+        event("bridge_call_intended", "bw_bad_implement", "sub_bad_implement", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_bad_implement", payload={"packet": bad_implement}),
+        "bridge_packet_implement_requires_write_authority",
     )
 
     open_packet = packet("bw_open", "sub_open")
@@ -408,6 +537,7 @@ def main() -> None:
             "sdk_status": sdk["bridge_result_status"],
             "sdk_replay_status": sdk["replay_status"],
             "sdk_failed_status": sdk["failed_status"],
+            "sdk_exception_status": sdk["exception_status"],
             "sdk_partial_status": sdk["partial_status"],
             "sdk_reject_status": sdk["reject_status"],
             "negative_tests": negative["negative_tests"],
@@ -421,6 +551,7 @@ def main() -> None:
         assert summary["sdk_status"] == "succeeded"
         assert summary["sdk_replay_status"] == "bridge_window_returned"
         assert summary["sdk_failed_status"] == "bridge_window_failed"
+        assert summary["sdk_exception_status"] == "bridge_window_failed"
         assert summary["sdk_partial_status"] == "bridge_window_partial_returned"
         assert summary["sdk_reject_status"] == "bridge_window_failed"
         print(json.dumps(summary, ensure_ascii=False, indent=2))

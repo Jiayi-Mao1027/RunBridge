@@ -8,12 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from loader import ControlPaths, load_json_file, load_jsonl
-from persist import append_jsonl, atomic_write_json
+from persist import append_jsonl, atomic_write_json, sanitize_json_value
 
 
 SCHEMA_VERSION = "0.4.0"
 
 AGENT_TYPES = {"main-leader", "bridge-leader", "teammate", "hook", "runtime"}
+AGENT_TYPE_ALIASES = {
+    "leader-orchestrator": "main-leader",
+}
 BRIDGE_LEADER_EVENTS = {
     "bridge_window_opened",
     "bridge_packet_accepted",
@@ -27,6 +30,7 @@ BRIDGE_LEADER_EVENTS = {
     "message_dispatch_started",
     "message_dispatch_succeeded",
     "message_dispatch_failed",
+    "team_executor_failed",
     "artifacts_ready",
     "partial_evidence_collected",
     "bridge_leader_fails_task",
@@ -97,7 +101,11 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "bridge_leader_fails_task": "task_failed",
         "bridge_result_returned": "bridge_window_failed",
     },
-    "message_dispatch_completed": {"team_idle_waiting": "team_waiting", "artifacts_ready": "task_completion_started"},
+    "message_dispatch_completed": {
+        "team_idle_waiting": "team_waiting",
+        "team_executor_failed": "task_failed",
+        "artifacts_ready": "task_completion_started",
+    },
     "team_waiting": {
         "team_idle_waiting": "team_waiting",
         "artifacts_ready": "task_completion_started",
@@ -135,6 +143,7 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
 }
 
 EVENT_TO_UPDATE_KIND = {
+    "session_started": "record_session_started",
     "user_prompt_submitted": "record_user_prompt_submitted",
     "phase_advanced": "advance_phase",
     "route_rerouted": "reroute_phase",
@@ -151,6 +160,7 @@ EVENT_TO_UPDATE_KIND = {
     "task_create_failed": "persist_task_create_failed",
     "message_dispatch_succeeded": "persist_message_dispatched",
     "message_dispatch_failed": "persist_message_dispatch_failed",
+    "team_executor_failed": "persist_task_failed",
     "team_idle_waiting": "persist_team_waiting",
     "wait_timeout_or_process_lost": "persist_team_wait_timeout",
     "completion_contract_satisfied": "persist_task_completed",
@@ -167,7 +177,7 @@ EVENT_TO_UPDATE_KIND = {
     "orphan_timeout_without_heartbeat": "persist_bridge_window_orphaned",
 }
 
-CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE = {"user_prompt_submitted", "phase_advanced", "route_rerouted"}
+CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE = {"session_started", "user_prompt_submitted", "phase_advanced", "route_rerouted"}
 
 FAILURE_UPDATE_KINDS = {
     "record_bridge_call_denied",
@@ -224,7 +234,7 @@ class WorkflowEvent:
             task_id=_optional_str(payload.get("task_id")),
             teammate_id=_optional_str(payload.get("teammate_id")),
             agent_id=str(payload.get("agent_id") or payload.get("requester") or "unknown"),
-            agent_type=str(payload.get("agent_type") or "runtime"),
+            agent_type=_normalize_agent_type(payload.get("agent_type")),
             tool_name=_optional_str(payload.get("tool_name")),
             tool_use_id=_optional_str(payload.get("tool_use_id")),
             payload=event_payload,
@@ -450,6 +460,7 @@ def check_event(
         "bridge_packet_missing_allowed_actions",
         "bridge_packet_missing_completion_contract",
         "bridge_packet_missing_report_contract",
+        "bridge_packet_implement_requires_write_authority",
         "taskcreated_payload_incomplete",
         "taskcreated_team_binding_invalid",
         "taskcreated_mapping_invalid",
@@ -523,7 +534,12 @@ def update_runtime(
     run.setdefault("recent_events", []).append(event_record)
     run["recent_events"] = run["recent_events"][-50:]
 
-    if event.event_kind in {"bridge_result_returned", "bridge_result_returned_with_cleanup_required"}:
+    if event.event_kind in {
+        "bridge_result_returned",
+        "bridge_result_returned_with_failure",
+        "bridge_result_returned_with_partial",
+        "bridge_result_returned_with_cleanup_required",
+    }:
         run["last_bridge_result"] = _build_bridge_result(event, to_status)
 
     return run, [transition]
@@ -569,6 +585,7 @@ def notify(event: WorkflowEvent, snapshot: dict[str, Any], check_result: CheckRe
         "team_create_failed": ("error", "team_create_failed", "retry_bridge_window_or_report_failure"),
         "task_create_failed": ("error", "task_create_failed", "delete_team_if_created_then_rebuild_task_packet"),
         "message_dispatch_failed": ("warn", "message_dispatch_failed", "retry_send_or_fail_task_inside_same_bridge_window"),
+        "team_executor_failed": ("error", "team_executor_failed", "report_failure_without_team_idle_timeout"),
         "team_idle_waiting": ("info", "team_waiting", "continue_waiting_or_poll_according_to_timeout_policy"),
         "wait_timeout_or_process_lost": ("error", "team_wait_timeout", "collect_partial_evidence_then_decide_retry_or_fail"),
         "completion_contract_rejected": ("warn", "task_completion_rejected", "continue_waiting_retry_collection_or_fail_task"),
@@ -1164,7 +1181,25 @@ def _validate_bridge_packet(packet: Any, event: WorkflowEvent, snapshot: dict[st
         reasons.append("bridge_packet_missing_completion_contract")
     if not isinstance(packet.get("report_contract"), dict) or not packet.get("report_contract"):
         reasons.append("bridge_packet_missing_report_contract")
+    if str(target_phase) == "l4_implement" and not _packet_has_write_authority(packet):
+        reasons.append("bridge_packet_implement_requires_write_authority")
     return reasons
+
+
+def _packet_has_write_authority(packet: dict[str, Any]) -> bool:
+    write_tools = {"Bash", "Edit", "Write", "MultiEdit"}
+    packet_tools = {str(item) for item in packet.get("allowed_tools", []) if str(item)}
+    team_spec = packet.get("team_spec") if isinstance(packet.get("team_spec"), dict) else {}
+    ownership = team_spec.get("ownership_boundary") if isinstance(team_spec, dict) else {}
+    writable_scopes = ownership.get("writable_scopes") if isinstance(ownership, dict) else []
+    teammate_specs = team_spec.get("teammate_specs") if isinstance(team_spec, dict) else []
+    teammate_tools: set[str] = set()
+    if isinstance(teammate_specs, list):
+        for teammate in teammate_specs:
+            if not isinstance(teammate, dict):
+                continue
+            teammate_tools.update(str(item) for item in teammate.get("allowed_tools", []) if str(item))
+    return bool(write_tools & (packet_tools | teammate_tools)) and bool(writable_scopes)
 
 
 def _validate_task_created_payload(event: WorkflowEvent, payload: dict[str, Any], binding: dict[str, Any] | None) -> list[str]:
@@ -1312,7 +1347,7 @@ def _persist_reconcile_replay(
 def _json_dumps(payload: dict[str, Any]) -> str:
     import json
 
-    return json.dumps(payload, ensure_ascii=False)
+    return json.dumps(sanitize_json_value(payload), ensure_ascii=False)
 
 
 def _optional_str(value: Any) -> str | None:
@@ -1320,6 +1355,11 @@ def _optional_str(value: Any) -> str | None:
         return None
     value = str(value).strip()
     return value or None
+
+
+def _normalize_agent_type(value: Any) -> str:
+    raw = str(value or "runtime").strip()
+    return AGENT_TYPE_ALIASES.get(raw, raw)
 
 
 def _now_iso() -> str:

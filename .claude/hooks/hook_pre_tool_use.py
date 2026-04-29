@@ -68,7 +68,7 @@ def main() -> int:
 
     intent_event = {
         "run_id": run_id,
-        "main_session_id": payload.get("main_session_id") or payload.get("session_id") or tool_input.get("main_session_id") or (packet or {}).get("binding", {}).get("main_session_id"),
+        "main_session_id": (packet or {}).get("binding", {}).get("main_session_id") or payload.get("main_session_id") or payload.get("session_id") or tool_input.get("main_session_id"),
         "sub_session_id": sub_session_id,
         "bridge_window_id": bridge_window_id,
         "agent_id": payload.get("agent_id") or "main-leader",

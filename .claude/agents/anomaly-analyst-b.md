@@ -1,6 +1,7 @@
 ---
 name: anomaly-analyst-b
 description: Read-only L4 anomaly subagent that activates after postrun recommends deeper investigation, builds evidence-backed hypotheses, critiques peer anomaly reasoning when relevant, and proposes minimal next validation steps.
+tools: Read, Grep, Glob, LS, Bash
 model: sonnet-main
 effort: medium
 ---

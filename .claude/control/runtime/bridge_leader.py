@@ -72,7 +72,23 @@ class BridgeLeaderRuntime:
             self._team_create()
             self._task_create()
             self._send_messages()
-            execution = self._run_team()
+            try:
+                execution = self._run_team()
+            except Exception as exc:
+                execution = {
+                    "status": "failed",
+                    "reports": [],
+                    "artifact_refs": [],
+                    "evidence": {"error_type": exc.__class__.__name__},
+                    "error_or_null": {"message": str(exc), "type": exc.__class__.__name__},
+                    "cleanup_required": False,
+                    "wait_reason": "team_executor_exception",
+                }
+                self._fail_task(execution, event_kind="team_executor_failed")
+                self._team_delete()
+                bridge_result = self._bridge_result("failed", "team_wait", execution)
+                self._return_bridge_result("bridge_result_returned_with_failure", bridge_result)
+                return bridge_result
             if execution.get("waiting"):
                 self._team_waiting(execution)
             if execution.get("status") in {"partial", "partial_or_failed"}:
@@ -85,10 +101,12 @@ class BridgeLeaderRuntime:
                 self._return_bridge_result("bridge_result_returned_with_partial", bridge_result, agent_type="main-leader")
                 return bridge_result
             if execution.get("status") == "failed":
-                if not execution.get("waiting"):
+                if execution.get("waiting"):
                     self._team_waiting(execution)
-                self._wait_timeout(execution)
-                self._fail_task(execution, event_kind="task_failed_by_bridge_leader")
+                    self._wait_timeout(execution)
+                    self._fail_task(execution, event_kind="task_failed_by_bridge_leader")
+                else:
+                    self._fail_task(execution, event_kind="team_executor_failed")
                 self._team_delete()
                 bridge_result = self._bridge_result("failed", "task_complete", execution)
                 self._return_bridge_result("bridge_result_returned_with_failure", bridge_result)
@@ -107,6 +125,14 @@ class BridgeLeaderRuntime:
             return bridge_result
         except BridgeExecutionError as exc:
             return self._fail_window(exc)
+        except Exception as exc:
+            return self._fail_window(
+                BridgeExecutionError(
+                    "bridge_return",
+                    str(exc),
+                    payload={"type": exc.__class__.__name__},
+                )
+            )
 
     def _accept_packet(self) -> None:
         if not self.run_id or not self.main_session_id or not self.sub_session_id or not self.bridge_window_id:
@@ -398,6 +424,8 @@ def _teammate_ids(team_spec: dict[str, Any]) -> list[str]:
 
 
 def _failure_stage_for_event(event_kind: str) -> str:
+    if event_kind == "team_executor_failed":
+        return "team_wait"
     if event_kind.startswith("team_create"):
         return "team_create"
     if event_kind.startswith("task_create") or event_kind.startswith("taskcreated"):

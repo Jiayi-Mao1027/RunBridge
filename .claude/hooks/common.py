@@ -52,6 +52,32 @@ def runtime_runs_root() -> Path:
     return claude_root() / "runtime_state" / "projects" / project_state_key(project_root) / "runs"
 
 
+def active_run_path() -> Path:
+    return runtime_runs_root() / ".active_run.json"
+
+
+def read_active_run(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    path = active_run_path()
+    if not path.exists():
+        return {}
+    try:
+        active = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(active, dict):
+        return {}
+    payload = payload or {}
+    session_id = str(payload.get("session_id") or payload.get("sessionId") or payload.get("main_session_id") or "").strip()
+    active_session_id = str(active.get("session_id") or active.get("main_session_id") or "").strip()
+    if session_id and active_session_id and session_id != active_session_id:
+        return {}
+    return active
+
+
+def write_active_run(payload: dict[str, Any]) -> None:
+    write_json(active_run_path(), payload)
+
+
 def project_state_key(project_root: Path) -> str:
     import hashlib
 
@@ -68,6 +94,10 @@ def detect_run_id(payload: dict[str, Any]) -> str | None:
     nested = _find_nested_run_id(payload)
     if nested:
         return nested
+    active = read_active_run(payload)
+    active_run_id = active.get("run_id")
+    if isinstance(active_run_id, str) and active_run_id.strip():
+        return active_run_id.strip()
     return None
 
 

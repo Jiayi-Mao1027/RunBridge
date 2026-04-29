@@ -12,6 +12,54 @@ from workflow_runtime import SCHEMA_VERSION, build_runtime_snapshot
 
 PACKET_SCHEMA_VERSION = "0.1"
 DEFAULT_BRIDGE_ACTIONS = ["team_create", "task_create", "send_messages", "task_complete", "team_delete"]
+READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "LS"]
+RESEARCH_TOOLS = [*READ_ONLY_TOOLS, "WebSearch", "WebFetch"]
+READ_CHECK_TOOLS = [*READ_ONLY_TOOLS, "Bash"]
+WRITE_TOOLS = [*READ_ONLY_TOOLS, "Bash", "Edit", "Write"]
+DEFAULT_BRIDGE_LEADER_TOOLS = ["Agent", *WRITE_TOOLS]
+PHASE_BRIDGE_TOOLS = {
+    "l2_advisory": ["Agent", *RESEARCH_TOOLS],
+    "l3_bridge": ["Agent", *READ_CHECK_TOOLS],
+    "l4_implement": DEFAULT_BRIDGE_LEADER_TOOLS,
+    "l4_execute": ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "Write"],
+    "l4_anomaly": ["Agent", *READ_CHECK_TOOLS],
+}
+DEFAULT_FORBIDDEN_ACTIONS = [
+    "destructive filesystem operations outside writable scopes",
+    "external network calls unless explicitly approved",
+    "dependency installation unless explicitly approved",
+]
+PHASE_OWNERSHIP_DEFAULTS = {
+    "l2_advisory": {"readable_scopes": ["."], "writable_scopes": []},
+    "l3_bridge": {"readable_scopes": ["."], "writable_scopes": []},
+    "l4_implement": {"readable_scopes": ["."], "writable_scopes": ["."]},
+    "l4_execute": {"readable_scopes": ["."], "writable_scopes": ["."]},
+    "l4_anomaly": {"readable_scopes": ["."], "writable_scopes": []},
+}
+
+PHASE_TEAM_DEFAULTS = {
+    "l2_advisory": [
+        ("chiefmate-a", "advisory", RESEARCH_TOOLS, "produce upstream interpretation, assumptions, plan critique, and peer-aware advisory judgment"),
+        ("chiefmate-b", "advisory", RESEARCH_TOOLS, "produce independent upstream advisory judgment and critique chiefmate-a when relevant"),
+    ],
+    "l3_bridge": [
+        ("curator", "artifact_curation", WRITE_TOOLS, "clarify active logs, datasets, checkpoints, outputs, archive boundaries, and traceability"),
+        ("preflight-initial", "preflight_audit", READ_CHECK_TOOLS, "inspect implementation-facing repo/config state and surface required changes before implementation"),
+        ("refresher", "documentation_refresh", ["Read", "Grep", "Glob", "LS", "Edit", "Write"], "refresh bounded human-facing repository documentation when needed"),
+    ],
+    "l4_implement": [
+        ("implementor", "implement", WRITE_TOOLS, "make approved code/config changes and collect bounded validation evidence"),
+        ("rungater", "implementation_gate", READ_CHECK_TOOLS, "judge post-implementation readiness and recommend proceed, repair, reroute, or stop"),
+    ],
+    "l4_execute": [
+        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow and record exact execution evidence"),
+        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, classify outcome, and recommend anomaly routing when needed"),
+    ],
+    "l4_anomaly": [
+        ("anomaly-analyst-a", "anomaly_analysis", READ_CHECK_TOOLS, "build evidence-backed anomaly hypotheses and discriminative next checks"),
+        ("anomaly-analyst-b", "anomaly_analysis", READ_CHECK_TOOLS, "build independent anomaly hypotheses and critique anomaly-analyst-a when relevant"),
+    ],
+}
 
 
 def read_runtime_snapshot(
@@ -52,7 +100,6 @@ def decide_next_bridge_packet(
     report_contract: dict[str, Any] | None = None,
     target_phase: str | None = None,
     phase_route: list[str] | None = None,
-    allowed_tools: list[str] | None = None,
     approval_requirements: list[dict[str, Any]] | None = None,
     expires_in_seconds: int | None = None,
 ) -> dict[str, Any]:
@@ -67,7 +114,6 @@ def decide_next_bridge_packet(
         report_contract=report_contract,
         target_phase=target_phase,
         phase_route=phase_route,
-        allowed_tools=allowed_tools,
         approval_requirements=approval_requirements,
         expires_in_seconds=expires_in_seconds,
     )
@@ -84,7 +130,6 @@ def build_bridge_instruction_packet_for_this_invoke(
     report_contract: dict[str, Any] | None = None,
     target_phase: str | None = None,
     phase_route: list[str] | None = None,
-    allowed_tools: list[str] | None = None,
     approval_requirements: list[dict[str, Any]] | None = None,
     expires_in_seconds: int | None = None,
 ) -> dict[str, Any]:
@@ -106,7 +151,8 @@ def build_bridge_instruction_packet_for_this_invoke(
     resolved_route = phase_route or _resolve_phase_route(snapshot, resolved_target_phase)
     resolved_completion = completion_contract or _default_completion_contract()
     resolved_report = report_contract or _default_report_contract()
-    resolved_team = _normalize_team_spec(team_spec, allowed_tools or [])
+    bridge_allowed_tools = _default_bridge_tools(resolved_target_phase)
+    resolved_team = _normalize_team_spec(team_spec, target_phase=resolved_target_phase)
     resolved_task = _normalize_task_spec(
         task_spec,
         user_instruction=user_instruction,
@@ -146,7 +192,7 @@ def build_bridge_instruction_packet_for_this_invoke(
         "completion_contract": resolved_completion,
         "report_contract": resolved_report,
         "allowed_actions": list(DEFAULT_BRIDGE_ACTIONS),
-        "allowed_tools": list(allowed_tools or []),
+        "allowed_tools": list(bridge_allowed_tools),
         "approval_requirements": list(approval_requirements or []),
         "created_at": now,
         "expires_at": _expiry(now, expires_in_seconds),
@@ -174,33 +220,69 @@ def _resolve_phase_route(snapshot: dict[str, Any], target_phase: str) -> list[st
     return [current] if current == target_phase else [current, target_phase]
 
 
-def _normalize_team_spec(team_spec: dict[str, Any] | None, allowed_tools: list[str]) -> dict[str, Any]:
+def _normalize_team_spec(
+    team_spec: dict[str, Any] | None,
+    *,
+    target_phase: str,
+) -> dict[str, Any]:
     source = deepcopy(team_spec or {})
-    teammates = source.get("teammate_specs")
-    if not isinstance(teammates, list) or not teammates:
-        teammates = [
+    if target_phase in PHASE_TEAM_DEFAULTS:
+        teammates = _default_teammate_specs(target_phase)
+        ownership = _default_ownership_boundary(target_phase)
+    else:
+        teammates = source.get("teammate_specs")
+        if not isinstance(teammates, list) or not teammates:
+            teammates = _default_teammate_specs(target_phase)
+        ownership = source.get("ownership_boundary")
+        if not isinstance(ownership, dict):
+            ownership = _default_ownership_boundary(target_phase)
+    return {
+        "team_id_or_null": source.get("team_id_or_null"),
+        "team_name": str(source.get("team_name") or f"bridge-{target_phase}-team"),
+        "teammate_specs": teammates,
+        "ownership_boundary": ownership,
+    }
+
+
+def _default_bridge_tools(target_phase: str) -> list[str]:
+    return list(PHASE_BRIDGE_TOOLS.get(target_phase, DEFAULT_BRIDGE_LEADER_TOOLS))
+
+
+def _default_ownership_boundary(target_phase: str) -> dict[str, Any]:
+    scopes = PHASE_OWNERSHIP_DEFAULTS.get(target_phase, {"readable_scopes": ["."], "writable_scopes": []})
+    return {
+        "readable_scopes": list(scopes["readable_scopes"]),
+        "writable_scopes": list(scopes["writable_scopes"]),
+        "process_ownership_rules": ["only manage processes launched inside this bridge window"],
+        "forbidden_actions": list(DEFAULT_FORBIDDEN_ACTIONS),
+    }
+
+
+def _default_teammate_specs(target_phase: str) -> list[dict[str, Any]]:
+    defaults = PHASE_TEAM_DEFAULTS.get(target_phase)
+    if not defaults:
+        return [
             {
                 "teammate_id_or_null": None,
                 "teammate_name": "bridge-worker",
                 "role": "execute",
-                "allowed_tools": list(allowed_tools),
+                "allowed_tools": list(READ_CHECK_TOOLS),
                 "responsibilities": ["execute the single bridge-window task and report evidence"],
             }
         ]
-    ownership = source.get("ownership_boundary")
-    if not isinstance(ownership, dict):
-        ownership = {
-            "readable_scopes": [],
-            "writable_scopes": [],
-            "process_ownership_rules": ["only manage processes launched inside this bridge window"],
-            "forbidden_actions": [],
-        }
-    return {
-        "team_id_or_null": source.get("team_id_or_null"),
-        "team_name": str(source.get("team_name") or "bridge-team"),
-        "teammate_specs": teammates,
-        "ownership_boundary": ownership,
-    }
+
+    specs = []
+    for name, role, default_tools, responsibility in defaults:
+        specs.append(
+            {
+                "teammate_id_or_null": None,
+                "teammate_name": name,
+                "role": role,
+                "allowed_tools": list(default_tools),
+                "responsibilities": [responsibility],
+            }
+        )
+    return specs
 
 
 def _normalize_task_spec(

@@ -9,19 +9,7 @@
     "PYTHONNOUSERSITE": "1",
     "PYTHONDONTWRITEBYTECODE": "1"
   },
-  "mcpServers": {
-    "bridge": {
-      "type": "stdio",
-      "command": "python",
-      "args": [
-        "../.claude/control/mcp/bridge_server.py"
-      ],
-      "env": {
-        "PYTHONNOUSERSITE": "1",
-        "PYTHONDONTWRITEBYTECODE": "1"
-      }
-    }
-  },
+  "agent": "leader-orchestrator",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -55,36 +43,6 @@
         ]
       }
     ],
-    "BridgeWindowOpened": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python ../.claude/hooks/hook_bridge_event.py"
-          }
-        ]
-      }
-    ],
-    "BridgePacketAccepted": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python ../.claude/hooks/hook_bridge_event.py"
-          }
-        ]
-      }
-    ],
-    "BridgePacketRejected": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python ../.claude/hooks/hook_bridge_event.py"
-          }
-        ]
-      }
-    ],
     "TaskCreated": [
       {
         "hooks": [
@@ -105,7 +63,7 @@
         ]
       }
     ],
-    "TeamIdle": [
+    "TeammateIdle": [
       {
         "hooks": [
           {

@@ -1,6 +1,7 @@
 ---
 name: executor
 description: Formal L4 execute subagent that runs the approved workflow inside the accepted boundary and records exactly what was executed, with what settings, and what outputs or failures occurred, so postrun can audit without guessing.
+tools: Read, Grep, Glob, LS, Bash, Write
 model: gpt-main
 ---
 

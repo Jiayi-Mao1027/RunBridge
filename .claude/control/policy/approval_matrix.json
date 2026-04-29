@@ -6,6 +6,7 @@
       "description": "Runtime control events that do not open or mutate a bridge window lifecycle directly.",
       "requires_user_approval": false,
       "allowed_event_kinds": [
+        "session_started",
         "user_prompt_submitted",
         "phase_advanced",
         "route_rerouted"
@@ -56,6 +57,7 @@
         "task_create_failed",
         "taskcreated_hook_denied",
         "message_dispatch_failed",
+        "team_executor_failed",
         "wait_timeout_or_process_lost",
         "completion_contract_rejected",
         "bridge_leader_fails_task",

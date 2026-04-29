@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -9,18 +10,41 @@ from loader import ControlPaths
 from models import DispatchResult
 
 
+def sanitize_json_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="replace").decode("utf-8")
+    if isinstance(value, dict):
+        return {sanitize_json_value(key): sanitize_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_json_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_json_value(item) for item in value]
+    return value
+
+
 def atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(path.parent)) as tmp:
-        json.dump(payload, tmp, ensure_ascii=False, indent=2, sort_keys=False)
+        json.dump(sanitize_json_value(payload), tmp, ensure_ascii=False, indent=2, sort_keys=False)
         tmp.flush()
         temp_path = Path(tmp.name)
+    _replace_with_retry(temp_path, path)
+
+
+def _replace_with_retry(temp_path: Path, path: Path) -> None:
+    delays = [0.02, 0.05, 0.1, 0.2, 0.4]
+    for delay in delays:
+        try:
+            temp_path.replace(path)
+            return
+        except PermissionError:
+            time.sleep(delay)
     temp_path.replace(path)
 
 
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(payload, ensure_ascii=False)
+    line = json.dumps(sanitize_json_value(payload), ensure_ascii=False)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 

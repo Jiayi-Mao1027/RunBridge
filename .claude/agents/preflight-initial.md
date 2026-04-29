@@ -1,6 +1,7 @@
 ---
 name: preflight-initial
 description: Initial L3 bridge subagent for implementation-facing mismatch audit after curator has clarified the active artifact surface. Use to inspect code, config, scaffolding, and execution-facing repository state and identify what still needs to change before implementation begins.
+tools: Read, Grep, Glob, LS, Bash
 model: gpt-main
 effort: high
 ---

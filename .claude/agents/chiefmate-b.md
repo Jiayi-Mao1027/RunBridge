@@ -1,6 +1,7 @@
 ---
 name: chiefmate-b
 description: High-capability advisory subagent for l2_advisory work. Use when a run needs upstream interpretation, ambiguity exposure, plan shaping, challenge, research-backed review, or critical review of chiefmate-a before downstream execution-facing work begins.
+tools: Read, Grep, Glob, LS, WebSearch, WebFetch
 model: sonnet-main
 effort: medium
 ---
