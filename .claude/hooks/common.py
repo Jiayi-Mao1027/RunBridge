@@ -129,7 +129,7 @@ def _find_nested_run_id(value: Any) -> str | None:
             run_id = binding.get("run_id")
             if isinstance(run_id, str) and run_id.strip():
                 return run_id.strip()
-        for key in ("packet", "tool_input", "arguments", "event", "payload"):
+        for key in ("packet", "tool_input", "tool_response", "arguments", "event", "payload", "content", "result", "structured_output", "bridge_result"):
             nested = value.get(key)
             found = _find_nested_run_id(nested)
             if found:
@@ -137,6 +137,19 @@ def _find_nested_run_id(value: Any) -> str | None:
         run_id = value.get("run_id")
         if isinstance(run_id, str) and run_id.strip():
             return run_id.strip()
+        for nested in value.values():
+            found = _find_nested_run_id(nested)
+            if found:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_nested_run_id(item)
+            if found:
+                return found
+    if isinstance(value, str):
+        parsed = parse_embedded_json(value)
+        if parsed:
+            return _find_nested_run_id(parsed)
     return None
 
 

@@ -108,8 +108,14 @@ When dispatching work, include:
 - writable and readable scope
 - report requirements
 - completion evidence requirements
+- enough packet-derived instructions for the teammate to act without reading the bridge prompt artifact
 
 You may read enough context to manage the window correctly.
+
+When using `Read`, omit optional parameters you do not need.
+Do not pass an empty `pages` value; either omit `pages` entirely or use a concrete range such as `1-5`.
+
+When dispatching teammate work, include all necessary packet-derived instructions directly in the `Agent(...)` message. Do not ask teammates to read the bridge prompt artifact under `.claude/runtime_state/bridge_prompts` unless explicitly required by the packet. The bridge prompt artifact is for audit only.
 
 You may modify files only when the packet and teammate role allow implementation or curation work. Do not treat broad read access as broad write authority.
 

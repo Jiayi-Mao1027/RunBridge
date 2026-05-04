@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import importlib.util
 from datetime import datetime, timezone
 from pathlib import Path
 import uuid
@@ -10,6 +11,7 @@ import uuid
 from bridge_sdk import call_bridge_sdk
 from claude_cli_executor import _allowed_tools
 from claude_cli_executor import _ensure_project_agent_files
+from claude_cli_executor import _parse_claude_payload
 from claude_cli_executor import simulated_team_executor
 from main_leader import decide_next_bridge_packet
 from workflow_runtime import dispatch_workflow_event
@@ -244,6 +246,21 @@ def run_orphan(control_root: Path, runs_root: Path) -> dict:
     dispatch(control_root, runs_root, event("bridge_call_intended", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_orphan", payload={"packet": p}))
     dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_orphan", payload={"packet": p}))
     dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_orphan", payload={"packet": p}))
+    return dispatch(control_root, runs_root, event("orphan_timeout_without_bridge_return", bw, ss, agent_type="runtime", agent_id="orphan_scanner", payload={"last_known_event_ref": "call_bridge_sdk_started"}))
+
+
+def run_mcp_lifecycle_helper(control_root: Path, runs_root: Path) -> dict:
+    mcp_path = Path(__file__).resolve().parents[1] / "mcp" / "bridge_server.py"
+    spec = importlib.util.spec_from_file_location("bridge_server_smoke", mcp_path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(str(mcp_path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    bw = "bw_mcp_helper"
+    ss = "sub_mcp_helper"
+    p = packet(bw, ss)
+    module._ensure_main_bridge_lifecycle_started(str(control_root), p, str(runs_root), persist=True)
     return dispatch(control_root, runs_root, event("orphan_timeout_without_bridge_return", bw, ss, agent_type="runtime", agent_id="orphan_scanner", payload={"last_known_event_ref": "call_bridge_sdk_started"}))
 
 
@@ -545,6 +562,21 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     )
     dispatch(control_root, runs_root, event("pretooluse_denied_by_main_leader", "bw_open", "sub_open", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_open", payload={"reasons": ["negative cleanup"]}))
 
+    stray_failure = dispatch_workflow_event(
+        str(control_root),
+        event("bridge_leader_fails_task", "bw_stray_failure", "sub_stray_failure", team_id="team_stray", task_id="task_stray", payload={"error_or_null": {"message": "stray"}}),
+        runtime_runs_root=str(runs_root),
+        persist=True,
+    )
+    if stray_failure.ok or "lifecycle_transition_not_allowed" not in stray_failure.check_result.get("reasons", []):
+        raise AssertionError(json.dumps(stray_failure.check_result, ensure_ascii=False, indent=2))
+    stray_snapshot = stray_failure.runtime_snapshot
+    if "bw_stray_failure" in stray_snapshot.get("lifecycle", {}).get("status_index", {}):
+        raise AssertionError(json.dumps(stray_snapshot["lifecycle"], ensure_ascii=False, indent=2))
+    transition_ids = [item.get("transition_id") for item in _read_jsonl(runs_root / "run_demo" / "transitions.jsonl")]
+    if len(transition_ids) != len(set(transition_ids)):
+        raise AssertionError(json.dumps(transition_ids, ensure_ascii=False, indent=2))
+
     no_contract = packet("bw_no_contract", "sub_no_contract")
     dispatch(control_root, runs_root, event("bridge_call_intended", "bw_no_contract", "sub_no_contract", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_no_contract", payload={"packet": no_contract}))
     dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", "bw_no_contract", "sub_no_contract", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_no_contract", payload={"packet": no_contract}))
@@ -588,6 +620,26 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
 
 
 def run_cli_executor_policy_tests(root: Path) -> dict:
+    wrapped_stdout = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "result": json.dumps(
+                {
+                    "status": "succeeded",
+                    "reports": [{"summary": "ok"}],
+                    "artifact_refs": [],
+                    "evidence": {"completion_contract": "satisfied"},
+                    "error_or_null": None,
+                    "cleanup_required": False,
+                }
+            ),
+        }
+    )
+    parsed = _parse_claude_payload(wrapped_stdout, "")
+    if parsed.get("error_or_null") or parsed.get("payload", {}).get("status") != "succeeded":
+        raise AssertionError(json.dumps(parsed, ensure_ascii=False, indent=2))
+
     cli_packet = packet("bw_cli_policy", "sub_cli_policy")
     cli_packet["allowed_tools"] = ["Agent", "Read", "Grep", "Glob", "LS"]
     cli_packet["team_spec"]["teammate_specs"] = [
@@ -600,13 +652,17 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     if expected_agent_tool not in allowed_tools or "Agent" in allowed_tools:
         raise AssertionError(json.dumps(allowed_tools, ensure_ascii=False, indent=2))
 
-    project_root = root / "project_agent_sync"
-    _ensure_project_agent_files(project_root, ["bridge-leader", "curator", "preflight-initial", "refresher"])
+    project_root = root / "project_agent_validation"
+    sync_result = _ensure_project_agent_files(project_root, ["bridge-leader", "curator", "preflight-initial", "refresher"])
+    if sync_result.get("error_or_null"):
+        raise AssertionError(json.dumps(sync_result, ensure_ascii=False, indent=2))
     for name in ["bridge-leader", "curator", "preflight-initial", "refresher"]:
-        agent_path = project_root / ".claude" / "agents" / f"{name}.md"
+        agent_path = Path(sync_result["source_dir"]) / f"{name}.md"
         text = agent_path.read_text(encoding="utf-8")
         if "model: gpt-main" not in text:
             raise AssertionError(str(agent_path))
+    if (project_root / ".claude" / "agents").exists():
+        raise AssertionError(str(project_root / ".claude" / "agents"))
     return {"cli_executor_policy": "passed"}
 
 
@@ -618,15 +674,21 @@ def main() -> None:
     try:
         control_root, runs_root = build_fixture(runtime_dir)
         success = run_success(control_root, runs_root)
+        if success.get("current_phase") != "l4_execute":
+            raise AssertionError(json.dumps({"expected_phase": "l4_execute", "snapshot": success}, ensure_ascii=False, indent=2))
         failure = run_failure(control_root, runs_root)
         orphan = run_orphan(control_root, runs_root)
+        mcp_helper = run_mcp_lifecycle_helper(control_root, runs_root)
         sdk = run_sdk_roundtrip(control_root, runs_root)
-        negative = run_negative_tests(control_root, runs_root)
+        negative_control_root, negative_runs_root = build_fixture(runtime_dir / "negative")
+        negative = run_negative_tests(negative_control_root, negative_runs_root)
         cli_executor = run_cli_executor_policy_tests(runtime_dir)
         summary = {
             "success_status": success["lifecycle"]["status_index"]["bw_success"],
+            "success_phase": success["current_phase"],
             "failure_status": failure["lifecycle"]["status_index"]["bw_failed"],
             "orphan_status": orphan["lifecycle"]["status_index"]["bw_orphan"],
+            "mcp_helper_status": mcp_helper["lifecycle"]["status_index"]["bw_mcp_helper"],
             "sdk_status": sdk["bridge_result_status"],
             "sdk_replay_status": sdk["replay_status"],
             "sdk_failed_status": sdk["failed_status"],
@@ -642,6 +704,7 @@ def main() -> None:
         assert summary["success_status"] == "bridge_window_returned"
         assert summary["failure_status"] == "bridge_call_failed"
         assert summary["orphan_status"] == "bridge_window_orphaned"
+        assert summary["mcp_helper_status"] == "bridge_window_orphaned"
         assert summary["sdk_status"] == "succeeded"
         assert summary["sdk_replay_status"] == "bridge_window_returned"
         assert summary["sdk_failed_status"] == "bridge_window_failed"

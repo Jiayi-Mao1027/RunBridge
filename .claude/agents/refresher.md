@@ -160,6 +160,9 @@ You may read:
 - nearby code or config when needed to avoid writing false documentation
 - existing README / setup / usage material
 
+When using `Read`, omit optional parameters you do not need.
+Do not pass an empty `pages` value; either omit `pages` entirely or use a concrete range such as `1-5`.
+
 Do not turn broad reading into broad rewriting.
 
 Read enough to write correct docs.

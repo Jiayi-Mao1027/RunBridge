@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from typing import Any
 import uuid
@@ -285,12 +286,27 @@ def _normalize_task_spec(
 
 def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any]) -> dict[str, Any]:
     assignments = []
+    ownership = team_spec.get("ownership_boundary", {}) if isinstance(team_spec.get("ownership_boundary"), dict) else {}
     for teammate in team_spec.get("teammate_specs", []):
         name = str(teammate.get("teammate_name") or "bridge-worker")
+        responsibilities = teammate.get("responsibilities") if isinstance(teammate.get("responsibilities"), list) else []
         assignments.append(
             {
                 "teammate_id_or_null": teammate.get("teammate_id_or_null"),
-                "assignment": f"{name}: {task_spec['task_description']}",
+                "assignment": "\n".join(
+                    [
+                        f"{name}: {task_spec['task_description']}",
+                        f"Role: {teammate.get('role') or 'bridge teammate'}",
+                        f"Responsibilities: {_json_list(responsibilities)}",
+                        f"Allowed tools: {_json_list(teammate.get('allowed_tools'))}",
+                        f"Readable scopes: {_json_list(ownership.get('readable_scopes'))}",
+                        f"Writable scopes: {_json_list(ownership.get('writable_scopes'))}",
+                        f"Completion contract: {_json_dict(task_spec.get('completion_contract'))}",
+                        f"Report contract: {_json_dict(task_spec.get('report_contract'))}",
+                        "Do not read .claude/runtime_state/bridge_prompts for task context; that bridge prompt artifact is for audit only.",
+                        "When using Read, omit optional parameters you do not need. Never pass pages as an empty string.",
+                    ]
+                ),
                 "expected_output": "completion report and declared artifact refs",
             }
         )
@@ -299,6 +315,16 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
         "team_id_or_null": team_spec.get("team_id_or_null"),
         "teammate_assignments": assignments,
     }
+
+
+def _json_list(value: Any) -> str:
+    items = value if isinstance(value, list) else []
+    return json.dumps([str(item) for item in items], ensure_ascii=False)
+
+
+def _json_dict(value: Any) -> str:
+    data = value if isinstance(value, dict) else {}
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
 def _default_completion_contract() -> dict[str, Any]:

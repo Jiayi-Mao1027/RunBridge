@@ -46,7 +46,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     project_root = Path(os.environ.get("BRIDGE_PROJECT_ROOT") or Path.cwd()).resolve()
     packet = execution_input["packet"]
 
-    prompt = _bridge_leader_prompt(packet, execution_input)
+    prompt = _bridge_leader_prompt(packet, execution_input, project_root)
     prompt_path = _write_bridge_prompt_file(project_root, prompt, execution_input)
 
     teammate_names = _teammate_agent_names(packet)
@@ -55,7 +55,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     sync_result = _ensure_project_agent_files(project_root, required_agent_names)
     if sync_result.get("error_or_null"):
         return _failure(
-            message="failed to sync required project agent files",
+            message="failed to validate required control-plane agent files",
             error_type="AgentSyncFailed",
             evidence={
                 "prompt_file": str(prompt_path),
@@ -119,6 +119,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
         bridge_model=bridge_model,
         teammate_names=teammate_names,
         agent_models=agent_models,
+        project_root=project_root,
     )
 
     try:
@@ -246,7 +247,7 @@ def _failure(
     }
 
 
-def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any]) -> str:
+def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any], project_root: Path) -> str:
     binding = {
         k: execution_input[k]
         for k in ["run_id", "main_session_id", "sub_session_id", "bridge_window_id", "team_id", "task_id"]
@@ -255,6 +256,16 @@ def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any
     return (
         "Execute this one bridge-window task inside Claude Code. "
         "Stay inside the packet boundary. Return only JSON matching the requested schema.\n\n"
+        f"Project root boundary:\n{project_root}\n"
+        "Treat this path as the repository root for this bridge invocation. "
+        "All relative paths in the packet are relative to this directory. "
+        "Do not read or write outside this directory, even if Claude Code exposes a parent Git workspace. "
+        "When dispatching teammates, include this same project-root boundary in each Agent message.\n\n"
+        "Tool compatibility guard: when using Read, omit optional parameters you do not need. "
+        "Never pass an empty string for pages; either omit pages entirely or use a concrete range like 1-5.\n\n"
+        "Teammate dispatch guard: include packet-derived task, scope, tool, completion, and report instructions "
+        "directly in each Agent message. Do not ask teammates to read .claude/runtime_state/bridge_prompts; "
+        "that prompt artifact is for audit only.\n\n"
         f"Runtime binding:\n{json.dumps(binding, ensure_ascii=False, indent=2)}\n\n"
         f"BridgePacket:\n{json.dumps(packet, ensure_ascii=False, indent=2)}"
     )
@@ -275,7 +286,21 @@ def _bridge_prompt_path(project_root: Path, execution_input: dict[str, Any]) -> 
     )
     digest = hashlib.sha1(raw_key.encode("utf-8", errors="replace")).hexdigest()[:16]
     run_id = _safe_path_component(str(execution_input.get("run_id") or "run"))
-    return project_root / ".claude" / "runtime_state" / "bridge_prompts" / run_id / f"{digest}.md"
+    return (
+        _control_claude_dir()
+        / "runtime_state"
+        / "projects"
+        / _project_state_key(project_root)
+        / "bridge_prompts"
+        / run_id
+        / f"{digest}.md"
+    )
+
+
+def _project_state_key(project_root: Path) -> str:
+    normalized = str(project_root.resolve()).lower()
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"{project_root.name}_{digest}"
 
 
 def _safe_path_component(value: str) -> str:
@@ -306,29 +331,18 @@ def _settings_args() -> list[str]:
 
 def _ensure_project_agent_files(project_root: Path, names: list[str]) -> dict[str, Any]:
     source_dir = _source_agent_dir()
-    target_dir = project_root / ".claude" / "agents"
-    copied: list[str] = []
     missing: list[str] = []
 
     try:
-        target_dir.mkdir(parents=True, exist_ok=True)
         for name in names:
             source = source_dir / f"{name}.md"
             if not source.exists():
                 missing.append(name)
-                continue
-
-            target = target_dir / source.name
-            source_text = source.read_text(encoding="utf-8")
-
-            if target.exists() and target.read_text(encoding="utf-8") == source_text:
-                continue
-
-            target.write_text(source_text, encoding="utf-8")
-            copied.append(name)
     except Exception as exc:
         return {
-            "copied": copied,
+            "source_dir": str(source_dir),
+            "project_root": str(project_root),
+            "copied": [],
             "missing": missing,
             "error_or_null": {
                 "type": type(exc).__name__,
@@ -338,7 +352,9 @@ def _ensure_project_agent_files(project_root: Path, names: list[str]) -> dict[st
 
     if missing:
         return {
-            "copied": copied,
+            "source_dir": str(source_dir),
+            "project_root": str(project_root),
+            "copied": [],
             "missing": missing,
             "error_or_null": {
                 "type": "MissingAgentFiles",
@@ -347,7 +363,9 @@ def _ensure_project_agent_files(project_root: Path, names: list[str]) -> dict[st
         }
 
     return {
-        "copied": copied,
+        "source_dir": str(source_dir),
+        "project_root": str(project_root),
+        "copied": [],
         "missing": [],
         "error_or_null": None,
     }
@@ -501,8 +519,10 @@ def _subprocess_env(
     bridge_model: str,
     teammate_names: list[str],
     agent_models: dict[str, str],
+    project_root: Path,
 ) -> dict[str, str]:
     env = os.environ.copy()
+    env["BRIDGE_PROJECT_ROOT"] = str(project_root)
 
     # Force the bridge-leader process itself away from Claude Code's provider default.
     env.setdefault("ANTHROPIC_MODEL", bridge_model)
@@ -592,10 +612,7 @@ def _parse_claude_payload(stdout: str, stderr: str) -> dict[str, Any]:
             },
         )
 
-    if isinstance(payload, dict) and isinstance(payload.get("structured_output"), dict):
-        payload = payload["structured_output"]
-    elif isinstance(payload, dict) and isinstance(payload.get("result"), dict):
-        payload = payload["result"]
+    payload = _extract_bridge_payload(payload)
 
     if not isinstance(payload, dict):
         return _failure(
@@ -608,6 +625,66 @@ def _parse_claude_payload(stdout: str, stderr: str) -> dict[str, Any]:
         )
 
     return {"payload": payload, "error_or_null": None}
+
+
+def _extract_bridge_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+
+    if payload.get("status") in {"succeeded", "failed", "partial", "partial_or_failed"}:
+        return payload
+
+    structured = payload.get("structured_output")
+    if isinstance(structured, dict):
+        return _extract_bridge_payload(structured)
+    if isinstance(structured, str):
+        parsed = _parse_json_object_text(structured)
+        if parsed:
+            return _extract_bridge_payload(parsed)
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        return _extract_bridge_payload(result)
+    if isinstance(result, str):
+        parsed = _parse_json_object_text(result)
+        if parsed:
+            return _extract_bridge_payload(parsed)
+
+    content = payload.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                parsed = _parse_json_object_text(text)
+                if parsed:
+                    return _extract_bridge_payload(parsed)
+
+    return payload
+
+
+def _parse_json_object_text(text: str) -> dict[str, Any] | None:
+    s = text.strip()
+    if not s:
+        return None
+    if s.startswith("```"):
+        lines = s.splitlines()
+        if len(lines) >= 3:
+            s = "\n".join(lines[1:-1]).strip()
+    candidates = [s]
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(s[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def _normalize_bridge_payload(payload: dict[str, Any], stdout: str, stderr: str) -> dict[str, Any]:
@@ -757,8 +834,9 @@ def _compact_teammate_prompt(name: str, role: str, responsibilities: list[Any]) 
     agent_path = f".claude/agents/{name}.md"
     return (
         f"You are {name}, a {role} teammate for one bridge window. "
-        f"Before acting, read {agent_path} and follow that static agent instruction. "
+        f"Follow your static {agent_path} instruction; do not read the bridge prompt artifact for task context. "
         "The BridgePacket assignment, tool boundary, and ownership boundary override any broader default behavior. "
+        "When using Read, omit optional parameters you do not need; never pass pages as an empty string. "
         "Return concise evidence and findings to bridge-leader. "
         f"Packet responsibilities: {responsibility_text}"
     )

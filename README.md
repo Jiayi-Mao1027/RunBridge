@@ -8,31 +8,33 @@ It is designed for this layout:
 workspace-parent/
   .claude/
   your-repo/
-    .mcp.json
 ```
 
-Run Claude Code from inside `your-repo/`. The workflow files stay outside the repo and beside it, so several repos under the same parent can share the same control logic without copying runtime code into each repo.
+Run Claude Code from inside `your-repo/`. The workflow files stay outside the repo and beside it, so several repos under the same parent can share the same control logic without copying runtime code or MCP configuration into each repo.
 
 ## Startup
 
-Claude Code must load the sibling `.claude/settings.json`. The repo under test should contain a project `.mcp.json` that points back to the sibling bridge server.
+Claude Code must load both sibling configuration files:
 
-If your Claude Code build does not automatically discover the sibling settings file, use an alias or wrapper that passes it explicitly:
+- `../.claude/settings.json` for agent, environment, and hooks
+- `../.claude/mcp.json` for the `bridge` MCP server
 
-```powershell
-Set-Alias cc 'claude'
-# Example direct form:
-claude --settings ../.claude/settings.json
-```
-
-Use the alias from inside the repo:
+Start from inside the repo:
 
 ```powershell
 cd C:\path\to\workspace-parent\your-repo
-claude --settings ../.claude/settings.json
+claude --settings ../.claude/settings.json --mcp-config ../.claude/mcp.json --strict-mcp-config
 ```
 
-The workflow assumes the current working directory is the repo root. Relative paths in settings use `../.claude/...`.
+Use a wrapper or shell function if you do not want to type the flags every time:
+
+```powershell
+function cc {
+  claude --settings ../.claude/settings.json --mcp-config ../.claude/mcp.json --strict-mcp-config @args
+}
+```
+
+The workflow assumes the current working directory is the repo root. The repo under test does not need a local `.claude/` directory or `.mcp.json` file.
 
 ## Key Configuration
 
@@ -41,14 +43,13 @@ Main configuration lives in:
 ```text
 .claude/settings.json
 .claude/mcp.json
-your-repo/.mcp.json
 ```
 
 It defines:
 
 - environment defaults: `PYTHONNOUSERSITE=1`, `PYTHONDONTWRITEBYTECODE=1`
 - the default front-facing session agent: `leader-orchestrator`
-- the `bridge` MCP server in `your-repo/.mcp.json`:
+- the `bridge` MCP server in `.claude/mcp.json`:
 
 ```text
 python ../.claude/control/mcp/bridge_server.py
@@ -110,8 +111,7 @@ One bridge window binds exactly one team and one task. The task may have multipl
 ```text
 .claude/CLAUDE.md                         Main operating contract
 .claude/settings.json                     Agent, environment, and hook configuration
-.claude/mcp.json                          MCP server template for copied project config
-your-repo/.mcp.json                       Active project MCP server configuration
+.claude/mcp.json                          Active bridge MCP server configuration
 .claude/agents/leader-orchestrator.md     Main leader instructions
 .claude/agents/bridge-leader.md           Bridge-window owner instructions
 .claude/control/mcp/bridge_server.py      MCP bridge server
@@ -145,6 +145,6 @@ Without `BRIDGE_EXECUTOR=simulate`, the bridge executor uses a nested non-intera
 
 - No user-level install is required.
 - No `~/.claude` changes are required.
-- No repo-local workflow code is required beyond the project MCP pointer file.
+- No repo-local workflow code, `.claude/` directory, or `.mcp.json` file is required.
 - The only required shared artifact is the sibling `.claude` directory.
-- If Claude Code does not auto-load sibling settings, the startup alias must pass `--settings ../.claude/settings.json`.
+- The startup command or wrapper must pass both `--settings ../.claude/settings.json` and `--mcp-config ../.claude/mcp.json`.

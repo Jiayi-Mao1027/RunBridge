@@ -270,6 +270,9 @@ You may inspect:
 - nearby docs when they clarify implementation-facing meaning
 - curator outputs that clarify the active artifact surface
 
+When using `Read`, omit optional parameters you do not need.
+Do not pass an empty `pages` value; either omit `pages` entirely or use a concrete range such as `1-5`.
+
 Read enough to determine what still needs to change before implementation.
 
 Do not turn broad reading into broad strategic review.

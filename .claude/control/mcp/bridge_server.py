@@ -246,12 +246,13 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         _save_last_packet(runtime_runs_root, packet)
         result = {"packet": packet}
     elif tool_name == "call_bridge_sdk":
-        _resolve_run_id(arguments, runtime_runs_root, require_active=True)
         packet = arguments.get("packet") if isinstance(arguments.get("packet"), dict) else None
         if packet is None:
             packet = _load_last_packet(runtime_runs_root)
         if packet is None:
             raise ValueError("call_bridge_sdk requires packet; call build_bridge_packet first")
+        _resolve_run_id(arguments, runtime_runs_root, require_active=True, packet=packet)
+        _ensure_main_bridge_lifecycle_started(CONTROL_ROOT, packet, runtime_runs_root, persist=bool(arguments.get("persist", True)))
         result = {
             "bridge_result": call_bridge_sdk(
                 CONTROL_ROOT,
@@ -332,13 +333,104 @@ def _last_packet_path(runtime_runs_root: str | Path) -> Path:
     return Path(runtime_runs_root) / ".last_bridge_packet.json"
 
 
-def _resolve_run_id(arguments: dict[str, Any], runtime_runs_root: str | Path, *, require_active: bool) -> str:
+def _ensure_main_bridge_lifecycle_started(
+    control_root: str | Path,
+    packet: dict[str, Any],
+    runtime_runs_root: str | Path,
+    *,
+    persist: bool,
+) -> None:
+    binding = packet.get("binding") if isinstance(packet.get("binding"), dict) else {}
+    run_id = str(binding.get("run_id") or "").strip()
+    main_session_id = str(binding.get("main_session_id") or run_id).strip()
+    sub_session_id = str(binding.get("sub_session_id") or "").strip()
+    bridge_window_id = str(binding.get("bridge_window_id") or "").strip()
+    if not run_id or not main_session_id or not sub_session_id or not bridge_window_id:
+        raise ValueError("packet binding is incomplete")
+
+    snapshot = read_runtime_snapshot(control_root, run_id, runtime_runs_root=runtime_runs_root)
+    status = snapshot.get("lifecycle", {}).get("status_index", {}).get(bridge_window_id)
+    if status in {"bridge_call_started", "bridge_window_opened", "bridge_packet_accepted", "bridge_packet_rejected"}:
+        return
+    if status in {
+        "team_create_started",
+        "team_create_completed",
+        "team_create_failed",
+        "task_create_started",
+        "task_create_completed",
+        "task_create_failed",
+        "task_created_recorded",
+        "message_dispatch_started",
+        "message_dispatch_completed",
+        "message_dispatch_failed",
+        "team_waiting",
+        "team_wait_timeout",
+        "task_completion_started",
+        "task_completion_completed",
+        "task_completion_rejected",
+        "task_failed",
+        "team_delete_started",
+        "team_delete_completed",
+        "team_delete_failed",
+    }:
+        return
+    if status in {
+        "bridge_call_denied",
+        "bridge_call_failed",
+        "bridge_window_returned",
+        "bridge_window_partial_returned",
+        "bridge_window_failed",
+        "bridge_window_orphaned",
+    }:
+        raise ValueError(f"bridge window already terminal: {status}")
+
+    base_event = {
+        "run_id": run_id,
+        "main_session_id": main_session_id,
+        "sub_session_id": sub_session_id,
+        "bridge_window_id": bridge_window_id,
+        "agent_id": binding.get("opened_by_agent_id") or "main-leader",
+        "agent_type": "main-leader",
+        "tool_name": "mcp__bridge__call_bridge_sdk",
+        "tool_use_id": binding.get("parent_tool_use_id"),
+        "payload": {"packet": packet},
+    }
+    needed_by_status = {
+        None: ["bridge_call_intended", "pretooluse_allowed_by_main_leader", "call_bridge_sdk_started"],
+        "bridge_call_intended": ["pretooluse_allowed_by_main_leader", "call_bridge_sdk_started"],
+        "bridge_call_prechecked": ["call_bridge_sdk_started"],
+    }
+    if status not in needed_by_status:
+        raise ValueError(f"bridge window has unexpected lifecycle status before SDK call: {status}")
+    for event_kind in needed_by_status[status]:
+        result = dispatch_workflow_event(
+            control_root,
+            {**base_event, "event_kind": event_kind},
+            runtime_runs_root=runtime_runs_root,
+            persist=persist,
+        )
+        if not result.ok:
+            raise ValueError(f"{event_kind} rejected by runtime: {result.check_result.get('reasons')}")
+
+
+def _resolve_run_id(
+    arguments: dict[str, Any],
+    runtime_runs_root: str | Path,
+    *,
+    require_active: bool,
+    packet: dict[str, Any] | None = None,
+) -> str:
     run_id = str(arguments.get("run_id") or "").strip()
     if run_id:
         return run_id
     configured = os.environ.get("BRIDGE_RUN_ID")
     if configured and configured.strip():
         return configured.strip()
+    if isinstance(packet, dict):
+        binding = packet.get("binding") if isinstance(packet.get("binding"), dict) else {}
+        packet_run_id = str(binding.get("run_id") or "").strip()
+        if packet_run_id:
+            return packet_run_id
     active = _load_active_run(runtime_runs_root)
     active_run_id = str(active.get("run_id") or "").strip()
     if active_run_id:

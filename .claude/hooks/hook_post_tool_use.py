@@ -25,6 +25,13 @@ def main() -> int:
     tool_name = str(payload.get("tool_name") or "").strip()
     if tool_name not in BRIDGE_TOOL_NAMES and tool_name not in SUCCESS_BY_TOOL:
         return 0
+
+    if tool_name == "mcp__bridge__call_bridge_sdk":
+        # The MCP bridge server records the bridge-window return from inside
+        # the bridge runtime. This hook must not block the SDK result if the
+        # host hook payload cannot be rebound to SessionStart state.
+        return 0
+
     run_id = detect_run_id(payload)
     if not run_id:
         return simple_block("PostToolUse blocked: runtime run binding missing; SessionStart active-run is required.")
@@ -55,12 +62,6 @@ def main() -> int:
         "tool_use_id": payload.get("tool_use_id") or tool_input.get("tool_use_id"),
         "timestamp": now_iso(),
     }
-
-    if tool_name.startswith("mcp__bridge__") and tool_name in BRIDGE_TOOL_NAMES:
-        # The MCP bridge server records the bridge-window return from inside
-        # the bridge runtime. PostToolUse is retained for observability but
-        # must not append a second terminal lifecycle event.
-        return 0
 
     if tool_name in BRIDGE_TOOL_NAMES:
         event_kind = "call_bridge_sdk_error" if failed else "bridge_result_returned"

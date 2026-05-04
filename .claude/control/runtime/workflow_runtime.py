@@ -320,7 +320,8 @@ def dispatch_workflow_event(
     check_result = check_event(event, snapshot_before, lifecycle_transitions, allowed_policy_events)
     update_kind = EVENT_TO_UPDATE_KIND.get(event.event_kind, "generic_runtime_update")
 
-    if check_result.decision != "allow" and update_kind not in FAILURE_UPDATE_KINDS:
+    should_apply_update = check_result.decision == "allow" or _denied_failure_update_is_recordable(check_result, update_kind)
+    if not should_apply_update:
         update_result = UpdateResult(
             ok=False,
             decision="rejected",
@@ -535,6 +536,8 @@ def update_runtime(
             run["route"]["target_phase"] = event.payload.get("target_phase")
         run["route"]["is_stale"] = False
         run["route"]["decided_by_event_id"] = event.event_id
+    elif event.event_kind in {"pretooluse_allowed_by_main_leader", "call_bridge_sdk_started"}:
+        _record_bridge_packet_route(run, event)
 
     to_status = check_result.derived_facts.get("to_status")
     if to_status is None:
@@ -554,6 +557,7 @@ def update_runtime(
         "bridge_result_returned_with_cleanup_required",
     }:
         run["last_bridge_result"] = _build_bridge_result(event, to_status)
+        _commit_bridge_result_phase(run, event, run["last_bridge_result"], to_status)
 
     return run, [transition]
 
@@ -703,8 +707,10 @@ def persist_workflow_result(
     )
     for item in notify_result.notify_items:
         append_jsonl(notify_path, {"event_id": event.event_id, "timestamp": event.timestamp, **item})
+    applied_transition_ids = set(update_result.transition_ids)
     for transition in run_ledger.get("workflow_transitions", [])[-1:]:
-        append_jsonl(paths.transitions_path(event.run_id), transition)
+        if transition.get("transition_id") in applied_transition_ids:
+            append_jsonl(paths.transitions_path(event.run_id), transition)
 
     atomic_write_json(paths.run_ledger_path(event.run_id), run_ledger)
     atomic_write_json(snapshot_path, snapshot)
@@ -768,7 +774,7 @@ def reconcile_workflow_from_ledger(
         snapshot_before = build_runtime_snapshot(paths, replay_run)
         check_result = check_event(event, snapshot_before, lifecycle_transitions, allowed_policy_events)
         update_kind = EVENT_TO_UPDATE_KIND.get(event.event_kind, "generic_runtime_update")
-        should_apply = check_result.decision == "allow" or update_kind in FAILURE_UPDATE_KINDS
+        should_apply = check_result.decision == "allow" or _denied_failure_update_is_recordable(check_result, update_kind)
         if should_apply:
             replay_run, transitions = update_runtime(event, replay_run, check_result, update_kind, lifecycle_transitions)
         else:
@@ -828,6 +834,16 @@ def load_lifecycle_transitions(paths: ControlPaths) -> dict[str | None, dict[str
         from_status = None if from_status_raw in {None, "null"} else str(from_status_raw)
         result.setdefault(from_status, {})[str(event_kind)] = str(to_status)
     return result or LIFECYCLE_TRANSITIONS
+
+
+def _denied_failure_update_is_recordable(check_result: CheckResult, update_kind: str) -> bool:
+    if update_kind not in FAILURE_UPDATE_KINDS:
+        return False
+    if check_result.decision == "allow":
+        return True
+    if "lifecycle_transition_not_allowed" in check_result.reasons:
+        return False
+    return True
 
 
 def load_allowed_policy_events(paths: ControlPaths) -> set[str]:
@@ -1015,6 +1031,52 @@ def _build_transition(event: WorkflowEvent, update_kind: str, check_result: Chec
         "payload": deepcopy(check_result.normalized_payload),
         "timestamp": event.timestamp,
     }
+
+
+def _packet_from_event(event: WorkflowEvent) -> dict[str, Any] | None:
+    packet = event.payload.get("packet")
+    if isinstance(packet, dict):
+        return packet
+    tool_input = event.payload.get("tool_input")
+    if isinstance(tool_input, dict) and isinstance(tool_input.get("packet"), dict):
+        return tool_input["packet"]
+    return None
+
+
+def _record_bridge_packet_route(run: dict[str, Any], event: WorkflowEvent) -> None:
+    packet = _packet_from_event(event)
+    if not packet:
+        return
+    route = packet.get("phase_route")
+    target_phase = packet.get("target_phase")
+    route_state = run.setdefault(
+        "route",
+        {"current_route": [], "target_phase": None, "is_stale": False, "decided_by_event_id": None},
+    )
+    if isinstance(route, list):
+        route_state["current_route"] = [str(item) for item in route]
+        if target_phase is None and route:
+            target_phase = route[-1]
+    if target_phase is not None:
+        route_state["target_phase"] = str(target_phase)
+    route_state["is_stale"] = False
+    route_state["decided_by_event_id"] = event.event_id
+
+
+def _commit_bridge_result_phase(run: dict[str, Any], event: WorkflowEvent, bridge_result: dict[str, Any], to_status: str) -> None:
+    if event.event_kind != "bridge_result_returned" or to_status != "bridge_window_returned":
+        return
+    if str(bridge_result.get("status") or "").lower() not in {"succeeded", "success"}:
+        return
+    route_state = run.get("route", {})
+    target_phase = route_state.get("target_phase")
+    if not target_phase:
+        return
+    current_route = route_state.get("current_route")
+    if isinstance(current_route, list) and current_route and str(current_route[-1]) != str(target_phase):
+        return
+    run["current_phase"] = str(target_phase)
+    route_state["is_stale"] = False
 
 
 def _build_bridge_result(event: WorkflowEvent, to_status: str) -> dict[str, Any]:

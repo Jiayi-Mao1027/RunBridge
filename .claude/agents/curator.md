@@ -265,6 +265,9 @@ You may inspect:
 - inventories
 - nearby docs when they clarify artifact meaning
 
+When using `Read`, omit optional parameters you do not need.
+Do not pass an empty `pages` value; either omit `pages` entirely or use a concrete range such as `1-5`.
+
 Read enough to judge artifact relevance and traceability.
 
 Do not turn broad reading into broad rewriting or general repo exploration for its own sake.
