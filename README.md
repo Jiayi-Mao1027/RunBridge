@@ -1,6 +1,41 @@
 # Parent-Sibling Claude Workflow
 
-This project provides a portable Claude Code workflow control plane that lives in a single `.claude` directory.
+This project is a portable Claude Code workflow control plane for running a governed multi-agent workflow from any sibling repository.
+
+It keeps the workflow system itself in one parent-level `.claude` directory while the repo under test stays clean. A front-facing `leader-orchestrator` reads the runtime state, freezes the user's request into a single execution meaning, opens one controlled bridge window, and hands that window to a `bridge-leader`. The bridge leader can then coordinate bounded teammate agents for preflight, documentation, implementation, validation, or anomaly handling.
+
+The goal is not to be a generic prompt collection. It is a stateful workflow runtime with:
+
+- a single source of truth for run state and lifecycle transitions
+- explicit phase routing from leader freeze to bridge, implementation, execution, and anomaly handling
+- one bridge invocation binding exactly one team and one task
+- policy checks before and after important tool use
+- ledgered runtime evidence for replay and debugging
+- strict separation between workflow control files and the target repo
+
+## What It Provides
+
+The system provides a controlled path for Claude Code work that would otherwise be ad hoc:
+
+```text
+user request
+  -> leader-orchestrator freezes task meaning
+  -> runtime validates route and lifecycle
+  -> bridge MCP builds one BridgePacket
+  -> bridge-leader owns one team/task window
+  -> teammate agents do bounded work
+  -> result returns to main leader with evidence
+```
+
+This makes it easier to distinguish ordinary lower-level agent errors from real system problems. Small teammate mistakes can be corrected inside the bridge window, while lifecycle, routing, permission, orphan-window, or control-plane failures are surfaced as system issues.
+
+## Design Principles
+
+- **Parent-owned workflow:** all workflow code, agents, hooks, policies, schemas, and runtime logic live under the parent `.claude` directory.
+- **Clean target repos:** the repo being worked on does not need local workflow code, a local `.claude` directory, or a local `.mcp.json`.
+- **Auditable execution:** runtime snapshots, event logs, check ledgers, update ledgers, and transitions are written under parent `.claude/runtime_state`.
+- **Bounded delegation:** a bridge window may create one team and one task, with explicit teammate roles and report requirements.
+- **No silent bypass:** route and lifecycle violations are runtime facts, not errors to work around inside the agent prompt.
 
 It is designed for this layout:
 
