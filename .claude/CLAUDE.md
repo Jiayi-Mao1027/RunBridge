@@ -130,6 +130,10 @@ It must include:
 
 One bridge window binds exactly one team and one task. The task may have multiple teammate assignments, but the packet must not describe multiple independent tasks.
 
+The task spec must preserve the full user-facing intent, not only a shortened description. Complex instructions should be carried as `original_user_instruction`, `instruction_coverage_checklist`, and preserved context fields. Downstream assignments must require every checklist item to be completed, explicitly deferred with a concrete reason, or escalated; reports must include the same coverage disposition. This prevents main-leader from executing only the first or easiest half of a compound request.
+
+L3 bridge packets must make repository-facing documentation freshness explicit. When a task touches docs, Markdown, `CLAUDE.md`, README, setup/usage instructions, agent behavior, or workflow rules, the L3 task should require the team to inspect whether docs need updating and to make the smallest correct update inside writable scope. `CLAUDE.md` is a first-class L3 documentation target when workflow or agent behavior changes.
+
 ## 6. Lifecycle
 
 The authoritative lifecycle is the bridge-window state machine in:
@@ -191,6 +195,8 @@ Long-running work is represented with `TeamIdle` events and payloads such as:
 - `partial_artifact_refs`
 
 `TeamIdle` means waiting, not completion. Completion requires evidence satisfying the completion contract.
+
+For long-running execution work, especially L4 execution/training, the execution group must estimate expected wall-clock runtime before launch and include the estimate basis in the execution record. A bridge soft timeout or partial result means the bridge window stopped waiting and returned intermediate state; it does not by itself prove the owned process was killed, failed, or completed.
 
 ## 9. Active Runtime Entry Point
 

@@ -270,6 +270,8 @@ You may inspect:
 - nearby docs when they clarify implementation-facing meaning
 - curator outputs that clarify the active artifact surface
 
+When the task affects docs, Markdown, repo-facing behavior, or agent/workflow rules, explicitly check whether `CLAUDE.md`, `README.md`, or `docs/` must change before implementation. Surface the needed doc update as an execution-layer fix unless it is already handled by refresher.
+
 When using `Read`, omit optional parameters you do not need.
 Do not pass an empty `pages` value; either omit `pages` entirely or use a concrete range such as `1-5`.
 

@@ -95,6 +95,7 @@ You must do the following well:
 
 - determine what the user is actually asking for in execution terms
 - freeze execution-relevant meaning clearly enough for downstream work
+- preserve compound user instructions as a coverage checklist, not only as a short task description
 - decide whether the run needs L2 advisory work
 - decide whether the run should proceed into L3 or L4 work
 - request the correct downstream tasks
@@ -143,6 +144,8 @@ Do not use L2 by default for trivial or routine work.
 
 ### L3 Bridge
 Use when downstream execution-facing work is needed and repository/document state must be refreshed, inspected, or translated into execution-facing task basis.
+
+When requesting L3, always decide whether repository-facing files need an update. This check is required even when the user's main request is not "write docs." If the task touches docs, Markdown, CLAUDE.md, README, agent behavior, workflow rules, setup instructions, or repo-facing usage, encode an explicit documentation refresh requirement in the L3 task. Prefer the smallest correct update over a no-op; prioritize `CLAUDE.md` when the task changes how agents or the workflow should behave.
 
 ### L4 Practice
 Use when actual implementation, execution, or anomaly work must occur.
@@ -201,6 +204,8 @@ You should think in terms of:
 
 Your role is to decide **which** task or run action should be requested next.
 
+Before building a bridge packet, convert the user's current instruction into explicit coverage items. Preserve the original instruction, constraints, acceptance criteria, and context in the task spec. Downstream work is not complete until each coverage item is either completed, explicitly deferred with a concrete reason, or escalated to the user/main-leader. Do not collapse a compound user request into a single vague description if it contains multiple requirements.
+
 When downstream work is needed, the normal self-contained path is:
 
 1. call `mcp__bridge__read_runtime_snapshot`
@@ -224,6 +229,8 @@ For L4 execution, a partial bridge result caused by a soft timeout means the bri
 If the safe next step would start a long-running process, consume GPU, write major checkpoints, perform external side effects, or exceed the frozen scope, ask the user for explicit approval. If the safe next step is lightweight reporting, reconciliation, or another legal L3 clarification/continuation, do it or explain why it is not appropriate.
 
 When approving or requesting formal GPU training, make the resource target explicit. Unless the user asks for a smoke/conservative run, the intended L4 execute task should target evidence-backed near-ceiling GPU memory utilization with a safety margin, not a low-memory placeholder. If that target is ambiguous, ask before launch.
+
+When requesting L4 execution for a long-running job, require the execution group to provide an estimated wall-clock runtime before launch, including a range and the basis for the estimate. If the estimate is uncertain, require the executor to say what is unknown and to report process refs, logs, output paths, and planned polling/audit timing.
 
 If a bridge call is denied, do not wait for the user to say "reroute." Read the runtime snapshot and notify item, then choose the recommended legal next phase, record the reroute, or explicitly state why no legal reroute exists. When L3 returns with a user clarification request, ask the user, record `user_answer_received`, then resume via `resume_same_l3_task` / `continuation_of_previous_l3` and use the legal `l3_bridge -> l3_bridge` or `l3_bridge -> leader_freeze` route as appropriate.
 

@@ -88,10 +88,13 @@ You are only trying to fix documentation that materially matters for the active 
 Your writable scope is the packet's hard-coded documentation scope.
 
 Typical examples include:
+- `CLAUDE.md`
 - `README.md`
 - `docs/`
 - setup / usage / quickstart documentation
 - small explanatory markdown files already in active use
+
+Treat `CLAUDE.md` as a first-class L3 documentation target. If the frozen task changes agent behavior, workflow rules, operating contracts, bridge routing, lifecycle interpretation, long-task handling, or other control-facing instructions, inspect `CLAUDE.md` and make the smallest correct update when it is within writable scope.
 
 You may read broadly when needed to avoid writing incorrect docs.
 
@@ -184,6 +187,8 @@ You must always return a usable report to bridge-leader. If no documentation cha
 - which files you inspected
 - why no edit was made
 - whether any stale documentation remains outside current scope
+
+If the task involves docs or Markdown files, prefer a minimal accurate update over a no-op. A no-op is acceptable only when you can name the inspected docs and explain why they already reflect the task.
 
 Do not return empty output. Empty output creates a bridge collection failure and prevents bridge-leader from producing a clean completion record.
 

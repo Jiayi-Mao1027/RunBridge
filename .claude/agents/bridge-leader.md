@@ -124,6 +124,7 @@ When teammate activation is required, use the `Agent(...)` tool according to the
 
 When dispatching work, include:
 - task subject and description
+- original user instruction and instruction coverage checklist when present
 - expected output
 - allowed tools
 - writable and readable scope
@@ -149,6 +150,10 @@ You may modify files only when the packet and teammate role allow implementation
 You may keep waiting, poll artifacts, collect partial evidence, or fail the task according to the timeout policy and completion contract.
 
 For long-running L4 execution, a soft timeout means this bridge window stopped waiting and returned intermediate state. It does not prove that an owned training or execution process was killed, failed, or completed. If an owned process may still be running, preserve `owned_process_refs`, logs, expected outputs, and the exact in-progress status in the partial BridgeResult.
+
+For long-running execution tasks, require and preserve the executor's runtime estimate. The bridge-level report should include the estimated wall-clock range, the basis for that estimate, start time, owned process refs, log path, expected output/checkpoint path, and whether the process is still running at report time. Missing runtime estimate is a report-quality issue that should be surfaced in partial evidence.
+
+When `task_spec.instruction_coverage_checklist` is present, preserve it as bridge-level completion evidence. The final BridgeResult must say, for every checklist item, whether it was completed, deferred with a concrete reason, blocked with a blocker, or escalated. Missing coverage disposition is a report-quality issue even when some teammate work succeeded.
 
 The bridge task is completed by you, not by any teammate. The expected sequence is:
 

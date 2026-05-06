@@ -1,5 +1,7 @@
 import http from "node:http";
+import https from "node:https";
 import { readFile, readdir, stat } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -11,8 +13,12 @@ const prototypeRoot = path.join(companionRoot, "prototype");
 const PORT = Number(process.env.BRIDGE_COMPANION_PORT || 8787);
 const HOST = process.env.BRIDGE_COMPANION_HOST || "127.0.0.1";
 const RUNTIME_ROOT = process.env.BRIDGE_RUNTIME_ROOT || "";
+const DEFAULT_BRIEF_BASE_URL = "https://api.deepseek.com";
+const DEFAULT_BRIEF_MODEL = "deepseek-v4-pro";
+const BRIEF_SECRET_PATH = process.env.BRIDGE_BRIEF_SECRET_PATH || path.join(os.homedir(), ".bridge-companion", "brief-secret.json");
 
 const readOnlyMethods = new Set(["GET", "HEAD", "OPTIONS"]);
+const allowedMethods = new Set(["GET", "HEAD", "OPTIONS", "POST"]);
 
 const lifecycleNextEvents = {
   leader_freeze: ["bridge_call_intended", "bridge_call_denied"],
@@ -153,6 +159,83 @@ async function readJsonlIfExists(filePath) {
   }
 }
 
+async function loadBriefSecret() {
+  const fileConfig = await readJsonIfExists(BRIEF_SECRET_PATH, null);
+  const localProjectConfig = await readJsonIfExists(path.join(companionRoot, "key.json"), null);
+  const config = fileConfig || localProjectConfig || {};
+  return {
+    baseUrl: config.baseUrl || config.base_url || process.env.BRIDGE_BRIEF_BASE_URL || DEFAULT_BRIEF_BASE_URL,
+    apiKey: config.apiKey || config.api_key || config.key || process.env.BRIDGE_BRIEF_API_KEY || "",
+    model: config.model || process.env.BRIDGE_BRIEF_MODEL || DEFAULT_BRIEF_MODEL
+  };
+}
+
+function httpsJson(url, payload, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const body = JSON.stringify(payload);
+    const req = https.request({
+      method: "POST",
+      hostname: target.hostname,
+      port: target.port || 443,
+      path: `${target.pathname}${target.search}`,
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        ...headers
+      }
+    }, res => {
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", chunk => { data += chunk; });
+      res.on("end", () => {
+        try {
+          const parsed = data ? JSON.parse(data) : {};
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
+          else reject(new Error(`brief api http ${res.statusCode}: ${data.slice(0, 500)}`));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function buildBriefPrompt(status) {
+  return [
+    "你是 Bridge Companion 的只读解释层。只能基于提供的 runtime facts 总结。",
+    "不要声称知道未记录的文件级进展；不要控制任务；不要给 agent 下指令。",
+    "输出中文，分为：当前在做什么、已经完成哪些 bridge 内部步骤、队员/packet 信息、仍未知什么、下一步可能发生什么。",
+    "保持克制，必须标注未知项。",
+    "runtime facts:",
+    JSON.stringify(status, null, 2).slice(0, 12000)
+  ].join("\n");
+}
+
+async function generateBrief(status) {
+  const secret = await loadBriefSecret();
+  if (!secret.apiKey) {
+    return { configured: false, text: "模型解读 API 未配置。请在本机权限受限配置文件中设置 apiKey。" };
+  }
+  const base = secret.baseUrl.replace(/\/+$/, "");
+  const response = await httpsJson(`${base}/chat/completions`, {
+    model: secret.model,
+    messages: [
+      { role: "system", content: "You summarize runtime facts for a read-only UI. Never invent progress or control execution." },
+      { role: "user", content: buildBriefPrompt(status) }
+    ],
+    temperature: 0.2
+  }, { authorization: `Bearer ${secret.apiKey}` });
+  return {
+    configured: true,
+    model: secret.model,
+    text: response?.choices?.[0]?.message?.content || "模型未返回可读摘要。"
+  };
+}
+
 function safeJoinRun(runId) {
   if (!/^[a-zA-Z0-9_.-]+$/.test(runId)) return null;
   if (!RUNTIME_ROOT) return null;
@@ -212,12 +295,116 @@ function buildUnknowns(statusKey, snapshot, events, hasCompletionReport, hasArti
   if (!hasCompletionReport) unknowns.push("尚未收到 completion report。 ");
   if (!hasArtifacts) unknowns.push("尚未收到 artifact。 ");
   if (["team_waiting", "message_dispatch_completed", "team_create_completed", "bridge_window_opened"].includes(statusKey)) {
-    unknowns.push("当前无法确认具体正在修改哪些文件。 ");
-    unknowns.push("当前无法确认队员内部执行进度。 ");
+    unknowns.push("如果 report / event 未记录文件名，则当前无法确认具体正在修改哪些文件。 ");
+    unknowns.push("如果 TeamIdle 之后没有新事件，则只能确认 bridge 正在等待，不能确认队员内部细节。 ");
   }
   if (!snapshot) unknowns.push("当前缺少 runtime_snapshot.json，只能依据 event_log 推断有限状态。 ");
   if (!events.length) unknowns.push("当前没有可读 event_log 事件。 ");
   return [...new Set(unknowns.map(x => x.trim()))];
+}
+
+function progressLabelFor(eventType) {
+  if (eventType.includes("bridge_window_opened")) return "桥接窗口已开启";
+  if (eventType.includes("bridge_packet_accepted")) return "任务包已被 bridge leader 接收";
+  if (eventType.includes("team_create_completed")) return "执行团队已创建";
+  if (eventType.includes("task_create_completed")) return "任务记录已创建";
+  if (eventType.includes("message_dispatch_completed")) return "任务说明已下发";
+  if (eventType.includes("artifact")) return "收到 artifact / 阶段性产物";
+  if (eventType.includes("completion") && eventType.includes("rejected")) return "完成检查未通过";
+  if (eventType.includes("completion") && eventType.includes("completed")) return "完成检查通过";
+  if (eventType.includes("partial")) return "部分结果返回";
+  if (eventType.includes("waiting") || eventType.includes("idle")) return "等待队员回报";
+  if (eventType.includes("failed") || eventType.includes("failure")) return "失败事件已记录";
+  if (eventType.includes("returned")) return "bridge window 已返回";
+  return eventType;
+}
+
+function extractPacketSummary(snapshot) {
+  const packet = snapshot?.bridge_packet || snapshot?.packet || snapshot?.last_bridge_packet || snapshot?.bridgePacket || null;
+  const semantics = snapshot?.frozen_semantics || packet?.frozen_semantics || {};
+  const scope = snapshot?.frozen_scope || packet?.frozen_scope || {};
+  const taskSpec = snapshot?.task_spec || packet?.task_spec || {};
+  const completion = snapshot?.completion_contract || packet?.completion_contract || {};
+  const report = snapshot?.report_contract || packet?.report_contract || {};
+  return {
+    hasPacket: Boolean(packet || Object.keys(taskSpec).length || Object.keys(completion).length),
+    objective: taskSpec.objective || taskSpec.title || semantics.objective || semantics.task || semantics.task_title || snapshot?.task_title || null,
+    targetPhase: packet?.target_phase || snapshot?.target_phase || snapshot?.phase || null,
+    scopeSummary: typeof scope === "string" ? scope : JSON.stringify(scope).slice(0, 260),
+    completionSummary: typeof completion === "string" ? completion : JSON.stringify(completion).slice(0, 260),
+    reportSummary: typeof report === "string" ? report : JSON.stringify(report).slice(0, 220),
+    allowedTools: packet?.allowed_tools || snapshot?.allowed_tools || [],
+    teamSpec: packet?.team_spec || snapshot?.team_spec || null
+  };
+}
+
+function extractTeammates(snapshot, events) {
+  const fromSnapshot = snapshot?.teammates || snapshot?.team?.teammates || snapshot?.team_spec?.teammates || snapshot?.team_spec?.members || [];
+  const teammates = Array.isArray(fromSnapshot) ? fromSnapshot.map((item, index) => ({
+    id: item.id || item.teammate_id || item.name || `teammate_${index + 1}`,
+    role: item.role || item.agent_type || item.type || item.name || "teammate",
+    status: item.status || item.lifecycle_state || "declared",
+    latest: item.latest_report || item.summary || null
+  })) : [];
+
+  const eventRoles = new Map();
+  for (const event of events) {
+    const payload = event.payload || event.data || event;
+    const role = payload.teammate_role || payload.teammate_id || payload.agent_type || payload.agent_id;
+    if (!role) continue;
+    eventRoles.set(role, {
+      id: String(role),
+      role: String(payload.agent_type || payload.teammate_role || role),
+      status: progressLabelFor(eventTypeOf(event)),
+      latest: summarizeEvent(event)
+    });
+  }
+  return [...teammates, ...eventRoles.values()].slice(0, 8);
+}
+
+function buildInternalProgress(snapshot, events, inbox, artifacts) {
+  const recentEvents = events.slice(-8).map(event => {
+    const type = eventTypeOf(event);
+    return {
+      eventType: type,
+      label: progressLabelFor(type),
+      timestamp: timestampOf(event),
+      summary: summarizeEvent(event)
+    };
+  });
+
+  const reportCandidates = [];
+  if (snapshot?.last_bridge_result) reportCandidates.push({ source: "last_bridge_result", value: snapshot.last_bridge_result });
+  if (snapshot?.completion_report) reportCandidates.push({ source: "completion_report", value: snapshot.completion_report });
+  if (snapshot?.partial_reports) reportCandidates.push({ source: "partial_reports", value: snapshot.partial_reports });
+  for (const item of inbox.slice(-5)) {
+    const type = eventTypeOf(item).toLowerCase();
+    const text = JSON.stringify(item).toLowerCase();
+    if (type.includes("report") || text.includes("report") || text.includes("artifact") || text.includes("partial")) {
+      reportCandidates.push({ source: "inbox", value: item });
+    }
+  }
+
+  const evidence = [];
+  if (recentEvents.length) evidence.push(`最近 ${recentEvents.length} 条 runtime 事件可读。`);
+  if (reportCandidates.length) evidence.push(`已发现 ${reportCandidates.length} 条 report / result 相关记录。`);
+  if (Array.isArray(artifacts) && artifacts.length) evidence.push(`已记录 ${artifacts.length} 个 artifact 引用。`);
+  if (snapshot?.team_idle?.wait_reason || snapshot?.wait_reason) evidence.push(`等待原因：${snapshot?.team_idle?.wait_reason || snapshot?.wait_reason}`);
+
+  const lastMeaningful = [...recentEvents].reverse().find(item => !item.eventType.toLowerCase().includes("idle")) || recentEvents.at(-1) || null;
+
+  return {
+    summary: lastMeaningful ? lastMeaningful.label : "尚未读到 bridge 内部进展事件",
+    lastMeaningfulEvent: lastMeaningful,
+    recentEvents,
+    evidence,
+    reports: reportCandidates.slice(-3).map(item => ({
+      source: item.source,
+      summary: typeof item.value === "string" ? item.value.slice(0, 220) : JSON.stringify(item.value).slice(0, 220)
+    })),
+    artifactCount: Array.isArray(artifacts) ? artifacts.length : 0,
+    hasInternalEvidence: Boolean(recentEvents.length || reportCandidates.length || (Array.isArray(artifacts) && artifacts.length))
+  };
 }
 
 function normalizeStatus(runId, snapshot, events, inbox, artifacts) {
@@ -230,6 +417,9 @@ function normalizeStatus(runId, snapshot, events, inbox, artifacts) {
   const lastUpdatedAt = latest ? timestampOf(latest) : (snapshot?.updated_at || snapshot?.last_updated_at || null);
   const possibleNextEvents = lifecycleNextEvents[lifecycleState] || [];
   const unknowns = buildUnknowns(lifecycleState, snapshot, events, hasCompletionReport, hasArtifacts);
+  const internalProgress = buildInternalProgress(snapshot, events, inbox, artifacts);
+  const packetSummary = extractPacketSummary(snapshot);
+  const teammates = extractTeammates(snapshot, events);
 
   return {
     runId,
@@ -253,6 +443,17 @@ function normalizeStatus(runId, snapshot, events, inbox, artifacts) {
     authority: snapshot ? "runtime_fact" : (events.length ? "derived_from_events" : "unknown"),
     facts: factsFor(lifecycleState, latest),
     unknowns,
+    internalProgress,
+    packetSummary,
+    teammates,
+    detail: {
+      packet: packetSummary,
+      teammates,
+      reports: internalProgress.reports,
+      artifacts,
+      recentEvents: internalProgress.recentEvents,
+      inbox: inbox.slice(-10)
+    },
     possibleNextEvents,
     inboxCount: inbox.length,
     artifactCount: Array.isArray(artifacts) ? artifacts.length : 0,
@@ -299,6 +500,25 @@ async function getRunBundle(runId) {
   return { snapshot, events, inbox, artifacts };
 }
 
+function readRequestJson(req, limitBytes = 200000) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", chunk => {
+      body += chunk;
+      if (Buffer.byteLength(body) > limitBytes) {
+        reject(new Error("request body too large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      try { resolve(body ? JSON.parse(body) : {}); }
+      catch (error) { reject(error); }
+    });
+    req.on("error", reject);
+  });
+}
+
 async function serveStatic(req, res, pathname) {
   let filePath = pathname === "/" ? path.join(prototypeRoot, "index.html") : path.join(companionRoot, pathname.replace(/^\/+/, ""));
   filePath = path.resolve(filePath);
@@ -319,8 +539,8 @@ async function serveStatic(req, res, pathname) {
 
 const server = http.createServer(async (req, res) => {
   try {
-    if (!readOnlyMethods.has(req.method || "")) {
-      sendJson(res, 405, { error: "Bridge Companion gateway is read-only. Only GET, HEAD, and OPTIONS are allowed." });
+    if (!allowedMethods.has(req.method || "")) {
+      sendJson(res, 405, { error: "Method not allowed." });
       return;
     }
     if (req.method === "OPTIONS") {
@@ -330,6 +550,15 @@ const server = http.createServer(async (req, res) => {
 
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     const pathname = url.pathname;
+
+    if (req.method === "POST" && pathname !== "/brief") {
+      sendJson(res, 405, { error: "POST is only allowed for /brief model summarization. It never mutates runtime." });
+      return;
+    }
+    if (req.method !== "POST" && !readOnlyMethods.has(req.method || "")) {
+      sendJson(res, 405, { error: "Bridge Companion gateway is read-only except /brief summarization." });
+      return;
+    }
 
     if (pathname === "/health") {
       sendJson(res, 200, {
@@ -344,6 +573,14 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === "/runs") {
       sendJson(res, 200, { runs: await listRuns() });
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/brief") {
+      const body = await readRequestJson(req);
+      const status = body.status || body.runtimeFacts || body;
+      const brief = await generateBrief(status);
+      sendJson(res, 200, brief);
       return;
     }
 

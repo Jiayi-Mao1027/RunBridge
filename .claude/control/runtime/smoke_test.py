@@ -258,7 +258,7 @@ def run_user_clarification_resume(control_root: Path, runs_root: Path) -> dict:
     p["target_phase"] = "l3_bridge"
     p["phase_route"] = ["l3_bridge"]
     p["task_spec"]["target_phase"] = "l3_bridge"
-    p["team_spec"]["ownership_boundary"]["writable_scopes"] = ["README.md", "docs/", "*.md"]
+    p["team_spec"]["ownership_boundary"]["writable_scopes"] = ["CLAUDE.md", "README.md", "docs/", "*.md"]
     dispatch(control_root, runs_root, event("bridge_call_intended", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_user_clarification", payload={"packet": p}))
     dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_user_clarification", payload={"packet": p}))
     dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_user_clarification", payload={"packet": p}))
@@ -501,12 +501,46 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         "run_demo",
         runtime_runs_root=str(runs_root),
         main_session_id="main_demo",
-        user_instruction="l3 documentation scope smoke",
+        user_instruction="l3 documentation scope smoke; update CLAUDE.md; require explicit no-op reason",
+        task_spec={
+            "task_subject": "l3 instruction preservation smoke",
+            "requirements": ["preserve every user requirement", "report checklist disposition"],
+            "context_note": "extra context must survive normalization",
+        },
         target_phase="l3_bridge",
     )
+    l3_task = hardened_l3["task_spec"]
+    l3_checklist = set(l3_task.get("instruction_coverage_checklist", []))
+    if not {
+        "preserve every user requirement",
+        "report checklist disposition",
+        "l3 documentation scope smoke",
+        "update CLAUDE.md",
+        "require explicit no-op reason",
+    }.issubset(l3_checklist):
+        raise AssertionError(json.dumps(l3_task, ensure_ascii=False, indent=2))
+    if l3_task.get("preserved_task_context", {}).get("context_note") != "extra context must survive normalization":
+        raise AssertionError(json.dumps(l3_task, ensure_ascii=False, indent=2))
+    if "instruction_coverage" not in set(hardened_l3["report_contract"].get("required_sections", [])):
+        raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
+    if "instruction coverage disposition" not in set(hardened_l3["report_contract"].get("required_evidence", [])):
+        raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
     l3_boundary = hardened_l3["team_spec"]["ownership_boundary"]
-    if set(l3_boundary.get("writable_scopes", [])) != {"README.md", "docs/", "*.md"}:
+    if set(l3_boundary.get("writable_scopes", [])) != {"CLAUDE.md", "README.md", "docs/", "*.md"}:
         raise AssertionError(json.dumps(l3_boundary, ensure_ascii=False, indent=2))
+    l3_assignments = "\n".join(
+        str(item.get("assignment") or "")
+        for item in hardened_l3.get("task_team_mapping", {}).get("teammate_assignments", [])
+        if isinstance(item, dict)
+    )
+    if (
+        "CLAUDE.md" not in l3_assignments
+        or "smallest correct documentation update" not in l3_assignments
+        or "Instruction coverage checklist" not in l3_assignments
+        or "do not mark the task complete until every checklist item is completed" not in l3_assignments
+        or "extra context must survive normalization" not in l3_assignments
+    ):
+        raise AssertionError(json.dumps(hardened_l3.get("task_team_mapping"), ensure_ascii=False, indent=2))
     l3_team_tools = {
         tool
         for teammate in hardened_l3["team_spec"]["teammate_specs"]
@@ -650,6 +684,13 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         raise AssertionError(json.dumps(execute_timeout, ensure_ascii=False, indent=2))
     if execute_packet["task_spec"]["completion_contract"]["timeout_policy"] != execute_timeout:
         raise AssertionError(json.dumps(execute_packet["task_spec"]["completion_contract"], ensure_ascii=False, indent=2))
+    execute_assignments = "\n".join(
+        str(item.get("assignment") or "")
+        for item in execute_packet.get("task_team_mapping", {}).get("teammate_assignments", [])
+        if isinstance(item, dict)
+    )
+    if "estimate expected wall-clock runtime" not in execute_assignments:
+        raise AssertionError(json.dumps(execute_packet.get("task_team_mapping"), ensure_ascii=False, indent=2))
     execute_assignments = json.dumps(execute_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
     if "near-ceiling accelerator memory utilization" not in execute_assignments or "resource utilization" not in execute_assignments:
         raise AssertionError(execute_assignments)

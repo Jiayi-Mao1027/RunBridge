@@ -10,12 +10,14 @@
       --ink-strong: #f0dcad;
       --muted: #a99168;
       --gold: #c69a57;
-      --paper: rgba(177, 139, 91, 0.72);
-      --paper-strong: rgba(208, 174, 121, 0.78);
-      --black: rgba(5, 5, 5, 0.66);
-      --black-strong: rgba(4, 4, 4, 0.82);
+      --paper: rgba(208, 174, 121, 0.82);
+      --black: rgba(5, 5, 5, 0.70);
+      --black-strong: rgba(4, 4, 4, 0.88);
       --line: rgba(185, 126, 67, 0.34);
       --red-glow: rgba(191, 68, 52, 0.64);
+      --stage-w: min(100vw, calc(100vh * 16 / 9));
+      --stage-h: calc(var(--stage-w) * 9 / 16);
+      --stage-scale: calc(var(--stage-w) / 1920);
     }
 
     * { box-sizing: border-box; }
@@ -23,10 +25,10 @@
     body {
       margin: 0;
       min-height: 100vh;
-      overflow: hidden;
+      overflow: auto;
       color: var(--ink);
       font-family: "Times New Roman", "Noto Serif SC", "Songti SC", serif;
-      background: #070707 url("../acb4f3c90af4c527737fda2bd8145c82.png") center / cover no-repeat fixed;
+      background: #070707;
     }
 
     body::before {
@@ -34,747 +36,348 @@
       position: fixed;
       inset: 0;
       pointer-events: none;
-      background:
-        linear-gradient(90deg, rgba(0,0,0,0.62), rgba(0,0,0,0.08) 22%, rgba(0,0,0,0.04) 72%, rgba(0,0,0,0.48)),
-        radial-gradient(circle at 41% 49%, rgba(255, 219, 150, 0.05), transparent 21rem),
-        radial-gradient(circle at 71% 29%, rgba(216, 100, 80, 0.07), transparent 11rem),
-        linear-gradient(180deg, rgba(0,0,0,0.20), rgba(0,0,0,0.36));
+      box-shadow: inset 0 0 140px rgba(0,0,0,.92);
+      z-index: 4;
     }
 
-    body::after {
+    .viewport {
+      width: 100vw;
+      min-height: 100vh;
+      display: grid;
+      place-items: start center;
+      background: #070707;
+    }
+
+    .stage {
+      position: relative;
+      width: var(--stage-w);
+      height: var(--stage-h);
+      min-width: 960px;
+      min-height: 540px;
+      overflow: hidden;
+      background: url("../acb4f3c90af4c527737fda2bd8145c82.png") center / cover no-repeat;
+      transform-origin: top center;
+    }
+
+    .stage::before {
       content: "";
-      position: fixed;
+      position: absolute;
       inset: 0;
       pointer-events: none;
-      box-shadow: inset 0 0 0 2px rgba(154, 96, 53, 0.18), inset 0 0 120px rgba(0,0,0,0.82);
+      background:
+        linear-gradient(90deg, rgba(0,0,0,.54), rgba(0,0,0,.06) 24%, rgba(0,0,0,.08) 70%, rgba(0,0,0,.42)),
+        linear-gradient(180deg, rgba(0,0,0,.08), rgba(0,0,0,.36));
+      z-index: 1;
     }
 
-    .screen {
-      position: relative;
-      z-index: 1;
-      width: min(100vw, 1920px);
-      height: 100vh;
-      min-height: 720px;
-      margin: 0 auto;
-    }
+    .ui { position: absolute; inset: 0; z-index: 3; }
 
     .brand {
       position: absolute;
-      left: 15.8%;
-      top: 4.6%;
-      text-shadow: 0 3px 14px #000;
+      left: calc(226 * var(--stage-scale));
+      top: calc(34 * var(--stage-scale));
+      text-shadow: 0 4px 16px #000;
     }
 
     .brand h1 {
       margin: 0;
       color: var(--ink-strong);
-      font-size: clamp(30px, 2.2vw, 46px);
+      font-size: calc(46 * var(--stage-scale));
+      line-height: 1;
       font-weight: 400;
-      letter-spacing: 0.03em;
     }
 
     .brand p {
-      margin: 4px 0 0;
+      margin: calc(8 * var(--stage-scale)) 0 0;
       color: var(--gold);
-      font-size: clamp(16px, 1.2vw, 24px);
-      letter-spacing: 0.18em;
+      font-size: calc(24 * var(--stage-scale));
+      letter-spacing: .16em;
     }
 
     .top-chip {
       position: absolute;
-      top: 4.4%;
-      width: 12.2%;
-      min-width: 150px;
-      height: 8.2%;
-      min-height: 62px;
-      display: grid;
-      align-content: center;
-      padding: 0 1.1vw;
-      border: 1px solid rgba(183, 126, 71, 0.26);
-      background: rgba(5, 5, 5, 0.58);
-      box-shadow: inset 0 0 22px rgba(0,0,0,0.88), 0 6px 20px rgba(0,0,0,0.42);
+      top: calc(30 * var(--stage-scale));
+      width: calc(260 * var(--stage-scale));
+      height: calc(82 * var(--stage-scale));
+      padding: calc(14 * var(--stage-scale)) calc(22 * var(--stage-scale));
+      background: rgba(5,5,5,.62);
+      border: 1px solid rgba(184,126,69,.34);
+      box-shadow: inset 0 0 22px rgba(0,0,0,.86);
     }
 
-    .top-chip .k {
-      color: var(--muted);
-      font-size: clamp(12px, .85vw, 16px);
-      margin-bottom: .35rem;
-    }
-
-    .top-chip .v {
-      color: var(--ink-strong);
-      font-size: clamp(14px, 1vw, 19px);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .run { right: 27.2%; }
-    .phase { right: 14.1%; }
-    .gateway { right: 2.2%; }
+    .top-chip .k { color: var(--muted); font-size: calc(16 * var(--stage-scale)); margin-bottom: calc(8 * var(--stage-scale)); }
+    .top-chip .v { color: var(--ink-strong); font-size: calc(18 * var(--stage-scale)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .run { left: calc(1188 * var(--stage-scale)); }
+    .phase { left: calc(1465 * var(--stage-scale)); }
+    .gateway { left: calc(1738 * var(--stage-scale)); width: calc(250 * var(--stage-scale)); }
 
     .contract-title {
       position: absolute;
-      left: 10.2%;
-      top: 18.5%;
-      width: 51%;
+      left: calc(112 * var(--stage-scale));
+      top: calc(186 * var(--stage-scale));
+      width: calc(1010 * var(--stage-scale));
       text-shadow: 0 4px 18px #000;
-      transform: translate3d(calc(var(--parallax-x, 0) * -0.18), calc(var(--parallax-y, 0) * -0.18), 0);
-      transition: transform .14s linear;
     }
 
     .contract-title h2 {
       margin: 0;
       color: var(--ink-strong);
-      font-size: clamp(38px, 3.25vw, 72px);
+      font-size: calc(58 * var(--stage-scale));
       font-weight: 400;
-      letter-spacing: 0.1em;
+      letter-spacing: .08em;
+      line-height: 1.12;
     }
 
     .contract-title p {
-      margin: 1.15rem 0 0;
+      margin: calc(28 * var(--stage-scale)) 0 0;
       color: var(--muted);
-      font-size: clamp(17px, 1.3vw, 25px);
-      letter-spacing: 0.08em;
+      font-size: calc(25 * var(--stage-scale));
+      letter-spacing: .06em;
     }
 
     .status-panel {
       position: absolute;
-      left: 29.2%;
-      top: 34.2%;
-      width: 26.7%;
-      min-height: 20.2%;
-      padding: 2.1% 2.3%;
-      color: #25180f;
-      background:
-        linear-gradient(90deg, rgba(230, 197, 135, 0.18), rgba(97, 59, 27, 0.08)),
-        var(--paper-strong);
-      border: 1px solid rgba(74, 42, 22, 0.32);
-      box-shadow: inset 0 0 32px rgba(67, 34, 13, 0.32);
-      clip-path: polygon(1% 0, 99% 0, 100% 8%, 99% 92%, 97% 100%, 1.5% 100%, 0 91%, 0.8% 8%);
+      left: calc(520 * var(--stage-scale));
+      top: calc(338 * var(--stage-scale));
+      width: calc(548 * var(--stage-scale));
+      height: calc(190 * var(--stage-scale));
+      padding: calc(30 * var(--stage-scale)) calc(38 * var(--stage-scale));
+      color: #24170f;
+      background: linear-gradient(90deg, rgba(238,205,148,.22), rgba(102,60,26,.10)), var(--paper);
+      border: 1px solid rgba(74,42,22,.34);
+      box-shadow: inset 0 0 32px rgba(67,34,13,.32), 0 16px 28px rgba(0,0,0,.42);
+      clip-path: polygon(1% 0, 99% 0, 100% 8%, 99% 92%, 97% 100%, 1.5% 100%, 0 91%, .8% 8%);
     }
 
-    .status-panel h3 {
-      margin: 0 0 1rem;
-      color: #23150d;
-      font-size: clamp(27px, 2vw, 42px);
-      font-weight: 500;
-      letter-spacing: 0.12em;
+    .status-panel h3 { margin: 0 0 calc(18 * var(--stage-scale)); font-size: calc(34 * var(--stage-scale)); line-height: 1.1; font-weight: 500; }
+    .status-panel p { margin: 0; font-size: calc(20 * var(--stage-scale)); line-height: 1.5; font-weight: 700; }
+
+    .bridge-progress {
+      position: absolute;
+      left: calc(520 * var(--stage-scale));
+      top: calc(548 * var(--stage-scale));
+      width: calc(548 * var(--stage-scale));
+      height: calc(170 * var(--stage-scale));
+      padding: calc(20 * var(--stage-scale)) calc(28 * var(--stage-scale));
+      background: rgba(5,5,5,.66);
+      border: 1px solid rgba(171,111,62,.28);
+      box-shadow: inset 0 0 22px rgba(0,0,0,.86), 0 14px 30px rgba(0,0,0,.45);
     }
 
-    .status-panel p {
-      margin: 0;
-      font-size: clamp(17px, 1.22vw, 25px);
-      line-height: 1.78;
-      font-weight: 700;
+    .bridge-progress h3 { margin: 0 0 calc(10 * var(--stage-scale)); color: var(--ink-strong); font-size: calc(26 * var(--stage-scale)); font-weight: 400; letter-spacing: .08em; }
+    .progress-summary { margin: 0 0 calc(10 * var(--stage-scale)); color: var(--gold); font-size: calc(17 * var(--stage-scale)); line-height: 1.35; }
+    .progress-list { display: grid; gap: calc(4 * var(--stage-scale)); color: var(--muted); font-size: calc(14 * var(--stage-scale)); line-height: 1.22; }
+    .progress-item::before { content: "›"; color: #8b3025; margin-right: .45em; }
+
+    .packet-panel {
+      position: absolute;
+      left: calc(1088 * var(--stage-scale));
+      top: calc(338 * var(--stage-scale));
+      width: calc(315 * var(--stage-scale));
+      height: calc(380 * var(--stage-scale));
+      padding: calc(20 * var(--stage-scale));
+      background: rgba(5,5,5,.64);
+      border: 1px solid rgba(171,111,62,.25);
+      box-shadow: inset 0 0 22px rgba(0,0,0,.86), 0 14px 30px rgba(0,0,0,.45);
     }
+
+    .packet-panel h3, .team-panel h3 { margin: 0 0 calc(12 * var(--stage-scale)); color: var(--ink-strong); font-size: calc(24 * var(--stage-scale)); font-weight: 400; letter-spacing: .08em; }
+    .mini-label { color: var(--gold); font-size: calc(13 * var(--stage-scale)); margin-top: calc(10 * var(--stage-scale)); }
+    .mini-text { color: var(--muted); font-size: calc(14 * var(--stage-scale)); line-height: 1.38; margin-top: calc(4 * var(--stage-scale)); max-height: calc(70 * var(--stage-scale)); overflow: hidden; }
+
+    .team-panel {
+      position: absolute;
+      left: calc(1418 * var(--stage-scale));
+      top: calc(338 * var(--stage-scale));
+      width: calc(430 * var(--stage-scale));
+      height: calc(380 * var(--stage-scale));
+      padding: calc(20 * var(--stage-scale));
+      background: rgba(5,5,5,.66);
+      border: 1px solid rgba(171,111,62,.25);
+      box-shadow: inset 0 0 22px rgba(0,0,0,.86), 0 14px 30px rgba(0,0,0,.45);
+    }
+
+    .team-list { display: grid; gap: calc(8 * var(--stage-scale)); }
+    .teammate { display: grid; grid-template-columns: calc(96 * var(--stage-scale)) 1fr; gap: calc(10 * var(--stage-scale)); padding: calc(8 * var(--stage-scale)); border: 1px solid rgba(171,111,62,.14); background: rgba(0,0,0,.22); }
+    .teammate .role { color: var(--gold); font-size: calc(14 * var(--stage-scale)); }
+    .teammate .status { color: var(--muted); font-size: calc(13 * var(--stage-scale)); line-height: 1.3; }
 
     .right-card {
       position: absolute;
-      right: 7.1%;
-      width: 22.7%;
-      min-width: 320px;
-      min-height: 13.5%;
+      left: calc(1418 * var(--stage-scale));
+      width: calc(430 * var(--stage-scale));
+      height: calc(108 * var(--stage-scale));
       display: grid;
-      grid-template-columns: 76px 1fr;
-      gap: 18px;
+      grid-template-columns: calc(56 * var(--stage-scale)) 1fr;
+      gap: calc(18 * var(--stage-scale));
       align-items: center;
-      padding: 1.2% 1.45%;
-      background: rgba(5, 5, 5, 0.66);
-      border: 1px solid rgba(171, 111, 62, 0.25);
-      box-shadow: inset 0 0 24px rgba(0,0,0,0.86), 0 15px 34px rgba(0,0,0,0.48);
-      backdrop-filter: blur(1px);
-      transform: translate3d(calc(var(--parallax-x, 0) * -0.12), calc(var(--parallax-y, 0) * -0.12), 0);
-      transition: filter .18s ease, transform .14s linear;
+      padding: calc(16 * var(--stage-scale));
+      background: rgba(5,5,5,.68);
+      border: 1px solid rgba(171,111,62,.25);
+      box-shadow: inset 0 0 20px rgba(0,0,0,.86), 0 12px 26px rgba(0,0,0,.42);
     }
-
-    .interpret { top: 38.3%; }
-    .next { top: 54.1%; }
-    .latest { top: 69.7%; }
-
-    .right-card .icon {
-      width: 64px;
-      height: 64px;
-      display: grid;
-      place-items: center;
-      color: var(--gold);
-      font-size: 36px;
-      border: 1px solid rgba(181, 126, 72, 0.22);
-      background: radial-gradient(circle, rgba(173, 99, 62, 0.16), rgba(0,0,0,0.58));
-      box-shadow: inset 0 0 16px rgba(0,0,0,0.85);
-    }
-
-    .right-card h3 {
-      margin: 0 0 .45rem;
-      color: var(--ink-strong);
-      font-size: clamp(21px, 1.5vw, 31px);
-      font-weight: 400;
-      letter-spacing: 0.1em;
-    }
-
-    .right-card p {
-      margin: 0;
-      color: var(--muted);
-      font-size: clamp(15px, 1vw, 20px);
-      line-height: 1.65;
-    }
+    .interpret { top: calc(738 * var(--stage-scale)); }
+    .next { top: calc(858 * var(--stage-scale)); }
+    .latest { top: calc(978 * var(--stage-scale)); }
+    .right-card .icon { width: calc(46 * var(--stage-scale)); height: calc(46 * var(--stage-scale)); display: grid; place-items: center; color: var(--gold); font-size: calc(28 * var(--stage-scale)); border: 1px solid rgba(181,126,72,.22); background: rgba(0,0,0,.38); }
+    .right-card h3 { margin: 0 0 calc(6 * var(--stage-scale)); color: var(--ink-strong); font-size: calc(22 * var(--stage-scale)); font-weight: 400; }
+    .right-card p { margin: 0; color: var(--muted); font-size: calc(14 * var(--stage-scale)); line-height: 1.34; }
 
     .stage-row {
       position: absolute;
-      left: 10.1%;
-      top: 67.6%;
-      width: 48.6%;
+      left: calc(110 * var(--stage-scale));
+      top: calc(752 * var(--stage-scale));
+      width: calc(960 * var(--stage-scale));
       display: grid;
       grid-template-columns: repeat(6, 1fr);
-      align-items: start;
       text-align: center;
     }
-
-    .stage {
-      position: relative;
-      color: var(--muted);
-      cursor: help;
-      transition: transform .18s ease, color .18s ease, filter .18s ease;
-    }
-
-    .stage:hover,
-    .stage.inspecting {
-      color: var(--ink-strong);
-      transform: translateY(-4px);
-      filter: brightness(1.12);
-    }
-
-    .stage:not(:last-child)::after {
-      content: "";
-      position: absolute;
-      top: 31px;
-      left: calc(50% + 32px);
-      width: calc(100% - 64px);
-      height: 1px;
-      background: rgba(180, 124, 68, 0.38);
-    }
-
-    .stage .orb {
-      width: clamp(52px, 3.9vw, 74px);
-      height: clamp(52px, 3.9vw, 74px);
-      margin: 0 auto .55rem;
-      display: grid;
-      place-items: center;
-      border-radius: 50%;
-      border: 1px solid rgba(165, 113, 67, 0.58);
-      color: var(--gold);
-      background: radial-gradient(circle, rgba(79, 54, 35, 0.48), rgba(2,2,2,0.84));
-      box-shadow: inset 0 0 16px #000, 0 8px 20px rgba(0,0,0,0.55);
-      font-size: clamp(24px, 1.9vw, 36px);
-    }
-
-    .stage.active { color: var(--ink-strong); }
-
-    .stage.active .orb {
-      border-color: rgba(226, 101, 73, 0.92);
-      color: #ffd19b;
-      box-shadow: 0 0 26px var(--red-glow), inset 0 0 18px #000;
-    }
-
-    .stage:hover .orb,
-    .stage.inspecting .orb {
-      border-color: rgba(235, 172, 95, .86);
-      box-shadow: 0 0 24px rgba(219, 126, 61, .48), inset 0 0 18px #000;
-    }
-
-    .stage .name {
-      font-size: clamp(14px, 1vw, 20px);
-      letter-spacing: .08em;
-      text-shadow: 0 2px 8px #000;
-    }
+    .phase-step { position: relative; color: var(--muted); cursor: help; transition: transform .18s ease, color .18s ease; }
+    .phase-step:not(:last-child)::after { content: ""; position: absolute; top: calc(30 * var(--stage-scale)); left: calc(50% + 30 * var(--stage-scale)); width: calc(100% - 60 * var(--stage-scale)); height: 1px; background: rgba(180,124,68,.38); }
+    .phase-step .orb { width: calc(62 * var(--stage-scale)); height: calc(62 * var(--stage-scale)); margin: 0 auto calc(10 * var(--stage-scale)); display: grid; place-items: center; border-radius: 50%; border: 1px solid rgba(165,113,67,.58); color: var(--gold); background: radial-gradient(circle, rgba(79,54,35,.48), rgba(2,2,2,.84)); box-shadow: inset 0 0 16px #000, 0 8px 20px rgba(0,0,0,.55); font-size: calc(28 * var(--stage-scale)); }
+    .phase-step.active { color: var(--ink-strong); }
+    .phase-step.active .orb { border-color: rgba(226,101,73,.92); color: #ffd19b; box-shadow: 0 0 26px var(--red-glow), inset 0 0 18px #000; }
+    .phase-step:hover { transform: translateY(calc(-4 * var(--stage-scale))); color: var(--ink-strong); }
+    .phase-step .name { font-size: calc(15 * var(--stage-scale)); text-shadow: 0 2px 8px #000; }
 
     .notes {
       position: absolute;
-      left: 12.7%;
-      bottom: 7.8%;
-      width: 45%;
+      left: calc(110 * var(--stage-scale));
+      top: calc(895 * var(--stage-scale));
+      width: calc(960 * var(--stage-scale));
+      height: calc(120 * var(--stage-scale));
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      background: rgba(5,5,5,0.54);
-      border: 1px solid rgba(171, 111, 62, 0.22);
-      box-shadow: inset 0 0 24px rgba(0,0,0,0.86);
+      background: rgba(5,5,5,.58);
+      border: 1px solid rgba(171,111,62,.22);
+      box-shadow: inset 0 0 24px rgba(0,0,0,.86);
     }
-
-    .note {
-      min-height: 88px;
-      padding: 1rem 1.1rem;
-      border-right: 1px solid rgba(171, 111, 62, 0.16);
-      color: var(--muted);
-      font-size: clamp(14px, .95vw, 19px);
-      line-height: 1.62;
-    }
-
+    .note { padding: calc(16 * var(--stage-scale)); border-right: 1px solid rgba(171,111,62,.16); color: var(--muted); font-size: calc(15 * var(--stage-scale)); line-height: 1.42; overflow: hidden; }
     .note:last-child { border-right: 0; }
     .note::before { content: "✦"; color: #7d2d22; margin-right: .55rem; }
 
-    .hotspot {
+    .button-row { position: absolute; left: calc(1088 * var(--stage-scale)); top: calc(738 * var(--stage-scale)); width: calc(315 * var(--stage-scale)); display: grid; gap: calc(10 * var(--stage-scale)); }
+    .ui-button { border: 1px solid rgba(180,124,68,.36); background: rgba(5,5,5,.72); color: var(--ink-strong); padding: calc(13 * var(--stage-scale)); font-size: calc(16 * var(--stage-scale)); cursor: pointer; }
+    .ui-button:hover { background: rgba(45,25,15,.82); }
+
+    .atmosphere { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }
+    .animated-region { position: absolute; background-image: url("../acb4f3c90af4c527737fda2bd8145c82.png"); background-size: var(--stage-w) var(--stage-h); opacity: .70; mix-blend-mode: screen; will-change: transform, filter, opacity; }
+    .animated-region::after { content: ""; position: absolute; inset: -18%; pointer-events: none; background: radial-gradient(ellipse at center, rgba(255,172,76,.22), rgba(215,83,48,.08) 46%, transparent 72%); opacity: .65; filter: blur(8px); animation: regionGlow 1.7s ease-in-out infinite alternate; }
+    .image-flame { filter: brightness(1.72) contrast(1.08) saturate(1.35) blur(.15px); -webkit-mask-image: radial-gradient(ellipse at 50% 54%, #000 0 28%, rgba(0,0,0,.86) 42%, transparent 70%); mask-image: radial-gradient(ellipse at 50% 54%, #000 0 28%, rgba(0,0,0,.86) 42%, transparent 70%); animation: originalFlicker .86s steps(3,end) infinite alternate; }
+    .image-flame.left-main { left: 0; bottom: 0; width: calc(170 * var(--stage-scale)); height: calc(210 * var(--stage-scale)); background-position: left bottom; }
+    .image-flame.right-main { right: 0; bottom: 0; width: calc(175 * var(--stage-scale)); height: calc(185 * var(--stage-scale)); background-position: right bottom; opacity: .56; }
+    .image-portal { left: calc(1328 * var(--stage-scale)); top: calc(150 * var(--stage-scale)); width: calc(250 * var(--stage-scale)); height: calc(260 * var(--stage-scale)); background-position: center; filter: brightness(1.45) contrast(1.05) saturate(1.22) blur(.25px); opacity: .48; -webkit-mask-image: radial-gradient(ellipse at 52% 48%, #000 0 34%, rgba(0,0,0,.62) 50%, transparent 72%); mask-image: radial-gradient(ellipse at 52% 48%, #000 0 34%, rgba(0,0,0,.62) 50%, transparent 72%); animation: originalPortal 2.8s ease-in-out infinite alternate; }
+    .light-breath { position: absolute; border-radius: 50%; background: radial-gradient(circle, rgba(255,154,69,.22), rgba(198,76,39,.08) 42%, transparent 72%); mix-blend-mode: screen; filter: blur(8px); animation: lightBreath 1.65s ease-in-out infinite alternate; }
+    .light-breath.left { left: -5%; bottom: -12%; width: calc(360 * var(--stage-scale)); height: calc(360 * var(--stage-scale)); }
+    .light-breath.right { right: -5%; bottom: -12%; width: calc(310 * var(--stage-scale)); height: calc(310 * var(--stage-scale)); animation-delay: -.5s; opacity: .68; }
+
+    @keyframes originalFlicker { 0% { opacity:.42; filter:brightness(1.34) saturate(1.18); transform:scale(.996,.988); } 45% { opacity:.82; filter:brightness(1.92) saturate(1.48); transform:scale(1.012,1.028); } 100% { opacity:.9; filter:brightness(2.08) saturate(1.52); transform:scale(.996,1.04); } }
+    @keyframes originalPortal { from { opacity:.32; filter:brightness(1.2) saturate(1.1) blur(.4px); transform:scale(.992); } to { opacity:.66; filter:brightness(1.72) saturate(1.35) blur(.18px); transform:scale(1.012); } }
+    @keyframes regionGlow { from { opacity:.25; transform:scale(.96); } to { opacity:.72; transform:scale(1.06); } }
+    @keyframes lightBreath { from { opacity:.38; transform:scale(.97); } to { opacity:.78; transform:scale(1.07); } }
+
+    .brief-panel {
       position: absolute;
-      z-index: 4;
-      border: 1px solid transparent;
-      background: transparent;
-      cursor: help;
-    }
-
-    .hotspot::after {
-      content: attr(data-tip);
-      position: absolute;
-      left: 50%;
-      bottom: calc(100% + 10px);
-      transform: translateX(-50%) translateY(6px);
-      width: max-content;
-      max-width: 280px;
-      padding: .65rem .8rem;
-      color: var(--ink-strong);
-      background: rgba(5,5,5,.88);
-      border: 1px solid rgba(180, 124, 68, .38);
-      box-shadow: 0 12px 30px rgba(0,0,0,.5), inset 0 0 16px rgba(0,0,0,.8);
-      font-size: 14px;
-      line-height: 1.45;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity .16s ease, transform .16s ease;
-      text-align: left;
-    }
-
-    .hotspot:hover::after,
-    .hotspot.inspecting::after {
-      opacity: 1;
-      transform: translateX(-50%) translateY(0);
-    }
-
-    .hotspot:hover,
-    .hotspot.inspecting {
-      border-color: rgba(219, 126, 61, .22);
-      background: radial-gradient(circle, rgba(255,170,80,.05), transparent 68%);
-    }
-
-    .hotspot.portal { left: 69.7%; top: 15.6%; width: 10.8%; height: 21.5%; border-radius: 50% 50% 36% 36%; }
-    .hotspot.candles-left { left: .4%; bottom: 1.8%; width: 7.6%; height: 18%; }
-    .hotspot.candles-right { right: .4%; bottom: 2.6%; width: 8.4%; height: 16%; }
-    .hotspot.dossier { left: 29.1%; top: 34%; width: 27%; height: 21%; }
-
-    .inspect-glint {
-      position: absolute;
-      z-index: 3;
-      width: 11rem;
-      height: 11rem;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(255, 178, 91, .24), rgba(197, 71, 44, .08) 38%, transparent 70%);
-      mix-blend-mode: screen;
-      filter: blur(6px);
-      opacity: 0;
-      transform: translate(-50%, -50%) scale(.74);
-      pointer-events: none;
-      transition: opacity .18s ease, transform .18s ease, left .16s ease, top .16s ease;
-    }
-
-    .inspect-glint.on {
-      opacity: .82;
-      transform: translate(-50%, -50%) scale(1);
-    }
-
-    .cursor-light {
-      position: fixed;
-      z-index: 3;
-      left: 50%;
-      top: 50%;
-      width: 18rem;
-      height: 18rem;
-      border-radius: 50%;
-      pointer-events: none;
-      opacity: 0;
-      transform: translate(-50%, -50%);
-      background: radial-gradient(circle, rgba(232, 170, 92, .12), rgba(160, 63, 38, .04) 35%, transparent 68%);
-      mix-blend-mode: screen;
-      filter: blur(10px);
-      transition: opacity .22s ease;
-    }
-
-    body.pointer-active .cursor-light { opacity: .75; }
-
-    .focus-plaque {
-      position: absolute;
-      z-index: 5;
-      left: 60.8%;
-      bottom: 9.6%;
-      width: 26.5%;
-      min-height: 86px;
-      padding: 1rem 1.15rem;
-      color: var(--ink-strong);
-      background: rgba(5, 5, 5, .78);
-      border: 1px solid rgba(181, 126, 72, .34);
-      box-shadow: 0 18px 44px rgba(0,0,0,.55), inset 0 0 22px rgba(0,0,0,.82);
-      opacity: 0;
-      transform: translateY(10px);
-      pointer-events: none;
-      transition: opacity .18s ease, transform .18s ease;
-    }
-
-    .focus-plaque.on {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    .focus-plaque .label {
-      color: var(--gold);
-      font-size: 13px;
-      letter-spacing: .16em;
-      margin-bottom: .45rem;
-    }
-
-    .focus-plaque .text {
-      color: var(--muted);
-      font-size: clamp(15px, 1vw, 19px);
-      line-height: 1.62;
-    }
-
-    .screen.inspecting .status-panel,
-    .status-panel:hover,
-    .right-card:hover,
-    .notes:hover {
-      filter: brightness(1.06);
-    }
-
-    body[data-scene="dossier"] .status-panel {
-      box-shadow: inset 0 0 32px rgba(67, 34, 13, 0.32), 0 0 34px rgba(224, 155, 83, .18);
-      filter: brightness(1.08);
-    }
-
-    body[data-scene="portal"] .image-portal,
-    body[data-scene="portal"] .image-portal::after {
-      animation-duration: 1.18s;
-      opacity: .82;
-    }
-
-    body[data-scene="left-candles"] .image-flame.left-main,
-    body[data-scene="left-candles"] .image-flame.left-secondary,
-    body[data-scene="right-lantern"] .image-flame.right-main {
-      animation-duration: .48s;
-      opacity: .94;
-    }
-
-    body[data-scene="left-candles"] .light-breath.left,
-    body[data-scene="right-lantern"] .light-breath.right {
-      opacity: .98;
-      animation-duration: .82s;
-    }
-
-    body[data-scene="stage"] .image-active-medallion {
-      opacity: .78;
-      animation-duration: .86s;
-    }
-
-    .atmosphere {
-      position: fixed;
-      inset: 0;
-      z-index: 2;
-      pointer-events: none;
+      left: calc(1088 * var(--stage-scale));
+      top: calc(842 * var(--stage-scale));
+      width: calc(315 * var(--stage-scale));
+      height: calc(174 * var(--stage-scale));
+      padding: calc(16 * var(--stage-scale));
+      background: rgba(5,5,5,.70);
+      border: 1px solid rgba(171,111,62,.28);
+      box-shadow: inset 0 0 20px rgba(0,0,0,.86), 0 14px 30px rgba(0,0,0,.45);
       overflow: hidden;
-      transform: translate3d(var(--parallax-x, 0), var(--parallax-y, 0), 0);
-      transition: transform .12s linear;
     }
+    .brief-panel h3 { margin: 0 0 calc(8 * var(--stage-scale)); color: var(--ink-strong); font-size: calc(20 * var(--stage-scale)); font-weight: 400; }
+    .brief-text { color: var(--muted); font-size: calc(13 * var(--stage-scale)); line-height: 1.34; white-space: pre-wrap; max-height: calc(118 * var(--stage-scale)); overflow: hidden; }
 
-    .animated-region {
-      position: absolute;
-      background-image: url("../acb4f3c90af4c527737fda2bd8145c82.png");
-      background-size: cover;
-      background-position: center;
-      background-attachment: fixed;
-      opacity: .72;
-      mix-blend-mode: screen;
-      will-change: transform, filter, opacity;
-    }
-
-    .animated-region::after {
-      content: "";
-      position: absolute;
-      inset: -18%;
-      pointer-events: none;
-      background: radial-gradient(ellipse at center, rgba(255, 172, 76, .22), rgba(215, 83, 48, .08) 46%, transparent 72%);
-      opacity: .65;
-      filter: blur(8px);
-      animation: regionGlow 1.7s ease-in-out infinite alternate;
-    }
-
-    .image-flame {
-      filter: brightness(1.72) contrast(1.08) saturate(1.35) blur(.15px);
-      -webkit-mask-image: radial-gradient(ellipse at 50% 54%, #000 0 28%, rgba(0,0,0,.86) 42%, transparent 70%);
-      mask-image: radial-gradient(ellipse at 50% 54%, #000 0 28%, rgba(0,0,0,.86) 42%, transparent 70%);
-      animation: originalFlicker .86s steps(3, end) infinite alternate;
-    }
-
-    .image-flame.left-main {
-      left: .7%;
-      bottom: 0;
-      width: 8.8%;
-      height: 19.5%;
-      transform-origin: 43% 82%;
-      animation-delay: -.2s;
-    }
-
-    .image-flame.left-secondary {
-      left: 2.5%;
-      bottom: 3.2%;
-      width: 5.4%;
-      height: 13.8%;
-      transform-origin: 52% 86%;
-      opacity: .55;
-      animation-delay: -.55s;
-    }
-
-    .image-flame.right-main {
-      right: .35%;
-      bottom: 2.1%;
-      width: 9.2%;
-      height: 17.2%;
-      transform-origin: 54% 84%;
-      opacity: .58;
-      animation-delay: -.38s;
-    }
-
-    .image-portal {
-      left: 69.2%;
-      top: 14.2%;
-      width: 13.4%;
-      height: 25.6%;
-      filter: brightness(1.45) contrast(1.05) saturate(1.22) blur(.25px);
-      opacity: .48;
-      -webkit-mask-image: radial-gradient(ellipse at 52% 48%, #000 0 34%, rgba(0,0,0,.62) 50%, transparent 72%);
-      mask-image: radial-gradient(ellipse at 52% 48%, #000 0 34%, rgba(0,0,0,.62) 50%, transparent 72%);
-      animation: originalPortal 2.8s ease-in-out infinite alternate;
-    }
-
-    .image-active-medallion {
-      left: 39.4%;
-      top: 65.1%;
-      width: 10.7%;
-      height: 13.2%;
-      filter: brightness(1.42) contrast(1.08) saturate(1.28);
-      opacity: .46;
-      -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 0 38%, rgba(0,0,0,.52) 53%, transparent 72%);
-      mask-image: radial-gradient(circle at 50% 50%, #000 0 38%, rgba(0,0,0,.52) 53%, transparent 72%);
-      animation: originalMedallion 1.9s ease-in-out infinite alternate;
-    }
-
-    .light-breath {
-      position: absolute;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(255, 154, 69, .22), rgba(198, 76, 39, .08) 42%, transparent 72%);
-      mix-blend-mode: screen;
-      filter: blur(8px);
-      animation: lightBreath 1.65s ease-in-out infinite alternate;
-    }
-
-    .light-breath.left {
-      left: -4%;
-      bottom: -9%;
-      width: 20rem;
-      height: 20rem;
-    }
-
-    .light-breath.right {
-      right: -5%;
-      bottom: -10%;
-      width: 17rem;
-      height: 17rem;
-      animation-delay: -.5s;
-      opacity: .68;
-    }
-
-    .heat-shimmer {
-      position: absolute;
-      left: 0;
-      right: 0;
-      bottom: -3%;
-      height: 23%;
-      background: linear-gradient(90deg, transparent, rgba(255,255,255,.025), transparent), radial-gradient(ellipse at 8% 70%, rgba(255, 190, 106, .05), transparent 28%), radial-gradient(ellipse at 91% 76%, rgba(255, 190, 106, .04), transparent 24%);
-      filter: blur(2px);
-      mix-blend-mode: screen;
-      animation: heatDrift 3.8s ease-in-out infinite alternate;
-    }
-
-    .smoke {
-      position: absolute;
-      left: 0;
-      right: 0;
-      bottom: -10%;
-      height: 42%;
-      background: radial-gradient(ellipse at 12% 72%, rgba(160, 142, 117, .07), transparent 24%), radial-gradient(ellipse at 84% 68%, rgba(160, 142, 117, .05), transparent 21%), radial-gradient(ellipse at 52% 95%, rgba(80, 72, 67, .07), transparent 38%);
-      filter: blur(10px);
-      opacity: .55;
-      animation: smokeDrift 8s ease-in-out infinite alternate;
-    }
-
-    @keyframes originalFlicker {
-      0% { opacity: .46; filter: brightness(1.34) contrast(1.04) saturate(1.18) blur(.2px); transform: translate3d(-.2%, .4%, 0) scale(.992, .986); }
-      35% { opacity: .82; filter: brightness(1.92) contrast(1.1) saturate(1.48) blur(.05px); transform: translate3d(.25%, -.35%, 0) scale(1.012, 1.028); }
-      68% { opacity: .62; filter: brightness(1.58) contrast(1.08) saturate(1.32) blur(.16px); transform: translate3d(-.15%, -.15%, 0) scale(1.006, .998); }
-      100% { opacity: .9; filter: brightness(2.08) contrast(1.12) saturate(1.52) blur(.04px); transform: translate3d(.35%, -.55%, 0) scale(.996, 1.04); }
-    }
-
-    @keyframes originalPortal {
-      from { opacity: .32; filter: brightness(1.2) contrast(1.02) saturate(1.1) blur(.4px); transform: scale(.992); }
-      to { opacity: .66; filter: brightness(1.72) contrast(1.08) saturate(1.35) blur(.18px); transform: scale(1.012); }
-    }
-
-    @keyframes originalMedallion {
-      from { opacity: .28; filter: brightness(1.16) saturate(1.05); transform: scale(.985); }
-      to { opacity: .62; filter: brightness(1.62) saturate(1.42); transform: scale(1.018); }
-    }
-
-    @keyframes regionGlow {
-      from { opacity: .25; transform: scale(.96); }
-      to { opacity: .72; transform: scale(1.06); }
-    }
-
-    @keyframes lightBreath {
-      from { opacity: .38; transform: scale(.97); }
-      to { opacity: .78; transform: scale(1.07); }
-    }
-
-    @keyframes heatDrift {
-      from { transform: translateX(-1.2%) skewX(-.8deg); opacity: .22; }
-      to { transform: translateX(1.2%) skewX(.8deg); opacity: .46; }
-    }
-
-    @keyframes smokeDrift {
-      from { transform: translateX(-1.5%) translateY(0); opacity: .38; }
-      to { transform: translateX(1.5%) translateY(-2%); opacity: .62; }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      .animated-region, .animated-region::after, .light-breath, .heat-shimmer, .smoke {
-        animation: none !important;
-      }
-    }
-
-    .control {
+    .detail-drawer {
       position: fixed;
-      z-index: 5;
-      left: 6rem;
-      bottom: 1rem;
-      display: flex;
-      gap: .5rem;
-      opacity: .18;
-      transition: opacity .18s ease;
-    }
-
-    .control:hover { opacity: 1; }
-
-    .control input,
-    .control button {
-      border: 1px solid rgba(180, 124, 68, 0.38);
-      background: rgba(5,5,5,0.88);
+      z-index: 20;
+      right: 0;
+      top: 0;
+      width: min(720px, 92vw);
+      height: 100vh;
+      padding: 24px;
+      background: rgba(5,5,5,.94);
+      border-left: 1px solid rgba(185,126,67,.38);
       color: var(--ink);
-      padding: .55rem .7rem;
-      font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      transform: translateX(102%);
+      transition: transform .22s ease;
+      overflow: auto;
+      box-shadow: -24px 0 80px rgba(0,0,0,.65);
     }
+    .detail-drawer.open { transform: translateX(0); }
+    .detail-drawer h2 { margin: 0 0 16px; color: var(--ink-strong); font-weight: 400; }
+    .detail-section { border-top: 1px solid rgba(185,126,67,.22); padding-top: 16px; margin-top: 16px; }
+    .detail-section h3 { margin: 0 0 10px; color: var(--gold); font-weight: 400; }
+    pre { white-space: pre-wrap; word-break: break-word; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .drawer-close { float: right; border: 1px solid rgba(185,126,67,.34); background: rgba(0,0,0,.6); color: var(--ink); padding: 8px 12px; cursor: pointer; }
 
+    .control { position: fixed; z-index: 21; left: 1rem; bottom: 1rem; display: flex; gap: .5rem; opacity: .22; transition: opacity .18s ease; }
+    .control:hover { opacity: 1; }
+    .control input, .control button { border: 1px solid rgba(180,124,68,.38); background: rgba(5,5,5,.88); color: var(--ink); padding: .55rem .7rem; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .control input { width: 280px; }
     .control button { cursor: pointer; }
 
-    @media (max-width: 1100px), (max-height: 760px) {
-      body { overflow: auto; }
-      .screen { min-height: 980px; height: 980px; }
-      .brand { left: 8%; }
-      .top-chip { top: 13%; width: 28%; }
-      .run { left: 8%; right: auto; }
-      .phase { left: 38%; right: auto; }
-      .gateway { left: 68%; right: auto; }
-      .contract-title { left: 8%; top: 24%; width: 84%; }
-      .status-panel { left: 9%; top: 38%; width: 52%; }
-      .right-card { right: 6%; width: 32%; min-width: 0; }
-      .interpret { top: 38%; }
-      .next { top: 54%; }
-      .latest { top: 70%; }
-      .stage-row { left: 8%; top: 83%; width: 84%; }
-      .notes { display: none; }
+    @media (max-width: 1100px) {
+      :root { --stage-w: 1100px; --stage-h: 619px; }
+      .viewport { place-items: start; overflow: auto; }
     }
   </style>
 </head>
 <body>
-  <div class="atmosphere" aria-hidden="true">
-    <div class="animated-region image-flame left-main"></div>
-    <div class="animated-region image-flame left-secondary"></div>
-    <div class="animated-region image-flame right-main"></div>
-    <div class="animated-region image-portal"></div>
-    <div class="animated-region image-active-medallion"></div>
-    <div class="light-breath left"></div>
-    <div class="light-breath right"></div>
-    <div class="heat-shimmer"></div>
-    <div class="smoke"></div>
+  <div class="viewport">
+    <main class="stage">
+      <div class="atmosphere" aria-hidden="true">
+        <div class="animated-region image-flame left-main"></div>
+        <div class="animated-region image-flame right-main"></div>
+        <div class="animated-region image-portal"></div>
+        <div class="light-breath left"></div>
+        <div class="light-breath right"></div>
+      </div>
+
+      <section class="ui">
+        <header class="brand"><h1>Bridge Contract</h1><p>远程委托卷宗</p></header>
+        <section class="top-chip run"><div class="k">Run ID</div><div class="v" id="runIdChip">run_demo</div></section>
+        <section class="top-chip phase"><div class="k">当前阶段</div><div class="v" id="phaseChip">实现阶段</div></section>
+        <section class="top-chip gateway"><div class="k">网关状态</div><div class="v" id="gatewayChip">Mock</div></section>
+
+        <section class="contract-title"><h2 id="taskTitle">当前委托：搭建 DPO 框架</h2><p>正在观察远端 Bridge Runtime 的真实执行事件。</p></section>
+
+        <article class="status-panel"><h3 id="statusTitle">等待执行结果</h3><p id="factText">任务说明已下发，执行团队正在后台处理。runtime 暂未收到新的结构化报告或 artifact。</p></article>
+
+        <article class="bridge-progress"><h3>桥内进展</h3><p class="progress-summary" id="internalSummary">任务说明已下发，随后进入等待回报。</p><div class="progress-list" id="internalProgressList"></div></article>
+
+        <article class="packet-panel"><h3>任务包摘要</h3><div class="mini-label">目标</div><div class="mini-text" id="packetObjective">等待 BridgePacket / task_spec 数据。</div><div class="mini-label">完成条件</div><div class="mini-text" id="packetCompletion">尚未读取 completion contract。</div><div class="mini-label">报告要求</div><div class="mini-text" id="packetReport">尚未读取 report contract。</div></article>
+
+        <article class="team-panel"><h3>队员状态</h3><div class="team-list" id="teamList"><div class="teammate"><div class="role">未知</div><div class="status">尚未读到 teammate 状态。</div></div></div></article>
+
+        <div class="button-row"><button class="ui-button" id="openDetailButton">查看运行卷宗详情</button><button class="ui-button" id="modelBriefButton">刷新模型解读</button></div>
+
+        <article class="brief-panel"><h3>模型整理</h3><div class="brief-text" id="modelBriefText">模型解读尚未生成。它会把 packet、队员状态、事件和未知项整理成自然语言，但不会补写 runtime 未记录的进展。</div></article>
+
+        <aside class="right-card interpret"><div class="icon">☞</div><div><h3>当前解读</h3><p id="explanationText">任务已经进入 bridge window 内部执行阶段，但尚未收到结构化回报。</p></div></aside>
+        <aside class="right-card next"><div class="icon">✉</div><div><h3>下一步</h3><p id="nextStepText">下一步将来自 lifecycle 允许的后续事件，不预测内部进展。</p></div></aside>
+        <aside class="right-card latest"><div class="icon">◷</div><div><h3>最新事件</h3><p id="latestEventText">team_idle_waiting · 14:02:20</p></div></aside>
+
+        <nav class="stage-row" aria-label="runtime phase line">
+          <div class="phase-step" data-stage="freeze"><div class="orb">§</div><div class="name">接取委托</div></div>
+          <div class="phase-step" data-stage="packet"><div class="orb">◈</div><div class="name">整备物资</div></div>
+          <div class="phase-step" data-stage="bridge"><div class="orb">⌂</div><div class="name">开启桥门</div></div>
+          <div class="phase-step active" data-stage="waiting"><div class="orb">♜</div><div class="name">等待回报</div></div>
+          <div class="phase-step" data-stage="verify"><div class="orb">†</div><div class="name">试炼验证</div></div>
+          <div class="phase-step" data-stage="done"><div class="orb">☉</div><div class="name">封卷交付</div></div>
+        </nav>
+
+        <section class="notes"><div class="note" id="unknownNote">如果 report / event 未记录文件名，则当前无法确认具体正在修改哪些文件。</div><div class="note" id="quietNote">尚未收到 completion report。</div><div class="note" id="companionNote">主信息只显示 runtime 已记录的事实，不补写内部进展。</div></section>
+      </section>
+    </main>
   </div>
 
-  <main class="screen">
-    <header class="brand">
-      <h1>Bridge Contract</h1>
-      <p>远程委托卷宗</p>
-    </header>
+  <aside class="detail-drawer" id="detailDrawer"><button class="drawer-close" id="closeDetailButton">关闭</button><h2>运行卷宗详情</h2><div id="detailContent"></div></aside>
 
-    <section class="top-chip run"><div class="k">Run ID</div><div class="v" id="runIdChip">run_demo</div></section>
-    <section class="top-chip phase"><div class="k">当前阶段</div><div class="v" id="phaseChip">实现阶段</div></section>
-    <section class="top-chip gateway"><div class="k">网关状态</div><div class="v" id="gatewayChip">Mock</div></section>
-
-    <section class="contract-title">
-      <h2 id="taskTitle">当前委托：搭建 DPO 框架</h2>
-      <p id="subtitle">正在观察远端 Bridge Runtime 的真实执行事件。</p>
-    </section>
-
-    <article class="status-panel">
-      <h3 id="statusTitle">等待执行结果</h3>
-      <p id="factText">任务说明已下发，执行团队正在后台处理。runtime 暂未收到新的结构化报告或 artifact。</p>
-    </article>
-
-    <aside class="right-card interpret">
-      <div class="icon">☞</div>
-      <div><h3>当前解读</h3><p id="explanationText">任务已经进入 bridge window 内部执行阶段，但尚未收到结构化回报。</p></div>
-    </aside>
-
-    <aside class="right-card next">
-      <div class="icon">✉</div>
-      <div><h3>下一步</h3><p id="nextStepText">下一步将来自 lifecycle 允许的后续事件，不预测内部进展。</p></div>
-    </aside>
-
-    <aside class="right-card latest">
-      <div class="icon">◷</div>
-      <div><h3>最新事件</h3><p id="latestEventText">team_idle_waiting · 14:02:20</p></div>
-    </aside>
-
-    <nav class="stage-row" aria-label="runtime phase line">
-      <div class="stage" data-stage="freeze" data-inspect="stage" data-label="接取委托" data-tip="语义冻结：主控锁定任务目标、约束和范围。"><div class="orb">§</div><div class="name">接取委托</div></div>
-      <div class="stage" data-stage="packet" data-inspect="stage" data-label="整备物资" data-tip="任务包：BridgePacket 已生成或准备生成。"><div class="orb">◈</div><div class="name">整备物资</div></div>
-      <div class="stage" data-stage="bridge" data-inspect="stage" data-label="开启桥门" data-tip="桥接窗口：bridge leader 接收任务包并创建执行窗口。"><div class="orb">⌂</div><div class="name">开启桥门</div></div>
-      <div class="stage active" data-stage="waiting" data-inspect="stage" data-label="等待回报" data-tip="等待回报：任务已下发，runtime 正在等待结构化结果。"><div class="orb">♜</div><div class="name">等待回报</div></div>
-      <div class="stage" data-stage="verify" data-inspect="stage" data-label="试炼验证" data-tip="完成检查：artifact / report 返回后检查 completion contract。"><div class="orb">†</div><div class="name">试炼验证</div></div>
-      <div class="stage" data-stage="done" data-inspect="stage" data-label="封卷交付" data-tip="返回结果：bridge window 返回最终结果或部分结果。"><div class="orb">☉</div><div class="name">封卷交付</div></div>
-    </nav>
-
-    <section class="notes">
-      <div class="note" id="unknownNote">当前无法确认具体文件级进展。</div>
-      <div class="note" id="quietNote">前台安静只表示暂无新 runtime 事件。</div>
-      <div class="note" id="companionNote">此处不猜测未返回的细节。</div>
-    </section>
-
-    <button class="hotspot portal" data-inspect="portal" data-label="桥门" data-tip="桥门区域：只表示 bridge window / gateway 的视觉位置，不代表任务控制入口。" aria-label="inspect portal"></button>
-    <button class="hotspot candles-left" data-inspect="left-candles" data-label="左侧烛火" data-tip="烛火只是场景氛围；前台安静不等于任务卡死。" aria-label="inspect left candles"></button>
-    <button class="hotspot candles-right" data-inspect="right-lantern" data-label="右侧灯火" data-tip="网关断开时只代表无法读取状态，不代表任务失败。" aria-label="inspect right lantern"></button>
-    <button class="hotspot dossier" data-inspect="dossier" data-label="主卷宗" data-tip="主卷宗只显示 runtime 已记录的事实，不补写内部进展。" aria-label="inspect dossier"></button>
-    <div class="inspect-glint" id="inspectGlint"></div>
-    <aside class="focus-plaque" id="focusPlaque"><div class="label" id="focusLabel">INSPECT</div><div class="text" id="focusText"></div></aside>
-  </main>
-
-  <div class="cursor-light" id="cursorLight" aria-hidden="true"></div>
-
-  <section class="control" aria-label="gateway controls">
-    <input id="runIdInput" placeholder="run id" value="run_demo_20260505_140220" />
-    <button id="loadStatusButton">读取网关</button>
-    <button id="useMockButton">Mock</button>
-  </section>
+  <section class="control" aria-label="gateway controls"><input id="runIdInput" placeholder="run id" value="run_demo_20260505_140220" /><button id="loadStatusButton">读取网关</button><button id="useMockButton">Mock</button></section>
 
   <script>
     const mockStatus = {
@@ -784,7 +387,33 @@
       lifecycleState: "team_waiting",
       latestEvent: { eventType: "team_idle_waiting", timestamp: "14:02:20" },
       gateway: { state: "mock", label: "Mock 数据" },
-      unknowns: ["当前无法确认具体文件级进展。", "尚未收到 completion report。", "尚未收到 artifact。"],
+      packetSummary: {
+        hasPacket: true,
+        objective: "搭建 DPO 框架。",
+        targetPhase: "l4_implement",
+        completionSummary: "需要返回实现结果、验证证据和 completion report。",
+        reportSummary: "报告应说明改动、证据、风险和未完成项。",
+        allowedTools: []
+      },
+      teammates: [
+        { role: "bridge-leader", status: "已创建 team/task，等待队员结构化回报。" },
+        { role: "implementor", status: "runtime 尚未收到明确 report，不能确认文件级动作。" }
+      ],
+      unknowns: ["如果 report / event 未记录文件名，则当前无法确认具体正在修改哪些文件。", "尚未收到 completion report。", "尚未收到 artifact。"],
+      internalProgress: {
+        summary: "任务说明已下发，随后进入等待回报。",
+        recentEvents: [
+          { eventType: "bridge_window_opened", label: "桥接窗口已开启", timestamp: "14:01:02" },
+          { eventType: "team_create_completed", label: "执行团队已创建", timestamp: "14:01:10" },
+          { eventType: "message_dispatch_completed", label: "任务说明已下发", timestamp: "14:01:18" },
+          { eventType: "team_idle_waiting", label: "等待队员回报", timestamp: "14:02:20" }
+        ],
+        evidence: ["最近 4 条 runtime 事件可读。", "尚未收到 report / artifact，因此不能确认文件级进展。"],
+        reports: [],
+        artifactCount: 0,
+        hasInternalEvidence: true
+      },
+      detail: {},
       display: {
         title: "等待执行结果",
         factText: "任务说明已下发，执行团队正在后台处理。runtime 暂未收到新的结构化报告或 artifact。",
@@ -794,39 +423,39 @@
       }
     };
 
-    const stageMap = {
-      leader_freeze: "freeze",
-      bridge_packet_built: "packet",
-      bridge_window_opened: "bridge",
-      bridge_packet_accepted: "bridge",
-      team_create_completed: "bridge",
-      message_dispatch_completed: "waiting",
-      team_waiting: "waiting",
-      artifacts_ready: "verify",
-      task_completion_rejected: "verify",
-      task_completion_completed: "done",
-      bridge_window_returned: "done",
-      bridge_window_partial_returned: "verify",
-      task_failed: "verify"
-    };
+    const stageMap = { leader_freeze: "freeze", bridge_packet_built: "packet", bridge_window_opened: "bridge", bridge_packet_accepted: "bridge", team_create_completed: "bridge", message_dispatch_completed: "waiting", team_waiting: "waiting", artifacts_ready: "verify", task_completion_rejected: "verify", task_completion_completed: "done", bridge_window_returned: "done", bridge_window_partial_returned: "verify", task_failed: "verify" };
+    let currentStatus = mockStatus;
+    const el = id => document.getElementById(id);
+    const escapeHtml = value => String(value ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
+    function shortPhase(phase) { if (!phase) return "未知"; if (phase.includes("implement")) return "实现阶段"; if (phase.includes("execute")) return "验证阶段"; if (phase.includes("anomaly")) return "异常阶段"; if (phase.includes("bridge")) return "桥接阶段"; return String(phase).split("/").at(-1).trim(); }
 
-    function el(id) { return document.getElementById(id); }
+    function renderInternalProgress(progress) {
+      const safe = progress || { summary: "尚未读到 bridge 内部进展事件", recentEvents: [], evidence: [] };
+      el("internalSummary").textContent = safe.summary || "尚未读到 bridge 内部进展事件";
+      const events = Array.isArray(safe.recentEvents) ? safe.recentEvents.slice(-4) : [];
+      const evidence = Array.isArray(safe.evidence) ? safe.evidence.slice(0, 2) : [];
+      const items = events.map(item => `${item.timestamp || "未知时间"} · ${item.label || item.eventType || "runtime event"}`).concat(evidence);
+      el("internalProgressList").innerHTML = (items.length ? items : ["没有可读内部事件；当前只能显示等待状态。"]).map(text => `<div class="progress-item">${escapeHtml(text)}</div>`).join("");
+    }
 
-    function shortPhase(phase) {
-      if (!phase) return "未知";
-      if (phase.includes("implement")) return "实现阶段";
-      if (phase.includes("execute")) return "验证阶段";
-      if (phase.includes("anomaly")) return "异常阶段";
-      if (phase.includes("bridge")) return "桥接阶段";
-      return String(phase).split("/").at(-1).trim();
+    function renderPacket(packet) {
+      const safe = packet || {};
+      el("packetObjective").textContent = safe.objective || "尚未读取 task_spec / frozen semantics。";
+      el("packetCompletion").textContent = safe.completionSummary && safe.completionSummary !== "{}" ? safe.completionSummary : "尚未读取 completion contract。";
+      el("packetReport").textContent = safe.reportSummary && safe.reportSummary !== "{}" ? safe.reportSummary : "尚未读取 report contract。";
+    }
+
+    function renderTeam(teammates) {
+      const list = Array.isArray(teammates) && teammates.length ? teammates.slice(0, 5) : [{ role: "未知", status: "尚未读到 teammate 状态。" }];
+      el("teamList").innerHTML = list.map(member => `<div class="teammate"><div class="role">${escapeHtml(member.role || member.id || "teammate")}</div><div class="status">${escapeHtml(member.status || member.latest || "状态未知")}</div></div>`).join("");
     }
 
     function render(status) {
+      currentStatus = status;
       const display = { ...mockStatus.display, ...(status.display || {}) };
       const latest = status.latestEvent || { eventType: "unknown", timestamp: "未知" };
       const gateway = status.gateway || { state: "unknown", label: "未知" };
       const unknowns = Array.isArray(status.unknowns) && status.unknowns.length ? status.unknowns : ["当前没有足够信息确认文件级进展。"];
-
       el("runIdChip").textContent = status.runId || "未知";
       el("phaseChip").textContent = shortPhase(status.phase);
       el("gatewayChip").textContent = gateway.label || gateway.state || "未知";
@@ -836,83 +465,30 @@
       el("explanationText").textContent = display.explanationText;
       el("nextStepText").textContent = display.nextStepText;
       el("latestEventText").textContent = `${latest.eventType || "unknown"} · ${latest.timestamp || "未知"}`;
+      renderInternalProgress(status.internalProgress);
+      renderPacket(status.packetSummary);
+      renderTeam(status.teammates);
       el("unknownNote").textContent = unknowns[0];
       el("quietNote").textContent = unknowns[1] || "没有 runtime 事实时，界面不会补写进展。";
       el("companionNote").textContent = display.companionNote;
       el("runIdInput").value = status.runId || "";
-
       const active = stageMap[status.lifecycleState] || "waiting";
-      document.querySelectorAll(".stage").forEach(node => node.classList.toggle("active", node.dataset.stage === active));
+      document.querySelectorAll(".phase-step").forEach(node => node.classList.toggle("active", node.dataset.stage === active));
     }
 
-    const screen = document.querySelector(".screen");
-    const glint = el("inspectGlint");
-    const focusPlaque = el("focusPlaque");
-    const focusLabel = el("focusLabel");
-    const focusText = el("focusText");
-    const cursorLight = el("cursorLight");
-    let pinnedInspect = null;
-
-    function setSceneState(state) {
-      document.body.dataset.scene = state || "idle";
+    function renderDetail() {
+      const detail = currentStatus.detail || {};
+      const payload = {
+        packet: currentStatus.packetSummary || detail.packet,
+        teammates: currentStatus.teammates || detail.teammates,
+        internalProgress: currentStatus.internalProgress,
+        reports: detail.reports || currentStatus.internalProgress?.reports || [],
+        artifacts: detail.artifacts || [],
+        recentEvents: detail.recentEvents || currentStatus.internalProgress?.recentEvents || [],
+        inbox: detail.inbox || []
+      };
+      el("detailContent").innerHTML = Object.entries(payload).map(([key, value]) => `<section class="detail-section"><h3>${escapeHtml(key)}</h3><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre></section>`).join("");
     }
-
-    function moveGlint(target) {
-      const rect = target.getBoundingClientRect();
-      const screenRect = screen.getBoundingClientRect();
-      glint.style.left = `${rect.left - screenRect.left + rect.width / 2}px`;
-      glint.style.top = `${rect.top - screenRect.top + rect.height / 2}px`;
-      glint.classList.add("on");
-      screen.classList.add("inspecting");
-    }
-
-    function showInspection(node, pin = false) {
-      document.querySelectorAll(".inspecting").forEach(item => item.classList.remove("inspecting"));
-      node.classList.add("inspecting");
-      moveGlint(node);
-      setSceneState(node.dataset.inspect || "inspect");
-      if (node.dataset.tip) {
-        el("companionNote").textContent = node.dataset.tip;
-        focusLabel.textContent = node.dataset.label || "INSPECT";
-        focusText.textContent = node.dataset.tip;
-        focusPlaque.classList.add("on");
-      }
-      if (pin) pinnedInspect = node;
-    }
-
-    function clearInspection(force = false) {
-      if (pinnedInspect && !force) return;
-      glint.classList.remove("on");
-      screen.classList.remove("inspecting");
-      focusPlaque.classList.remove("on");
-      setSceneState("idle");
-      document.querySelectorAll(".inspecting").forEach(node => node.classList.remove("inspecting"));
-      pinnedInspect = null;
-    }
-
-    document.querySelectorAll(".hotspot, .stage").forEach(node => {
-      node.addEventListener("mouseenter", () => showInspection(node));
-      node.addEventListener("mouseleave", () => clearInspection(false));
-      node.addEventListener("click", event => {
-        event.preventDefault();
-        if (pinnedInspect === node) clearInspection(true);
-        else showInspection(node, true);
-      });
-    });
-
-    document.addEventListener("keydown", event => {
-      if (event.key === "Escape") clearInspection(true);
-    });
-
-    document.addEventListener("pointermove", event => {
-      document.body.classList.add("pointer-active");
-      cursorLight.style.left = `${event.clientX}px`;
-      cursorLight.style.top = `${event.clientY}px`;
-      const x = (event.clientX / window.innerWidth - .5) * 2;
-      const y = (event.clientY / window.innerHeight - .5) * 2;
-      document.documentElement.style.setProperty("--parallax-x", `${x * 4}px`);
-      document.documentElement.style.setProperty("--parallax-y", `${y * 3}px`);
-    });
 
     async function loadFromGateway() {
       const runId = el("runIdInput").value.trim();
@@ -922,25 +498,32 @@
         if (!response.ok) throw new Error(String(response.status));
         render(await response.json());
       } catch {
-        render({
-          ...mockStatus,
-          lifecycleState: "unknown",
-          gateway: { state: "disconnected", label: "网关不可读" },
-          latestEvent: { eventType: "unknown", timestamp: "未知" },
-          unknowns: ["当前无法读取本地 runtime 网关。", "任务真实状态未知；这不代表远端任务失败或停止。"],
-          display: {
-            title: "网关不可读",
-            factText: "当前无法读取本地 runtime 网关。任务真实状态未知；这不代表远端任务失败或停止。",
-            explanationText: "请检查本地 gateway 是否启动、Cursor 映射是否打开、runId 是否存在。",
-            nextStepText: "下一步是恢复只读网关连接，而不是对任务执行状态做猜测。",
-            companionNote: "通往本地卷宗的映射暂时断开。"
-          }
-        });
+        render({ ...mockStatus, lifecycleState: "unknown", gateway: { state: "disconnected", label: "网关不可读" }, latestEvent: { eventType: "unknown", timestamp: "未知" }, unknowns: ["当前无法读取本地 runtime 网关。", "任务真实状态未知；这不代表远端任务失败或停止。"], display: { title: "网关不可读", factText: "当前无法读取本地 runtime 网关。任务真实状态未知；这不代表远端任务失败或停止。", explanationText: "请检查本地 gateway 是否启动、Cursor 映射是否打开、runId 是否存在。", nextStepText: "下一步是恢复只读网关连接，而不是对任务执行状态做猜测。", companionNote: "通往本地卷宗的映射暂时断开。" } });
       }
     }
 
     el("loadStatusButton").addEventListener("click", loadFromGateway);
     el("useMockButton").addEventListener("click", () => render(mockStatus));
+    el("openDetailButton").addEventListener("click", () => { renderDetail(); el("detailDrawer").classList.add("open"); });
+    el("closeDetailButton").addEventListener("click", () => el("detailDrawer").classList.remove("open"));
+    el("modelBriefButton").addEventListener("click", async () => {
+      el("companionNote").textContent = "正在请求模型基于 runtime facts 生成解读。";
+      try {
+        const response = await fetch("/brief", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: currentStatus })
+        });
+        if (!response.ok) throw new Error(String(response.status));
+        const brief = await response.json();
+        const text = brief.text || "模型没有返回可读解读。";
+        el("modelBriefText").textContent = text;
+        el("companionNote").textContent = "模型解读已基于当前 runtime facts 更新。";
+      } catch (error) {
+        el("modelBriefText").textContent = "模型解读失败：请检查 gateway 端 key.json / brief-secret.json 配置或网络连接。";
+        el("companionNote").textContent = "模型解读失败；主界面仍显示 runtime 原始事实。";
+      }
+    });
     render(mockStatus);
   </script>
 </body>

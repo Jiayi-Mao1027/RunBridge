@@ -32,7 +32,7 @@ DEFAULT_FORBIDDEN_ACTIONS = [
 ]
 PHASE_OWNERSHIP_DEFAULTS = {
     "l2_advisory": {"readable_scopes": ["."], "writable_scopes": []},
-    "l3_bridge": {"readable_scopes": ["."], "writable_scopes": ["README.md", "docs/", "*.md"]},
+    "l3_bridge": {"readable_scopes": ["."], "writable_scopes": ["CLAUDE.md", "README.md", "docs/", "*.md"]},
     "l4_implement": {"readable_scopes": ["."], "writable_scopes": ["."]},
     "l4_execute": {"readable_scopes": ["."], "writable_scopes": ["."]},
     "l4_anomaly": {"readable_scopes": ["."], "writable_scopes": []},
@@ -62,7 +62,7 @@ PHASE_TEAM_DEFAULTS = {
     "l3_bridge": [
         ("curator", "artifact_curation", WRITE_TOOLS, "clarify active logs, datasets, checkpoints, outputs, archive boundaries, and traceability"),
         ("preflight-initial", "preflight_audit", READ_CHECK_TOOLS, "inspect implementation-facing repo/config state and surface required changes before implementation"),
-        ("refresher", "documentation_refresh", ["Read", "Grep", "Glob", "LS", "Edit", "Write"], "refresh bounded human-facing repository documentation when needed"),
+        ("refresher", "documentation_refresh", ["Read", "Grep", "Glob", "LS", "Edit", "Write"], "refresh CLAUDE.md and bounded human-facing repository documentation when needed"),
     ],
     "l4_implement": [
         ("implementor", "implement", WRITE_TOOLS, "make approved code/config changes and collect bounded validation evidence"),
@@ -287,17 +287,27 @@ def _normalize_task_spec(
     report_contract: dict[str, Any],
 ) -> dict[str, Any]:
     source = deepcopy(task_spec or {})
-    subject = str(source.get("task_subject") or source.get("subject") or "bridge-window task")
-    description = str(source.get("task_description") or source.get("description") or user_instruction or subject)
-    return {
+    original_instruction = str(
+        source.get("original_user_instruction")
+        or source.get("user_instruction")
+        or user_instruction
+        or ""
+    ).strip()
+    subject = str(source.get("task_subject") or source.get("subject") or _derive_subject(original_instruction) or "bridge-window task")
+    description = str(source.get("task_description") or source.get("description") or original_instruction or subject)
+    normalized = {
         "task_id_or_null": source.get("task_id_or_null") or source.get("task_id"),
         "task_subject": subject,
         "task_description": description,
+        "original_user_instruction": original_instruction,
+        "instruction_coverage_checklist": _derive_instruction_coverage_checklist(source, original_instruction, description),
+        "preserved_task_context": _preserved_task_context(source),
         "task_kind": str(source.get("task_kind") or "bridge_window_task"),
         "target_phase": target_phase,
         "completion_contract": deepcopy(completion_contract),
         "report_contract": deepcopy(report_contract),
     }
+    return normalized
 
 
 def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any]) -> dict[str, Any]:
@@ -312,6 +322,11 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
                 "assignment": "\n".join(
                     [
                         f"{name}: {task_spec['task_description']}",
+                        f"Original user instruction: {task_spec.get('original_user_instruction') or task_spec['task_description']}",
+                        f"Instruction coverage checklist: {_json_list(task_spec.get('instruction_coverage_checklist'))}",
+                        f"Preserved task context: {_json_dict(task_spec.get('preserved_task_context'))}",
+                        "Coverage rule: do not mark the task complete until every checklist item is completed, explicitly deferred with a concrete reason, or escalated to main-leader/user.",
+                        "Report rule: include an instruction coverage section that lists completed, deferred, blocked, and escalated checklist items.",
                         f"Role: {teammate.get('role') or 'bridge teammate'}",
                         f"Responsibilities: {_json_list(responsibilities)}",
                         f"Allowed tools: {_json_list(teammate.get('allowed_tools'))}",
@@ -319,6 +334,7 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
                         f"Writable scopes: {_json_list(ownership.get('writable_scopes'))}",
                         f"Completion contract: {_json_dict(task_spec.get('completion_contract'))}",
                         f"Report contract: {_json_dict(task_spec.get('report_contract'))}",
+                        *_phase_assignment_instructions(str(task_spec.get("target_phase") or ""), name),
                         "Do not read .claude/runtime_state/bridge_prompts for task context; that bridge prompt artifact is for audit only.",
                         "When using Read, omit optional parameters you do not need. Never pass pages as an empty string.",
                     ]
@@ -333,14 +349,33 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
     }
 
 
+def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> list[str]:
+    if target_phase == "l3_bridge":
+        return [
+            "L3 documentation rule: explicitly decide whether CLAUDE.md, README.md, docs/, or other Markdown files need updates for this task.",
+            "If the task touches documentation, Markdown, repo-facing instructions, workflow rules, or agent behavior, make the smallest correct documentation update within writable scope; prioritize CLAUDE.md when it is relevant.",
+            "If no documentation update is made, report the inspected documentation files and the concrete reason no update was needed.",
+        ]
+    if target_phase == "l4_execute" and teammate_name == "executor":
+        return [
+            "Long-task ETA rule: before launching any long-running command, estimate expected wall-clock runtime as a range, state the basis for the estimate, and include that estimate in the execution report.",
+            "If runtime cannot be estimated, state that explicitly with the missing information and still record command, start time, owned process refs, logs, and expected outputs.",
+        ]
+    if target_phase == "l4_execute" and teammate_name == "postrun":
+        return [
+            "Audit ETA rule: compare actual runtime against the executor's estimate when available, and flag material deviation as execution evidence rather than treating it as chat context.",
+        ]
+    return []
+
+
 def _json_list(value: Any) -> str:
     items = value if isinstance(value, list) else []
-    return json.dumps([str(item) for item in items], ensure_ascii=False)
+    return json.dumps([str(item) for item in items], ensure_ascii=False, default=str)
 
 
 def _json_dict(value: Any) -> str:
     data = value if isinstance(value, dict) else {}
-    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def _default_completion_contract(target_phase: str | None = None) -> dict[str, Any]:
@@ -349,7 +384,10 @@ def _default_completion_contract(target_phase: str | None = None) -> dict[str, A
         "required_outputs": ["report"],
         "required_artifacts": [],
         "validation_requirements": [],
-        "success_criteria": ["bridge leader collected a report from the team"],
+        "success_criteria": [
+            "bridge leader collected a report from the team",
+            "every instruction coverage checklist item is completed, deferred with reason, blocked, or escalated",
+        ],
         "allowed_partial_result": True,
         "timeout_policy": timeout_policy,
     }
@@ -357,12 +395,98 @@ def _default_completion_contract(target_phase: str | None = None) -> dict[str, A
 
 def _default_report_contract() -> dict[str, Any]:
     return {
-        "required_sections": ["summary", "evidence"],
-        "required_evidence": ["runtime event ids"],
+        "required_sections": ["summary", "evidence", "instruction_coverage"],
+        "required_evidence": ["runtime event ids", "instruction coverage disposition"],
         "artifact_reporting_format": "list",
         "include_failure_reason": True,
         "include_next_action_recommendation": True,
     }
+
+
+def _derive_subject(original_instruction: str) -> str:
+    text = " ".join(str(original_instruction or "").split())
+    if not text:
+        return ""
+    return text[:72]
+
+
+def _derive_instruction_coverage_checklist(source: dict[str, Any], original_instruction: str, description: str) -> list[str]:
+    items: list[str] = []
+    for key in (
+        "instruction_coverage_checklist",
+        "requirements",
+        "acceptance_criteria",
+        "constraints",
+        "must_do",
+        "must_not_do",
+    ):
+        items.extend(_string_items(source.get(key)))
+    items.extend(_split_instruction_text(original_instruction))
+    if not items:
+        items.extend(_split_instruction_text(description))
+    return _dedupe_nonempty(items) or [str(description)]
+
+
+def _preserved_task_context(source: dict[str, Any]) -> dict[str, Any]:
+    reserved = {
+        "task_id_or_null",
+        "task_id",
+        "task_subject",
+        "subject",
+        "task_description",
+        "description",
+        "original_user_instruction",
+        "user_instruction",
+        "instruction_coverage_checklist",
+        "requirements",
+        "acceptance_criteria",
+        "constraints",
+        "must_do",
+        "must_not_do",
+        "task_kind",
+    }
+    preserved = {}
+    for key, value in source.items():
+        if key not in reserved:
+            preserved[str(key)] = deepcopy(value)
+    return preserved
+
+
+def _string_items(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return _split_instruction_text(str(value))
+
+
+def _split_instruction_text(text: str) -> list[str]:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    pieces: list[str] = []
+    for line in normalized.split("\n"):
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        cleaned = cleaned.lstrip("-*0123456789.、)） \t")
+        for part in cleaned.replace("；", ";").replace("。", ";").split(";"):
+            stripped = part.strip()
+            if stripped:
+                pieces.append(stripped)
+    return pieces
+
+
+def _dedupe_nonempty(items: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item).strip()
+        key = text.casefold()
+        if text and key not in seen:
+            result.append(text)
+            seen.add(key)
+    return result
 
 
 def _now_iso() -> str:

@@ -31,6 +31,7 @@ bridge-companion/
     visual-direction.md
     interaction-plan.md
     interaction-rules.md
+    brief-api.md
   gateway/
     server.mjs
   prototype/

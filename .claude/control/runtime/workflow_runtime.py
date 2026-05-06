@@ -1355,7 +1355,7 @@ def _expected_phase_route(snapshot: dict[str, Any], target_phase: str) -> list[s
 
 
 def _packet_l3_write_scope_policy_owned(packet: dict[str, Any]) -> bool:
-    expected_writable_scopes = {"README.md", "docs/", "*.md"}
+    expected_writable_scopes = {"CLAUDE.md", "README.md", "docs/", "*.md"}
     team_spec = packet.get("team_spec") if isinstance(packet.get("team_spec"), dict) else {}
     ownership = team_spec.get("ownership_boundary") if isinstance(team_spec, dict) else {}
     if not isinstance(ownership, dict):

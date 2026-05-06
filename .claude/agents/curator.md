@@ -265,6 +265,8 @@ You may inspect:
 - inventories
 - nearby docs when they clarify artifact meaning
 
+For L3 tasks that affect documentation, Markdown, repo-facing instructions, or workflow/agent behavior, include `CLAUDE.md`, `README.md`, and `docs/` in the active surface judgment when they are present. If they need update, report that clearly for refresher; if the packet gives write scope and the needed curation is minimal, keep the update bounded and explicit.
+
 When using `Read`, omit optional parameters you do not need.
 Do not pass an empty `pages` value; either omit `pages` entirely or use a concrete range such as `1-5`.
 
