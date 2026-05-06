@@ -232,6 +232,7 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if tool_name == "read_runtime_snapshot":
         result = read_runtime_snapshot(CONTROL_ROOT, _resolve_run_id(arguments, runtime_runs_root, require_active=False), runtime_runs_root=runtime_runs_root)
     elif tool_name == "build_bridge_packet":
+        arguments = _repair_bridge_packet_arguments(arguments)
         run_id = _resolve_run_id(arguments, runtime_runs_root, require_active=True)
         _freeze_semantics_if_needed(arguments, run_id, runtime_runs_root)
         packet = decide_next_bridge_packet(
@@ -477,6 +478,28 @@ def _build_frozen_semantics(arguments: dict[str, Any]) -> dict[str, Any]:
         "target_phase": _repair_mojibake(arguments.get("target_phase")),
         "freeze_source": "mcp_build_bridge_packet",
     }
+
+
+def _repair_bridge_packet_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    repaired = dict(arguments)
+    if "user_instruction" in repaired:
+        repaired["user_instruction"] = _repair_mojibake(repaired.get("user_instruction"))
+    if "target_phase" in repaired:
+        repaired["target_phase"] = _repair_mojibake(repaired.get("target_phase"))
+    task_spec = repaired.get("task_spec")
+    if isinstance(task_spec, dict):
+        repaired["task_spec"] = _repair_mojibake_value(task_spec)
+    return repaired
+
+
+def _repair_mojibake_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _repair_mojibake(value)
+    if isinstance(value, list):
+        return [_repair_mojibake_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _repair_mojibake_value(item) for key, item in value.items()}
+    return value
 
 
 def _repair_mojibake(value: Any) -> Any:

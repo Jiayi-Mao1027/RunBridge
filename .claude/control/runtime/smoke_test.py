@@ -10,8 +10,10 @@ import uuid
 
 from bridge_sdk import call_bridge_sdk
 from claude_cli_executor import _allowed_tools
+from claude_cli_executor import _bridge_leader_prompt
 from claude_cli_executor import _ensure_project_agent_files
 from claude_cli_executor import _parse_claude_payload
+from claude_cli_executor import _redact_cmd
 from claude_cli_executor import simulated_team_executor
 from main_leader import decide_next_bridge_packet
 from workflow_runtime import dispatch_workflow_event
@@ -744,6 +746,19 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     if parsed.get("error_or_null") or parsed.get("payload", {}).get("status") != "succeeded":
         raise AssertionError(json.dumps(parsed, ensure_ascii=False, indent=2))
 
+    empty_result = _parse_claude_payload(
+        json.dumps({"type": "result", "subtype": "success", "result": ""}),
+        "",
+    )
+    if empty_result.get("error_or_null", {}).get("type") != "ClaudeCliEmptyResult":
+        raise AssertionError(json.dumps(empty_result, ensure_ascii=False, indent=2))
+    if "envelope" not in empty_result.get("evidence", {}):
+        raise AssertionError(json.dumps(empty_result, ensure_ascii=False, indent=2))
+
+    redacted_cmd = _redact_cmd(["claude", "-p", "--model", "gpt-main", "--", "bridge prompt body"])
+    if "bridge prompt body" in redacted_cmd or "<prompt:18 chars>" not in redacted_cmd:
+        raise AssertionError(json.dumps(redacted_cmd, ensure_ascii=False, indent=2))
+
     cli_packet = packet("bw_cli_policy", "sub_cli_policy")
     cli_packet["allowed_tools"] = ["Agent", "Read", "Grep", "Glob", "LS"]
     cli_packet["team_spec"]["teammate_specs"] = [
@@ -767,6 +782,25 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
             raise AssertionError(str(agent_path))
     if (project_root / ".claude" / "agents").exists():
         raise AssertionError(str(project_root / ".claude" / "agents"))
+
+    original_text = "\u4e0a\u4e00\u6b21\u5c1d\u8bd5\u7cfb"
+    mojibake_text = original_text.encode("utf-8").decode("gbk")
+    prompt_packet = packet("bw_mojibake", "sub_mojibake")
+    prompt_packet["task_spec"]["task_description"] = mojibake_text
+    prompt = _bridge_leader_prompt(
+        prompt_packet,
+        {
+            "run_id": "run_demo",
+            "main_session_id": "main_demo",
+            "sub_session_id": "sub_mojibake",
+            "bridge_window_id": "bw_mojibake",
+            "team_id": "team_mojibake",
+            "task_id": "task_mojibake",
+        },
+        project_root,
+    )
+    if original_text not in prompt or mojibake_text in prompt:
+        raise AssertionError(json.dumps({"original": original_text, "mojibake": mojibake_text, "prompt": prompt}, ensure_ascii=False, indent=2))
     return {"cli_executor_policy": "passed"}
 
 

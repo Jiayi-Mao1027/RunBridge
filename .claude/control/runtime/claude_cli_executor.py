@@ -44,7 +44,7 @@ TEAMMATE_AGENT_NAMES = {
 
 def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     project_root = Path(os.environ.get("BRIDGE_PROJECT_ROOT") or Path.cwd()).resolve()
-    packet = execution_input["packet"]
+    packet = _repair_mojibake_value(execution_input["packet"])
 
     prompt = _bridge_leader_prompt(packet, execution_input, project_root)
     prompt_path = _write_bridge_prompt_file(project_root, prompt, execution_input)
@@ -100,6 +100,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     allowed_tools = _allowed_tools(packet, teammate_names)
     if allowed_tools:
         cmd.extend(["--allowedTools", ",".join(allowed_tools)])
+    cmd.extend(["--", prompt])
 
     too_long = _command_too_long_for_windows(cmd)
     if too_long:
@@ -126,7 +127,6 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
         proc = subprocess.run(
             cmd,
             cwd=str(project_root),
-            input=prompt,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -177,6 +177,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
 
     payload_or_error = _parse_claude_payload(proc.stdout, proc.stderr)
     if payload_or_error.get("error_or_null"):
+        _attach_cli_debug_evidence(payload_or_error, prompt_path, proc.stdout, proc.stderr)
         payload_or_error["evidence"]["prompt_file"] = str(prompt_path)
         payload_or_error["evidence"]["agent_models"] = agent_models
         payload_or_error["evidence"]["cmd_preview"] = _redact_cmd(cmd)
@@ -185,6 +186,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     payload = payload_or_error["payload"]
     normalized = _normalize_bridge_payload(payload, proc.stdout, proc.stderr)
     if normalized.get("error_or_null"):
+        _attach_cli_debug_evidence(normalized, prompt_path, proc.stdout, proc.stderr, payload=payload)
         normalized["evidence"]["prompt_file"] = str(prompt_path)
         normalized["evidence"]["agent_models"] = agent_models
         normalized["evidence"]["cmd_preview"] = _redact_cmd(cmd)
@@ -248,6 +250,7 @@ def _failure(
 
 
 def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any], project_root: Path) -> str:
+    packet = _repair_mojibake_value(packet)
     binding = {
         k: execution_input[k]
         for k in ["run_id", "main_session_id", "sub_session_id", "bridge_window_id", "team_id", "task_id"]
@@ -279,6 +282,29 @@ def _write_bridge_prompt_file(project_root: Path, prompt: str, execution_input: 
     return prompt_path
 
 
+def _attach_cli_debug_evidence(
+    result: dict[str, Any],
+    prompt_path: Path,
+    stdout: str,
+    stderr: str,
+    *,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    evidence = result.setdefault("evidence", {})
+    if not isinstance(evidence, dict):
+        return
+    debug_path = prompt_path.with_suffix(".cli_debug.json")
+    debug_payload: dict[str, Any] = {
+        "prompt_file": str(prompt_path),
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+    if payload is not None:
+        debug_payload["payload"] = payload
+    debug_path.write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    evidence["cli_debug_file"] = str(debug_path)
+
+
 def _bridge_prompt_path(project_root: Path, execution_input: dict[str, Any]) -> Path:
     raw_key = "|".join(
         str(execution_input.get(key) or "")
@@ -306,6 +332,75 @@ def _project_state_key(project_root: Path) -> str:
 def _safe_path_component(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value)
     return (cleaned[:48].strip("._") or "run")
+
+
+def _repair_mojibake_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _repair_mojibake_text(value)
+    if isinstance(value, list):
+        return [_repair_mojibake_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _repair_mojibake_value(item) for key, item in value.items()}
+    return value
+
+
+def _repair_mojibake_text(value: str) -> str:
+    if not value or not _looks_like_mojibake(value):
+        return value
+    best = value
+    best_score = _text_quality_score(value)
+    for encoding in ("gbk", "cp936"):
+        for errors in ("strict", "ignore", "replace"):
+            try:
+                repaired = value.encode(encoding, errors=errors).decode("utf-8", errors="replace")
+            except UnicodeError:
+                continue
+            score = _text_quality_score(repaired)
+            if score > best_score:
+                best = repaired
+                best_score = score
+    return best
+
+
+def _looks_like_mojibake(value: str) -> bool:
+    return any(marker in value for marker in _MOJIBAKE_MARKERS)
+
+
+def _text_quality_score(value: str) -> int:
+    score = sum(1 for char in value if "\u4e00" <= char <= "\u9fff")
+    score += sum(value.count(term) for term in _EXPECTED_CJK_TERMS) * 20
+    score -= sum(value.count(marker) for marker in _MOJIBAKE_MARKERS) * 12
+    score -= value.count("\ufffd") * 20
+    score -= value.count("?") * 2
+    return score
+
+
+_MOJIBAKE_MARKERS = (
+    "\u951b",
+    "\u6d93",
+    "\u7eef",
+    "\u5a34",
+    "\u93c5",
+    "\u95bf",
+    "\u20ac",
+    "\ufffd",
+    "\ue75f",
+    "\ue50b",
+)
+
+_EXPECTED_CJK_TERMS = (
+    "\u7cfb\u7edf",
+    "\u6d4b\u8bd5",
+    "\u5f53\u524d",
+    "\u9879\u76ee",
+    "\u642d\u5efa",
+    "\u6846\u67b6",
+    "\u6267\u884c",
+    "\u62a5\u9519",
+    "\u5931\u8d25",
+    "\u8bad\u7ec3",
+    "\u68c0\u67e5",
+)
 
 
 def _control_claude_dir() -> Path:
@@ -523,6 +618,11 @@ def _subprocess_env(
 ) -> dict[str, str]:
     env = os.environ.copy()
     env["BRIDGE_PROJECT_ROOT"] = str(project_root)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    if os.name != "nt":
+        env.setdefault("LC_ALL", "C.UTF-8")
+        env.setdefault("LANG", "C.UTF-8")
 
     # Force the bridge-leader process itself away from Claude Code's provider default.
     env.setdefault("ANTHROPIC_MODEL", bridge_model)
@@ -601,7 +701,7 @@ def _command_too_long_for_windows(cmd: list[str]) -> int | None:
 
 def _parse_claude_payload(stdout: str, stderr: str) -> dict[str, Any]:
     try:
-        payload = json.loads(stdout)
+        envelope = json.loads(stdout)
     except json.JSONDecodeError:
         return _failure(
             message="claude cli bridge executor returned non-json output",
@@ -612,7 +712,17 @@ def _parse_claude_payload(stdout: str, stderr: str) -> dict[str, Any]:
             },
         )
 
-    payload = _extract_bridge_payload(payload)
+    payload = _extract_bridge_payload(envelope)
+    if _is_empty_claude_result_envelope(envelope, payload):
+        return _failure(
+            message="claude cli bridge executor returned an empty structured result",
+            error_type="ClaudeCliEmptyResult",
+            evidence={
+                "stdout": stdout[-4000:],
+                "stderr": stderr[-4000:],
+                "envelope": envelope,
+            },
+        )
 
     if not isinstance(payload, dict):
         return _failure(
@@ -625,6 +735,21 @@ def _parse_claude_payload(stdout: str, stderr: str) -> dict[str, Any]:
         )
 
     return {"payload": payload, "error_or_null": None}
+
+
+def _is_empty_claude_result_envelope(envelope: Any, extracted_payload: Any) -> bool:
+    if not isinstance(envelope, dict):
+        return False
+    if not ("result" in envelope or envelope.get("type") == "result" or "subtype" in envelope):
+        return False
+    result = envelope.get("result")
+    if result is None:
+        return True
+    if isinstance(result, str) and not result.strip():
+        return True
+    if isinstance(result, (dict, list)) and not result:
+        return True
+    return isinstance(extracted_payload, dict) and not extracted_payload and isinstance(result, dict)
 
 
 def _extract_bridge_payload(payload: Any) -> Any:
@@ -740,6 +865,7 @@ def _normalize_bridge_payload(payload: dict[str, Any], stdout: str, stderr: str)
 def _redact_cmd(cmd: list[str]) -> list[str]:
     redacted: list[str] = []
     redact_next = False
+    redact_positional_prompt = False
 
     sensitive_flags = {
         "--api-key",
@@ -747,8 +873,13 @@ def _redact_cmd(cmd: list[str]) -> list[str]:
         "--token",
         "--password",
     }
+    has_print_mode = "-p" in cmd or "--print" in cmd
 
     for part in cmd:
+        if redact_positional_prompt:
+            redacted.append(f"<prompt:{len(part)} chars>")
+            continue
+
         if redact_next:
             redacted.append("<redacted>")
             redact_next = False
@@ -757,6 +888,11 @@ def _redact_cmd(cmd: list[str]) -> list[str]:
         if part in sensitive_flags:
             redacted.append(part)
             redact_next = True
+            continue
+
+        if part == "--" and has_print_mode:
+            redacted.append(part)
+            redact_positional_prompt = True
             continue
 
         lower = part.lower()
