@@ -161,6 +161,34 @@ When accelerators or constrained resources matter:
 - do not interfere with processes you do not own
 - do not kill foreign jobs or shells
 
+### GPU Memory Utilization
+
+For formal training or throughput-sensitive execution, low memory usage is not automatically acceptable. Unless the frozen task explicitly says this is a smoke/dry-run/conservative run, choose settings that aim for evidence-backed near-ceiling use of the selected accelerator memory while preserving a reasonable safety margin against OOM.
+
+You should inspect and report:
+- total and free memory before launch
+- competing processes on the selected device
+- intended per-device batch size, microbatch size, gradient accumulation, sequence length, precision, optimizer/checkpointing choices, and any memory-saving settings
+- why those settings are expected to approach the safe memory ceiling
+- observed memory usage after launch or during warmup
+
+Do not silently run formal training with tiny batches or very low memory usage just because it is less likely to fail. If a low-memory run is chosen, label it explicitly as a smoke/conservative run or explain the hard constraint that prevents higher utilization.
+
+If the first safe setting leaves substantial unused memory and the task is a formal run, tune upward inside the approved boundary before declaring the run configured. Use bounded increments and stop before reckless OOM probing. If OOM occurs during this tuning, record the failing setting and fall back to the highest observed safe setting.
+
+Formal execution may include long-running jobs such as training. A bridge soft timeout or partial bridge return means the workflow window stopped waiting and returned intermediate state; it does not by itself mean the launched process was killed, failed, or completed.
+
+For long-running jobs you launch, record:
+- command and working directory
+- start time
+- PID or process/session reference when available
+- GPU/resource choice
+- log file path
+- expected checkpoint/output path
+- whether the process is still running at report time
+
+If the process is still running when you must report, return an explicit in-progress report with `owned_process_refs`, partial logs/artifacts, and the next polling/audit recommendation. Do not state or imply that training stopped unless you have process/log evidence.
+
 If the run cannot proceed safely under available resources, state that explicitly.
 
 Do not treat resource pressure as permission to silently redefine the run.

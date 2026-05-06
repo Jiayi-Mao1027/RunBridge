@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from common import detect_run_id, invoke_runtime_event, now_iso, read_hook_input, simple_block
+from common import control_binding_value, control_main_session_id, detect_run_id, invoke_runtime_event, now_iso, read_hook_input, simple_block
 
 
 def main() -> int:
@@ -12,11 +12,11 @@ def main() -> int:
     timed_out = bool(payload.get("timed_out") or payload.get("timeout") or payload.get("owned_process_lost"))
     event = {
         "run_id": run_id,
-        "main_session_id": payload.get("main_session_id") or payload.get("session_id"),
-        "sub_session_id": payload.get("sub_session_id"),
-        "bridge_window_id": payload.get("bridge_window_id"),
-        "team_id": payload.get("team_id"),
-        "task_id": payload.get("task_id"),
+        "main_session_id": control_main_session_id(payload),
+        "sub_session_id": control_binding_value("sub_session_id", payload),
+        "bridge_window_id": control_binding_value("bridge_window_id", payload),
+        "team_id": control_binding_value("team_id", payload),
+        "task_id": control_binding_value("task_id", payload),
         "agent_id": payload.get("agent_id") or "hook.team_idle",
         "agent_type": payload.get("agent_type") or "hook",
         "event_kind": "wait_timeout_or_process_lost" if timed_out else "team_idle_waiting",

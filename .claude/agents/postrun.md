@@ -134,6 +134,7 @@ You should inspect, when relevant:
 - evaluation outputs
 - relevant config snapshots
 - stage-by-stage execution records
+- accelerator utilization records, including GPU memory use for training runs
 
 Do not stop at a single top-line score when deeper evidence matters.
 
@@ -214,11 +215,19 @@ Ask:
 - Did the stages complete in the intended order?
 - Are outputs complete and internally coherent?
 - Do logs show silent or partial failure?
+- Did formal training use the intended accelerator and a credible amount of available memory?
 - Is the result weak because the method is weak, or because execution was faulty?
 
 Do not call everything “underperformance.”
 Do not call everything “execution defect.”
 Make the distinction explicit and evidence-backed.
+
+If formal execution ran with unexpectedly low GPU memory utilization, classify whether that was:
+- an approved conservative/smoke run
+- a nonblocking resource-utilization deviation
+- an execution defect that makes the run not comparable to the intended baseline
+
+Do not hide low utilization as a harmless detail when it changes throughput, effective batch, training dynamics, or comparability.
 
 ---
 

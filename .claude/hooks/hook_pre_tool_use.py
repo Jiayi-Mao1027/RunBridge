@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from common import detect_run_id, invoke_runtime_event, load_last_bridge_packet, now_iso, pretool_deny, read_hook_input
+from common import (
+    control_binding_value,
+    control_main_session_id,
+    detect_run_id,
+    invoke_runtime_event,
+    load_last_bridge_packet,
+    now_iso,
+    pretool_deny,
+    read_hook_input,
+)
 
 
 BRIDGE_TOOL_NAMES = {"call_bridge_sdk", "mcp__bridge__call_bridge_sdk"}
@@ -39,22 +48,24 @@ def main() -> int:
         tool_input.get("bridge_window_id")
         or payload.get("bridge_window_id")
         or (packet or {}).get("binding", {}).get("bridge_window_id")
+        or control_binding_value("bridge_window_id", payload, tool_input, packet)
     )
     sub_session_id = (
         tool_input.get("sub_session_id")
         or payload.get("sub_session_id")
         or (packet or {}).get("binding", {}).get("sub_session_id")
+        or control_binding_value("sub_session_id", payload, tool_input, packet)
     )
     tool_use_id = str(payload.get("tool_use_id") or tool_input.get("tool_use_id") or "").strip() or None
 
     if tool_name in START_BY_TOOL:
         event = {
             "run_id": run_id,
-            "main_session_id": payload.get("main_session_id") or payload.get("session_id") or tool_input.get("main_session_id") or (packet or {}).get("binding", {}).get("main_session_id"),
+            "main_session_id": control_main_session_id(payload, tool_input, packet),
             "sub_session_id": sub_session_id,
             "bridge_window_id": bridge_window_id,
-            "team_id": payload.get("team_id") or tool_input.get("team_id"),
-            "task_id": payload.get("task_id") or tool_input.get("task_id"),
+            "team_id": payload.get("team_id") or tool_input.get("team_id") or control_binding_value("team_id", payload, tool_input, packet),
+            "task_id": payload.get("task_id") or tool_input.get("task_id") or control_binding_value("task_id", payload, tool_input, packet),
             "agent_id": payload.get("agent_id") or tool_input.get("agent_id") or "bridge-leader",
             "agent_type": payload.get("agent_type") or tool_input.get("agent_type") or "bridge-leader",
             "tool_name": tool_name,
@@ -74,7 +85,7 @@ def main() -> int:
 
     intent_event = {
         "run_id": run_id,
-        "main_session_id": (packet or {}).get("binding", {}).get("main_session_id") or payload.get("main_session_id") or payload.get("session_id") or tool_input.get("main_session_id"),
+        "main_session_id": control_main_session_id(payload, tool_input, packet),
         "sub_session_id": sub_session_id,
         "bridge_window_id": bridge_window_id,
         "agent_id": payload.get("agent_id") or "main-leader",

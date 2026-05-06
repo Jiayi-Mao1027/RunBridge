@@ -150,6 +150,7 @@ A state is more credible when:
 - runtime-shape evidence exists when relevant
 - memory-use and device evidence exist when relevant
 - the delivered configuration is not obviously under-tested or artificially conservative without justification
+- formal training settings are not left at low-memory smoke values when the intended run should use available accelerator capacity
 
 Do not require perfection.
 Do require operational credibility.
@@ -168,6 +169,12 @@ This includes checking:
 
 Do not demand reckless maximum utilization.
 Do not accept obvious under-testing as good enough without explanation.
+
+For GPU training, distinguish:
+- smoke/preflight settings, which may intentionally use low memory
+- formal execution settings, which should target evidence-backed near-ceiling memory utilization with a safety margin
+
+If the delivered config would run formal training far below available memory without a clear reason, classify it as an execution-facing risk or must-fix depending on severity. Executor should not inherit a low-memory placeholder as if it were the intended production setting.
 
 You are optimizing for:
 - evidence-backed near-safe utilization

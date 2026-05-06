@@ -122,6 +122,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
         agent_models=agent_models,
         project_root=project_root,
     )
+    _bind_bridge_child_session_env(env, execution_input)
 
     try:
         proc = subprocess.run(
@@ -650,6 +651,31 @@ def _subprocess_env(
     return env
 
 
+def _bind_bridge_child_session_env(env: dict[str, str], execution_input: dict[str, Any]) -> None:
+    env["BRIDGE_CHILD_CLAUDE_SESSION"] = "1"
+    run_id = str(execution_input.get("run_id") or "").strip()
+    main_session_id = str(execution_input.get("main_session_id") or "").strip()
+    sub_session_id = str(execution_input.get("sub_session_id") or "").strip()
+    bridge_window_id = str(execution_input.get("bridge_window_id") or "").strip()
+    team_id = str(execution_input.get("team_id") or "").strip()
+    task_id = str(execution_input.get("task_id") or "").strip()
+
+    if run_id:
+        env["BRIDGE_RUN_ID"] = run_id
+        env["CLAUDE_CONTROL_RUN_ID"] = run_id
+    if main_session_id:
+        env["BRIDGE_MAIN_SESSION_ID"] = main_session_id
+        env["CLAUDE_CONTROL_MAIN_SESSION_ID"] = main_session_id
+    if sub_session_id:
+        env["BRIDGE_SUB_SESSION_ID"] = sub_session_id
+    if bridge_window_id:
+        env["BRIDGE_WINDOW_ID"] = bridge_window_id
+    if team_id:
+        env["BRIDGE_TEAM_ID"] = team_id
+    if task_id:
+        env["BRIDGE_TASK_ID"] = task_id
+
+
 def _timeout_seconds(packet: dict[str, Any]) -> int:
     timeout_policy = packet.get("completion_contract", {}).get("timeout_policy") or {}
     hard_timeout = timeout_policy.get("hard_timeout_seconds")
@@ -713,6 +739,11 @@ def _parse_claude_payload(stdout: str, stderr: str) -> dict[str, Any]:
         )
 
     payload = _extract_bridge_payload(envelope)
+    if _is_tool_use_without_final_result(envelope, payload):
+        return {
+            "payload": _tool_use_incomplete_bridge_payload(envelope, stdout, stderr),
+            "error_or_null": None,
+        }
     if _is_empty_claude_result_envelope(envelope, payload):
         return _failure(
             message="claude cli bridge executor returned an empty structured result",
@@ -737,6 +768,51 @@ def _parse_claude_payload(stdout: str, stderr: str) -> dict[str, Any]:
     return {"payload": payload, "error_or_null": None}
 
 
+def _is_tool_use_without_final_result(envelope: Any, extracted_payload: Any) -> bool:
+    if not isinstance(envelope, dict):
+        return False
+    if _envelope_stop_reason(envelope) != "tool_use":
+        return False
+    if isinstance(extracted_payload, dict) and extracted_payload.get("status") in {"succeeded", "failed", "partial", "partial_or_failed"}:
+        return False
+    return _is_empty_claude_result_envelope(envelope, extracted_payload) or not _has_structured_bridge_payload(extracted_payload)
+
+
+def _tool_use_incomplete_bridge_payload(envelope: dict[str, Any], stdout: str, stderr: str) -> dict[str, Any]:
+    pending_tool_uses = _collect_tool_use_blocks(envelope)
+    return {
+        "status": "partial_or_failed",
+        "reports": [
+            {
+                "summary": "Claude CLI stopped on tool_use before emitting a final bridge report.",
+                "failure_reason": "The CLI process returned a successful envelope, but the final bridge result was empty or missing while stop_reason=tool_use.",
+                "next_action_recommendation": "Inspect the CLI debug artifact and worktree state, then retry or resume the bridge after the pending tool-use turn is resolved.",
+            }
+        ],
+        "artifact_refs": [],
+        "evidence": {
+            "classification": "incomplete_no_final_text",
+            "stop_reason": "tool_use",
+            "result_empty": _result_is_empty(envelope.get("result")),
+            "pending_tool_uses": pending_tool_uses,
+            "pending_tool_use_count": len(pending_tool_uses),
+            "stdout_tail": stdout[-4000:],
+            "stderr_tail": stderr[-4000:],
+            "envelope": envelope,
+        },
+        "error_or_null": {
+            "message": "claude cli stopped on tool_use before emitting a final bridge result",
+            "type": "ClaudeCliNeedsToolContinuation",
+            "stop_reason": "tool_use",
+        },
+        "cleanup_required": False,
+    }
+
+
+def _has_structured_bridge_payload(value: Any) -> bool:
+    return isinstance(value, dict) and value.get("status") in {"succeeded", "failed", "partial", "partial_or_failed"}
+
+
 def _is_empty_claude_result_envelope(envelope: Any, extracted_payload: Any) -> bool:
     if not isinstance(envelope, dict):
         return False
@@ -750,6 +826,80 @@ def _is_empty_claude_result_envelope(envelope: Any, extracted_payload: Any) -> b
     if isinstance(result, (dict, list)) and not result:
         return True
     return isinstance(extracted_payload, dict) and not extracted_payload and isinstance(result, dict)
+
+
+def _result_is_empty(result: Any) -> bool:
+    if result is None:
+        return True
+    if isinstance(result, str):
+        return not result.strip()
+    if isinstance(result, (dict, list)):
+        return not result
+    return False
+
+
+def _envelope_stop_reason(value: Any) -> str | None:
+    if isinstance(value, dict):
+        reason = value.get("stop_reason")
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+        for key in ("message", "result", "response", "output", "payload"):
+            found = _envelope_stop_reason(value.get(key))
+            if found:
+                return found
+        content = value.get("content")
+        if isinstance(content, list):
+            found = _envelope_stop_reason(content)
+            if found:
+                return found
+        for nested in value.values():
+            if isinstance(nested, (dict, list)):
+                found = _envelope_stop_reason(nested)
+                if found:
+                    return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _envelope_stop_reason(item)
+            if found:
+                return found
+    return None
+
+
+def _collect_tool_use_blocks(value: Any, *, limit: int = 5) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+
+    def walk(node: Any) -> None:
+        if len(blocks) >= limit:
+            return
+        if isinstance(node, dict):
+            block_type = node.get("type")
+            if block_type in {"tool_use", "server_tool_use"}:
+                blocks.append(_compact_tool_use_block(node))
+            for nested in node.values():
+                if isinstance(nested, (dict, list)):
+                    walk(nested)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(value)
+    return blocks
+
+
+def _compact_tool_use_block(block: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {
+        "type": block.get("type"),
+    }
+    for key in ("id", "name", "tool_name", "server_name"):
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            compact[key] = value
+    tool_input = block.get("input")
+    if isinstance(tool_input, dict):
+        compact["input_keys"] = sorted(str(key) for key in tool_input.keys())
+    elif tool_input is not None:
+        compact["input_type"] = type(tool_input).__name__
+    return compact
 
 
 def _extract_bridge_payload(payload: Any) -> Any:

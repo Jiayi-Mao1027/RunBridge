@@ -84,6 +84,10 @@ def write_active_run(payload: dict[str, Any]) -> None:
     write_json(active_run_path(), payload)
 
 
+def is_bridge_child_session() -> bool:
+    return os.environ.get("BRIDGE_CHILD_CLAUDE_SESSION", "").strip().lower() in {"1", "true", "yes"}
+
+
 def last_bridge_packet_path() -> Path:
     return runtime_runs_root() / ".last_bridge_packet.json"
 
@@ -108,7 +112,7 @@ def project_state_key(project_root: Path) -> str:
 
 
 def detect_run_id(payload: dict[str, Any]) -> str | None:
-    for key in ("run_id", "control_run_id", "CLAUDE_CONTROL_RUN_ID"):
+    for key in ("run_id", "control_run_id", "CLAUDE_CONTROL_RUN_ID", "BRIDGE_RUN_ID"):
         value = payload.get(key) or os.environ.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -119,6 +123,56 @@ def detect_run_id(payload: dict[str, Any]) -> str | None:
     active_run_id = active.get("run_id")
     if isinstance(active_run_id, str) and active_run_id.strip():
         return active_run_id.strip()
+    return None
+
+
+def control_main_session_id(
+    payload: dict[str, Any] | None = None,
+    tool_input: dict[str, Any] | None = None,
+    packet: dict[str, Any] | None = None,
+) -> str | None:
+    if is_bridge_child_session():
+        for key in ("BRIDGE_MAIN_SESSION_ID", "CLAUDE_CONTROL_MAIN_SESSION_ID"):
+            value = os.environ.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    binding = packet.get("binding", {}) if isinstance(packet, dict) else {}
+    for value in (
+        binding.get("main_session_id"),
+        (tool_input or {}).get("main_session_id"),
+        (payload or {}).get("main_session_id"),
+        (payload or {}).get("session_id"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def control_binding_value(
+    name: str,
+    payload: dict[str, Any] | None = None,
+    tool_input: dict[str, Any] | None = None,
+    packet: dict[str, Any] | None = None,
+    embedded: dict[str, Any] | None = None,
+) -> Any:
+    env_key = {
+        "sub_session_id": "BRIDGE_SUB_SESSION_ID",
+        "bridge_window_id": "BRIDGE_WINDOW_ID",
+        "team_id": "BRIDGE_TEAM_ID",
+        "task_id": "BRIDGE_TASK_ID",
+    }.get(name)
+    if is_bridge_child_session() and env_key:
+        value = os.environ.get(env_key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    binding = packet.get("binding", {}) if isinstance(packet, dict) else {}
+    for source in (payload or {}, tool_input or {}, embedded or {}, binding):
+        if isinstance(source, dict):
+            value = source.get(name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if value:
+                return value
     return None
 
 

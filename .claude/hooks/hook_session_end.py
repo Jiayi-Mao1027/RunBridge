@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from common import detect_run_id, now_iso, read_hook_input, runtime_runs_root, write_json
+from common import detect_run_id, is_bridge_child_session, now_iso, read_hook_input, runtime_runs_root, write_json
 
 
 def main() -> int:
+    if is_bridge_child_session():
+        return 0
+
     payload = read_hook_input()
     run_id = detect_run_id(payload)
     if not run_id:

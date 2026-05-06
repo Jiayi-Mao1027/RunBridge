@@ -38,6 +38,22 @@ PHASE_OWNERSHIP_DEFAULTS = {
     "l4_anomaly": {"readable_scopes": ["."], "writable_scopes": []},
 }
 
+DEFAULT_TIMEOUT_POLICY = {
+    "heartbeat_interval_seconds": 60,
+    "soft_timeout_seconds": 900,
+    "hard_timeout_seconds": 3600,
+    "timeout_action": "ask_main_leader",
+}
+
+PHASE_TIMEOUT_POLICY = {
+    "l4_execute": {
+        "heartbeat_interval_seconds": 120,
+        "soft_timeout_seconds": 3600,
+        "hard_timeout_seconds": 14400,
+        "timeout_action": "ask_main_leader",
+    },
+}
+
 PHASE_TEAM_DEFAULTS = {
     "l2_advisory": [
         ("chiefmate-a", "advisory", RESEARCH_TOOLS, "produce upstream interpretation, assumptions, plan critique, and peer-aware advisory judgment"),
@@ -53,8 +69,8 @@ PHASE_TEAM_DEFAULTS = {
         ("rungater", "implementation_gate", READ_CHECK_TOOLS, "judge post-implementation readiness and recommend proceed, repair, reroute, or stop"),
     ],
     "l4_execute": [
-        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow and record exact execution evidence"),
-        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, classify outcome, and recommend anomaly routing when needed"),
+        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow with evidence-backed near-ceiling accelerator memory utilization when applicable, and record exact execution evidence"),
+        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, resource utilization, outcome classification, and recommend anomaly routing when needed"),
     ],
     "l4_anomaly": [
         ("anomaly-analyst-a", "anomaly_analysis", READ_CHECK_TOOLS, "build evidence-backed anomaly hypotheses and discriminative next checks"),
@@ -132,7 +148,7 @@ def build_bridge_instruction_packet_for_this_invoke(
 
     resolved_target_phase = _resolve_target_phase(snapshot, target_phase)
     resolved_route = _resolve_phase_route(snapshot, resolved_target_phase)
-    resolved_completion = _default_completion_contract()
+    resolved_completion = _default_completion_contract(resolved_target_phase)
     resolved_report = _default_report_contract()
     bridge_allowed_tools = _default_bridge_tools(resolved_target_phase)
     resolved_team = _normalize_team_spec(target_phase=resolved_target_phase)
@@ -327,19 +343,15 @@ def _json_dict(value: Any) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
-def _default_completion_contract() -> dict[str, Any]:
+def _default_completion_contract(target_phase: str | None = None) -> dict[str, Any]:
+    timeout_policy = deepcopy(PHASE_TIMEOUT_POLICY.get(str(target_phase or ""), DEFAULT_TIMEOUT_POLICY))
     return {
         "required_outputs": ["report"],
         "required_artifacts": [],
         "validation_requirements": [],
         "success_criteria": ["bridge leader collected a report from the team"],
         "allowed_partial_result": True,
-        "timeout_policy": {
-            "heartbeat_interval_seconds": 60,
-            "soft_timeout_seconds": 900,
-            "hard_timeout_seconds": 3600,
-            "timeout_action": "ask_main_leader",
-        },
+        "timeout_policy": timeout_policy,
     }
 
 

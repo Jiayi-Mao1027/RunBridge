@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from common import (
+    control_binding_value,
+    control_main_session_id,
     detect_run_id,
     invoke_runtime_event,
     now_iso,
@@ -26,10 +28,10 @@ def main() -> int:
 
     event = {
         "run_id": run_id,
-        "main_session_id": payload.get("main_session_id") or payload.get("session_id"),
-        "sub_session_id": payload.get("sub_session_id") or embedded.get("sub_session_id"),
-        "bridge_window_id": payload.get("bridge_window_id") or embedded.get("bridge_window_id"),
-        "team_id": payload.get("team_id") or embedded.get("team_id"),
+        "main_session_id": control_main_session_id(payload),
+        "sub_session_id": control_binding_value("sub_session_id", payload, embedded=embedded),
+        "bridge_window_id": control_binding_value("bridge_window_id", payload, embedded=embedded),
+        "team_id": control_binding_value("team_id", payload, embedded=embedded),
         "task_id": task_id,
         "agent_id": payload.get("agent_id") or "hook.task_created",
         "agent_type": payload.get("agent_type") or "hook",

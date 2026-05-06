@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from common import detect_run_id, invoke_runtime_event, now_iso, read_hook_input
+from common import detect_run_id, invoke_runtime_event, is_bridge_child_session, now_iso, read_hook_input
 
 
 def main() -> int:
+    if is_bridge_child_session():
+        return 0
+
     payload = read_hook_input()
     run_id = detect_run_id(payload)
     if not run_id:

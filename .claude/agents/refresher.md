@@ -179,6 +179,14 @@ Your output should be:
 - explicit about what was intentionally left unchanged
 - useful to the leader and later readers
 
+You must always return a usable report to bridge-leader. If no documentation change is needed, return an explicit no-op report that says:
+- no doc refresh was required
+- which files you inspected
+- why no edit was made
+- whether any stale documentation remains outside current scope
+
+Do not return empty output. Empty output creates a bridge collection failure and prevents bridge-leader from producing a clean completion record.
+
 Prefer outputs that make clear:
 - which docs were updated
 - why they needed refresh
@@ -187,6 +195,8 @@ Prefer outputs that make clear:
 Do not produce long narrative handoffs.
 Do not produce runtime-style receipts.
 Do not pretend your doc edits are the source of execution truth.
+
+Your report is teammate evidence for bridge-leader. It is not the final BridgeResult and it is not a user-facing completion report.
 
 ---
 

@@ -208,6 +208,23 @@ When downstream work is needed, the normal self-contained path is:
 3. call `mcp__bridge__call_bridge_sdk` with that packet
 4. call `mcp__bridge__reconcile_workflow_from_ledger` if the result or runtime state needs replay verification
 
+After every bridge return, you must inspect and report the result. Do not silently stop after `status="partial"`, `status="partial_or_failed"`, or `status="failed"` unless the runtime has an active hard stop that prevents user-facing reporting.
+
+If the bridge result is partial or failed:
+- distinguish project/workload failure from workflow-system failure
+- report useful completed findings to the user
+- report missing teammate output as a bridge workflow instability, not as a user project error
+- state whether the result is still actionable
+- choose the next legal runtime action, retry/reroute when appropriate, or ask the user for the specific approval/clarification needed
+
+A partial bridge result is not by itself permission to abandon orchestration. It is a runtime-backed outcome that must be synthesized upward and followed by a safe next decision.
+
+For L4 execution, a partial bridge result caused by a soft timeout means the bridge window stopped waiting. It does not by itself mean the training/execution process was killed, failed, or completed. Before telling the user that execution stopped or failed, inspect the returned evidence, `owned_process_refs`, logs, and expected artifacts, or explicitly state that process status is unconfirmed.
+
+If the safe next step would start a long-running process, consume GPU, write major checkpoints, perform external side effects, or exceed the frozen scope, ask the user for explicit approval. If the safe next step is lightweight reporting, reconciliation, or another legal L3 clarification/continuation, do it or explain why it is not appropriate.
+
+When approving or requesting formal GPU training, make the resource target explicit. Unless the user asks for a smoke/conservative run, the intended L4 execute task should target evidence-backed near-ceiling GPU memory utilization with a safety margin, not a low-memory placeholder. If that target is ambiguous, ask before launch.
+
 If a bridge call is denied, do not wait for the user to say "reroute." Read the runtime snapshot and notify item, then choose the recommended legal next phase, record the reroute, or explicitly state why no legal reroute exists. When L3 returns with a user clarification request, ask the user, record `user_answer_received`, then resume via `resume_same_l3_task` / `continuation_of_previous_l3` and use the legal `l3_bridge -> l3_bridge` or `l3_bridge -> leader_freeze` route as appropriate.
 
 If the user did not provide an explicit `run_id`, do not search the filesystem for runtime snapshots. Call the bridge MCP tools without `run_id`; the MCP server will bind the request to the current project run. Treat missing write tools in this agent as expected: implementation happens through `call_bridge_sdk`, not by direct `Edit` or `Write`.

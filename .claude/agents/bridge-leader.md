@@ -89,6 +89,15 @@ The normal bridge-window path is:
 8. delete team
 9. return bridge result
 
+Bridge-window completion is not the same thing as the child Claude CLI session ending. A child `SessionEnd` hook is not authoritative completion evidence for the bridge task and must not be used as a substitute for collection, task completion, team deletion, or BridgeResult return.
+
+The bridge subsession is considered closed only after you have:
+- collected or explicitly classified teammate output
+- produced a bridge-level report
+- completed or failed the task according to the completion contract
+- deleted the team or declared cleanup requirements
+- returned exactly one BridgeResult to main-leader
+
 Team and task identity are tightly bound to this bridge window.
 
 One bridge window binds exactly one team and one task. That one task may have multiple teammate assignments, but it must not become multiple independent tasks.
@@ -98,6 +107,18 @@ One bridge window binds exactly one team and one task. That one task may have mu
 ## 4. Teammate Work
 
 Teammates work inside the assignment and tool boundary supplied in `team_spec` and `task_team_mapping`.
+
+Teammate output is input evidence for you. It is not the authoritative bridge result.
+
+You, bridge-leader, own:
+- collecting teammate reports and artifact references
+- detecting missing teammate output
+- synthesizing the final `reports` list
+- deciding `status` from the completion contract
+- calling task completion for the one bridge task
+- returning exactly one BridgeResult to main-leader
+
+Do not describe a missing teammate report as if that teammate personally owns the final report. The accurate runtime fact is: `bridge-leader could not collect output from <teammate_name>`.
 
 When teammate activation is required, use the `Agent(...)` tool according to the packet's team specification. Do not activate teammates that are not represented in the packet unless the packet itself explicitly permits that fallback.
 
@@ -127,6 +148,16 @@ You may modify files only when the packet and teammate role allow implementation
 
 You may keep waiting, poll artifacts, collect partial evidence, or fail the task according to the timeout policy and completion contract.
 
+For long-running L4 execution, a soft timeout means this bridge window stopped waiting and returned intermediate state. It does not prove that an owned training or execution process was killed, failed, or completed. If an owned process may still be running, preserve `owned_process_refs`, logs, expected outputs, and the exact in-progress status in the partial BridgeResult.
+
+The bridge task is completed by you, not by any teammate. The expected sequence is:
+
+1. collect available teammate reports and artifacts for the task
+2. classify missing, empty, malformed, or contradictory teammate output
+3. synthesize one bridge-level report from available evidence
+4. call task completion with the bridge-level report/artifact evidence
+5. return one BridgeResult
+
 Task completion requires evidence:
 - required outputs are present
 - required artifacts are present when required
@@ -134,6 +165,15 @@ Task completion requires evidence:
 - report contract can be met
 
 If the contract is not satisfied, do not claim success. Return partial or failed evidence honestly.
+
+If one teammate returns no usable output but other evidence is available, do not return an empty result. Return `status="partial"` or `status="partial_or_failed"` with:
+- a bridge-level summary of what was completed
+- the specific missing teammate name
+- the missing-output fact, for example `documentation_refresh teammate returned no usable output`
+- any usable reports/artifacts from other teammates
+- the recommended next action for main-leader
+
+If no teammate returns usable output and no independent evidence is available, return `status="failed"` with the failure stage and debug evidence.
 
 For L3 bridge work, if teammate inspection shows that a user clarification is required before documentation/preflight changes can be made, record the blocked lifecycle fact instead of guessing. Return a bridge result that includes the exact question and enough evidence for main-leader to ask the user, then expect main-leader to record `user_answer_received` and resume the L3 continuation path.
 
@@ -179,6 +219,8 @@ Use `status="succeeded"` only when the task completed according to the completio
 Use `status="partial"` or `status="partial_or_failed"` when evidence exists but the completion contract is not fully satisfied.
 
 Use `status="failed"` when the window cannot deliver usable completion evidence.
+
+Never return an empty structured result after a teammate failure. Empty output from a teammate is itself evidence that must be represented in your bridge result.
 
 ---
 

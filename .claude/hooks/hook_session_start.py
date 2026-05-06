@@ -3,10 +3,13 @@ from __future__ import annotations
 import re
 import uuid
 
-from common import invoke_runtime_event, now_iso, read_hook_input, runtime_runs_root, write_active_run
+from common import is_bridge_child_session, invoke_runtime_event, now_iso, read_hook_input, runtime_runs_root, write_active_run
 
 
 def main() -> int:
+    if is_bridge_child_session():
+        return 0
+
     payload = read_hook_input()
     timestamp = now_iso()
     session_id = _session_id(payload)

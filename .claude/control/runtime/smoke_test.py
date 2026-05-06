@@ -637,6 +637,23 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         ),
     )
 
+    execute_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="long formal execution timeout smoke",
+        target_phase="l4_execute",
+    )
+    execute_timeout = execute_packet["completion_contract"]["timeout_policy"]
+    if execute_timeout.get("soft_timeout_seconds", 0) < 3600 or execute_timeout.get("hard_timeout_seconds", 0) < 14400:
+        raise AssertionError(json.dumps(execute_timeout, ensure_ascii=False, indent=2))
+    if execute_packet["task_spec"]["completion_contract"]["timeout_policy"] != execute_timeout:
+        raise AssertionError(json.dumps(execute_packet["task_spec"]["completion_contract"], ensure_ascii=False, indent=2))
+    execute_assignments = json.dumps(execute_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
+    if "near-ceiling accelerator memory utilization" not in execute_assignments or "resource utilization" not in execute_assignments:
+        raise AssertionError(execute_assignments)
+
     bad_implement = packet("bw_bad_implement", "sub_bad_implement")
     bad_implement["target_phase"] = "l4_implement"
     bad_implement["phase_route"] = ["l4_implement"]
@@ -754,6 +771,34 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         raise AssertionError(json.dumps(empty_result, ensure_ascii=False, indent=2))
     if "envelope" not in empty_result.get("evidence", {}):
         raise AssertionError(json.dumps(empty_result, ensure_ascii=False, indent=2))
+
+    tool_use_result = _parse_claude_payload(
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "stop_reason": "tool_use",
+                "result": "",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_demo",
+                        "name": "Read",
+                        "input": {"file_path": "README.md"},
+                    }
+                ],
+            }
+        ),
+        "",
+    )
+    tool_use_payload = tool_use_result.get("payload", {})
+    if tool_use_result.get("error_or_null") or tool_use_payload.get("status") != "partial_or_failed":
+        raise AssertionError(json.dumps(tool_use_result, ensure_ascii=False, indent=2))
+    if tool_use_payload.get("error_or_null", {}).get("type") != "ClaudeCliNeedsToolContinuation":
+        raise AssertionError(json.dumps(tool_use_result, ensure_ascii=False, indent=2))
+    evidence = tool_use_payload.get("evidence", {})
+    if evidence.get("stop_reason") != "tool_use" or not evidence.get("pending_tool_uses"):
+        raise AssertionError(json.dumps(tool_use_result, ensure_ascii=False, indent=2))
 
     redacted_cmd = _redact_cmd(["claude", "-p", "--model", "gpt-main", "--", "bridge prompt body"])
     if "bridge prompt body" in redacted_cmd or "<prompt:18 chars>" not in redacted_cmd:
