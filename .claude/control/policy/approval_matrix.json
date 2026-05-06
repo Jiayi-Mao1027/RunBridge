@@ -72,6 +72,20 @@
       ],
       "must_record_transition": true
     },
+    "user_clarification_resume": {
+      "description": "L3 bridge windows may pause for a user clarification, record the answer, and resume the same L3 task context before continuing.",
+      "requires_user_approval": false,
+      "allowed_event_kinds": [
+        "user_clarification_required",
+        "blocked_for_user_clarification",
+        "bridge_result_returned_with_user_clarification_request",
+        "paused_for_user_answer",
+        "user_answer_received",
+        "resume_same_l3_task",
+        "continuation_of_previous_l3"
+      ],
+      "must_record_transition": true
+    },
     "scope_change_requires_approval": {
       "description": "Changing frozen semantics, frozen scope, success criteria, writable scope, approval requirements, or task/team boundary requires explicit user approval.",
       "requires_user_approval": true,

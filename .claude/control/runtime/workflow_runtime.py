@@ -33,6 +33,8 @@ BRIDGE_LEADER_EVENTS = {
     "team_executor_failed",
     "artifacts_ready",
     "partial_evidence_collected",
+    "user_clarification_required",
+    "blocked_for_user_clarification",
     "bridge_leader_fails_task",
     "task_failed_by_bridge_leader",
     "team_delete_started",
@@ -46,7 +48,12 @@ TERMINAL_LIFECYCLE_STATUSES = {
     "bridge_window_partial_returned",
     "bridge_window_failed",
     "bridge_window_orphaned",
+    "paused_for_user_answer",
+    "user_answer_received",
+    "resume_same_l3_task",
+    "continuation_of_previous_l3",
 }
+USER_ANSWER_WAIT_STATUSES = {"paused_for_user_answer"}
 
 LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
     None: {
@@ -105,13 +112,24 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "team_idle_waiting": "team_waiting",
         "team_executor_failed": "task_failed",
         "artifacts_ready": "task_completion_started",
+        "user_clarification_required": "blocked_for_user_clarification",
+        "blocked_for_user_clarification": "blocked_for_user_clarification",
     },
     "team_waiting": {
         "team_idle_waiting": "team_waiting",
         "artifacts_ready": "task_completion_started",
+        "user_clarification_required": "blocked_for_user_clarification",
+        "blocked_for_user_clarification": "blocked_for_user_clarification",
         "wait_timeout_or_process_lost": "team_wait_timeout",
         "orphan_timeout_without_heartbeat": "bridge_window_orphaned",
     },
+    "blocked_for_user_clarification": {
+        "bridge_result_returned_with_user_clarification_request": "paused_for_user_answer",
+        "paused_for_user_answer": "paused_for_user_answer",
+    },
+    "paused_for_user_answer": {"user_answer_received": "user_answer_received"},
+    "user_answer_received": {"resume_same_l3_task": "resume_same_l3_task"},
+    "resume_same_l3_task": {"continuation_of_previous_l3": "continuation_of_previous_l3"},
     "team_wait_timeout": {
         "partial_evidence_collected": "bridge_window_partial_returned",
         "task_failed_by_bridge_leader": "task_failed",
@@ -124,6 +142,8 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
     "task_completion_rejected": {
         "continue_waiting": "team_waiting",
         "retry_artifact_collection": "task_completion_started",
+        "user_clarification_required": "blocked_for_user_clarification",
+        "blocked_for_user_clarification": "blocked_for_user_clarification",
         "bridge_leader_fails_task": "task_failed",
         "bridge_result_returned": "bridge_window_failed",
     },
@@ -168,6 +188,13 @@ EVENT_TO_UPDATE_KIND = {
     "completion_contract_rejected": "persist_task_completion_rejected",
     "bridge_leader_fails_task": "persist_task_failed",
     "task_failed_by_bridge_leader": "persist_task_failed",
+    "user_clarification_required": "persist_user_clarification_required",
+    "blocked_for_user_clarification": "persist_user_clarification_required",
+    "bridge_result_returned_with_user_clarification_request": "persist_bridge_result_returned",
+    "paused_for_user_answer": "persist_paused_for_user_answer",
+    "user_answer_received": "persist_user_answer_received",
+    "resume_same_l3_task": "persist_l3_resume_marker",
+    "continuation_of_previous_l3": "persist_l3_continuation_marker",
     "team_delete_succeeded": "persist_team_deleted",
     "team_delete_failed": "persist_team_delete_failed",
     "bridge_result_returned": "persist_bridge_result_returned",
@@ -555,6 +582,7 @@ def update_runtime(
         "bridge_result_returned_with_failure",
         "bridge_result_returned_with_partial",
         "bridge_result_returned_with_cleanup_required",
+        "bridge_result_returned_with_user_clarification_request",
     }:
         run["last_bridge_result"] = _build_bridge_result(event, to_status)
         _commit_bridge_result_phase(run, event, run["last_bridge_result"], to_status)
@@ -571,7 +599,7 @@ def notify(event: WorkflowEvent, snapshot: dict[str, Any], check_result: CheckRe
                 "policy_deny",
                 f"workflow event {event.event_kind} denied",
                 event,
-                "stop_current_action_and_replan",
+                _recommendation_for_denial(event, snapshot, check_result),
             )
         )
     elif check_result.decision == "needs_review":
@@ -597,6 +625,7 @@ def notify(event: WorkflowEvent, snapshot: dict[str, Any], check_result: CheckRe
         )
 
     trigger_items = {
+        "pretooluse_denied_by_main_leader": ("blocking", "bridge_call_denied", _recommended_reroute_action(snapshot)),
         "call_bridge_sdk_error": ("error", "bridge_call_failed", "read_runtime_snapshot_and_decide_retry_or_report"),
         "bridge_packet_rejected": ("error", "bridge_packet_rejected", "rebuild_packet_from_runtime_truth_or_report_blocked"),
         "team_create_failed": ("error", "team_create_failed", "retry_bridge_window_or_report_failure"),
@@ -606,6 +635,13 @@ def notify(event: WorkflowEvent, snapshot: dict[str, Any], check_result: CheckRe
         "team_idle_waiting": ("info", "team_waiting", "continue_waiting_or_poll_according_to_timeout_policy"),
         "wait_timeout_or_process_lost": ("error", "team_wait_timeout", "collect_partial_evidence_then_decide_retry_or_fail"),
         "completion_contract_rejected": ("warn", "task_completion_rejected", "continue_waiting_retry_collection_or_fail_task"),
+        "user_clarification_required": ("blocking", "blocked_for_user_clarification", "return_question_to_main_leader_and_pause_for_user_answer"),
+        "blocked_for_user_clarification": ("blocking", "blocked_for_user_clarification", "return_question_to_main_leader_and_pause_for_user_answer"),
+        "bridge_result_returned_with_user_clarification_request": ("blocking", "paused_for_user_answer", "ask_user_for_clarification_then_record_user_answer_received"),
+        "paused_for_user_answer": ("blocking", "paused_for_user_answer", "ask_user_for_clarification_then_record_user_answer_received"),
+        "user_answer_received": ("info", "user_answer_received", "reroute_to_l3_bridge_or_leader_freeze_then_resume_same_l3_task"),
+        "resume_same_l3_task": ("info", "resume_same_l3_task", "build_next_l3_bridge_packet_as_continuation"),
+        "continuation_of_previous_l3": ("info", "continuation_of_previous_l3", "continue_l3_bridge_work_from_user_answer_context"),
         "team_delete_failed": ("warn", "team_delete_failed", "mark_cleanup_required_and_schedule_cleanup_followup"),
         "orphan_timeout_without_bridge_return": ("blocking", "bridge_window_orphaned", "recover_or_mark_failed_before_dispatching_new_dependent_work"),
         "orphan_timeout_without_heartbeat": ("blocking", "bridge_window_orphaned", "recover_or_mark_failed_before_dispatching_new_dependent_work"),
@@ -619,6 +655,8 @@ def notify(event: WorkflowEvent, snapshot: dict[str, Any], check_result: CheckRe
         items.append(_notify_item("blocking", "hard_stop", "runtime is in hard_stop state", event, "do_not_dispatch_any_new_bridge"))
     if integrity.get("awaiting_approval"):
         items.append(_notify_item("blocking", "approval_pending", "approval pending blocks next scoped action", event, "pause_execution_until_approval_resolved"))
+    if integrity.get("awaiting_user_answer"):
+        items.append(_notify_item("blocking", "user_answer_pending", "user clarification answer is required before the next bridge call", event, "ask_user_then_dispatch_user_answer_received"))
     if snapshot.get("route", {}).get("is_stale"):
         items.append(_notify_item("warn", "route_stale", "route view is stale", event, "recompute_possible_phase_route"))
 
@@ -1093,6 +1131,8 @@ def _build_bridge_result(event: WorkflowEvent, to_status: str) -> dict[str, Any]
             status = "failed"
         elif to_status == "bridge_window_orphaned":
             status = "orphaned"
+        elif to_status == "paused_for_user_answer":
+            status = "needs_user_answer"
         else:
             status = "succeeded"
     result.update(
@@ -1128,9 +1168,26 @@ def _derive_integrity(run: dict[str, Any]) -> dict[str, Any]:
                 "related_ids": {"bridge_window_id": bridge_window_id},
             }
         )
+    status_index = run.get("lifecycle", {}).get("status_index", {})
+    awaiting_user_answer_ids = sorted(
+        bridge_window_id
+        for bridge_window_id, status in status_index.items()
+        if status in USER_ANSWER_WAIT_STATUSES
+    )
+    for bridge_window_id in awaiting_user_answer_ids:
+        alerts.append(
+            {
+                "level": "blocking",
+                "category": "user_answer_pending",
+                "message": "bridge window is paused for user clarification",
+                "related_ids": {"bridge_window_id": bridge_window_id},
+            }
+        )
     return {
         "has_hard_stop": bool(hard_stop.get("active", False)),
         "awaiting_approval": bool(approval.get("pending", False)),
+        "awaiting_user_answer": bool(awaiting_user_answer_ids),
+        "awaiting_user_answer_bridge_window_ids": awaiting_user_answer_ids,
         "open_alerts": alerts,
     }
 
@@ -1162,6 +1219,8 @@ def _derive_allowed_actions(integrity: dict[str, Any], lifecycle: dict[str, Any]
         return ["clear_hard_stop", "abort_run"]
     if integrity.get("awaiting_approval"):
         return ["resolve_approval", "abort_run"]
+    if integrity.get("awaiting_user_answer"):
+        return ["record_user_answer", "abort_run"]
     if lifecycle.get("open_bridge_window_ids"):
         return ["record_bridge_event", "mark_bridge_orphaned", "abort_run"]
     return ["call_bridge_sdk", "record_bridge_event", "advance_phase", "reroute_phase", "request_approval", "abort_run"]
@@ -1362,6 +1421,30 @@ def _completion_contract_satisfied(contract: dict[str, Any], payload: dict[str, 
     missing_outputs = set(checks.get("missing_outputs", []))
     missing_artifacts = set(checks.get("missing_artifacts", []))
     return not missing_outputs and not missing_artifacts
+
+
+def _recommendation_for_denial(event: WorkflowEvent, snapshot: dict[str, Any], check_result: CheckResult) -> str:
+    reasons = set(check_result.reasons)
+    if event.event_kind in {"bridge_call_intended", "pretooluse_allowed_by_main_leader", "call_bridge_sdk_started"}:
+        return _recommended_reroute_action(snapshot)
+    if "bridge_packet_route_not_allowed" in reasons or "illegal_phase_transition" in reasons:
+        return _recommended_reroute_action(snapshot)
+    if "approval_pending_blocks_bridge_call" in reasons:
+        return "resolve_approval_or_explain_why_approval_remains_pending_before_reroute"
+    if "hard_stop_blocks_bridge_call" in reasons:
+        return "clear_hard_stop_or_explain_why_hard_stop_remains_before_reroute"
+    if "bridge_packet_semantic_refresh_required" in reasons:
+        return "reroute_to_leader_freeze_and_refreeze_semantics"
+    return "read_runtime_snapshot_then_reroute_to_recommended_next_phase_or_explain_no_reroute"
+
+
+def _recommended_reroute_action(snapshot: dict[str, Any]) -> str:
+    allowed_routes = [str(item) for item in snapshot.get("allowed_routes", []) if str(item)]
+    if allowed_routes:
+        preferred = allowed_routes[0]
+        return f"reroute_phase:{preferred}; if not correct, choose another legal allowed_route and record the reason"
+    current = str(snapshot.get("current_phase") or "unknown")
+    return f"no_legal_allowed_route_from:{current}; explain why reroute is impossible and ask for leader_freeze/user direction"
 
 
 def _notify_item(level: str, category: str, message: str, event: WorkflowEvent, recommended_action: str | None) -> dict[str, Any]:

@@ -1,0 +1,11 @@
+{
+  "name": "bridge-companion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only Bridge Runtime companion UI and local gateway.",
+  "scripts": {
+    "gateway": "node gateway/server.mjs",
+    "start": "node gateway/server.mjs"
+  }
+}

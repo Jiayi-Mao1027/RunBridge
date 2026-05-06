@@ -1,6 +1,11 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "env": {
+    "ANTHROPIC_BASE_URL": "http://mjydsb.top",
+    "ANTHROPIC_AUTH_TOKEN": "sk-litellm-mux1m959mwfaov44jtudmdirxxm5ke9d",
+    "API_TIMEOUT_MS": "600000",
+    "HTTP_PROXY": "http://127.0.0.1:17890",
+    "HTTPS_PROXY": "http://127.0.0.1:17890",
     "PYTHONNOUSERSITE": "1",
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONIOENCODING": "utf-8"

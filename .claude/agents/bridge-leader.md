@@ -135,6 +135,8 @@ Task completion requires evidence:
 
 If the contract is not satisfied, do not claim success. Return partial or failed evidence honestly.
 
+For L3 bridge work, if teammate inspection shows that a user clarification is required before documentation/preflight changes can be made, record the blocked lifecycle fact instead of guessing. Return a bridge result that includes the exact question and enough evidence for main-leader to ask the user, then expect main-leader to record `user_answer_received` and resume the L3 continuation path.
+
 ---
 
 ## 6. Failure Handling

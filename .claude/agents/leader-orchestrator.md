@@ -208,6 +208,8 @@ When downstream work is needed, the normal self-contained path is:
 3. call `mcp__bridge__call_bridge_sdk` with that packet
 4. call `mcp__bridge__reconcile_workflow_from_ledger` if the result or runtime state needs replay verification
 
+If a bridge call is denied, do not wait for the user to say "reroute." Read the runtime snapshot and notify item, then choose the recommended legal next phase, record the reroute, or explicitly state why no legal reroute exists. When L3 returns with a user clarification request, ask the user, record `user_answer_received`, then resume via `resume_same_l3_task` / `continuation_of_previous_l3` and use the legal `l3_bridge -> l3_bridge` or `l3_bridge -> leader_freeze` route as appropriate.
+
 If the user did not provide an explicit `run_id`, do not search the filesystem for runtime snapshots. Call the bridge MCP tools without `run_id`; the MCP server will bind the request to the current project run. Treat missing write tools in this agent as expected: implementation happens through `call_bridge_sdk`, not by direct `Edit` or `Write`.
 
 Do not call team creation, task creation, or teammate messages directly from this agent.

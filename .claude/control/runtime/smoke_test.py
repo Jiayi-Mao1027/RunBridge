@@ -44,7 +44,7 @@ def build_fixture(root: Path) -> tuple[Path, Path]:
         "phases": [
             {"name": "leader_freeze", "allowed_next_phases": ["l2_advisory", "l3_bridge"]},
             {"name": "l2_advisory", "allowed_next_phases": ["l3_bridge"]},
-            {"name": "l3_bridge", "allowed_next_phases": ["l4_implement", "l4_execute", "l4_anomaly"]},
+            {"name": "l3_bridge", "allowed_next_phases": ["l3_bridge", "leader_freeze", "l4_implement", "l4_execute", "l4_anomaly"]},
             {"name": "l4_implement", "allowed_next_phases": ["l4_execute", "l4_anomaly"]},
             {"name": "l4_execute", "allowed_next_phases": ["l4_anomaly"]},
             {"name": "l4_anomaly", "allowed_next_phases": ["l4_implement", "l4_execute"]},
@@ -247,6 +247,70 @@ def run_orphan(control_root: Path, runs_root: Path) -> dict:
     dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_orphan", payload={"packet": p}))
     dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_orphan", payload={"packet": p}))
     return dispatch(control_root, runs_root, event("orphan_timeout_without_bridge_return", bw, ss, agent_type="runtime", agent_id="orphan_scanner", payload={"last_known_event_ref": "call_bridge_sdk_started"}))
+
+
+def run_user_clarification_resume(control_root: Path, runs_root: Path) -> dict:
+    bw = "bw_user_clarification"
+    ss = "sub_user_clarification"
+    p = packet(bw, ss)
+    p["target_phase"] = "l3_bridge"
+    p["phase_route"] = ["l3_bridge"]
+    p["task_spec"]["target_phase"] = "l3_bridge"
+    p["team_spec"]["ownership_boundary"]["writable_scopes"] = ["README.md", "docs/", "*.md"]
+    dispatch(control_root, runs_root, event("bridge_call_intended", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_user_clarification", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_user_clarification", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_user_clarification", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("bridge_window_opened", bw, ss, agent_type="bridge-leader", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("bridge_packet_accepted", bw, ss, payload={"packet": p}))
+    dispatch(control_root, runs_root, event("team_create_started", bw, ss, team_id="team_user_clarification", tool_name="team_create"))
+    dispatch(control_root, runs_root, event("team_create_succeeded", bw, ss, team_id="team_user_clarification", tool_name="team_create", payload={"team_name": "team_user_clarification", "teammate_ids": ["mate_1"]}))
+    dispatch(control_root, runs_root, event("task_create_started", bw, ss, team_id="team_user_clarification", task_id="task_user_clarification", tool_name="task_create"))
+    dispatch(control_root, runs_root, event("task_create_succeeded", bw, ss, team_id="team_user_clarification", task_id="task_user_clarification", tool_name="task_create"))
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "taskcreated_hook_accepted",
+            bw,
+            ss,
+            team_id="team_user_clarification",
+            task_id="task_user_clarification",
+            agent_type="hook",
+            agent_id="hook.task_created",
+            payload={
+                "task_subject": "task_bw_user_clarification",
+                "task_description": "smoke task created",
+                "task_spec": p["task_spec"],
+                "team_spec": p["team_spec"],
+                "task_team_mapping": p["task_team_mapping"],
+                "teammate_ids": ["mate_1"],
+            },
+        ),
+    )
+    dispatch(control_root, runs_root, event("message_dispatch_started", bw, ss, team_id="team_user_clarification", task_id="task_user_clarification", tool_name="send_messages"))
+    dispatch(control_root, runs_root, event("message_dispatch_succeeded", bw, ss, team_id="team_user_clarification", task_id="task_user_clarification", tool_name="send_messages"))
+    dispatch(control_root, runs_root, event("user_clarification_required", bw, ss, team_id="team_user_clarification", task_id="task_user_clarification", payload={"question": "Confirm docs wording before refresh"}))
+    paused = dispatch(
+        control_root,
+        runs_root,
+        event(
+            "bridge_result_returned_with_user_clarification_request",
+            bw,
+            ss,
+            team_id="team_user_clarification",
+            task_id="task_user_clarification",
+            agent_type="main-leader",
+            agent_id="main",
+            tool_name="call_bridge_sdk",
+            payload={"bridge_result": {"status": "needs_user_answer", "reports": [{"summary": "needs clarification"}], "artifact_refs": [], "evidence": {"question": "Confirm docs wording before refresh"}}},
+        ),
+    )
+    if "call_bridge_sdk" in paused.get("allowed_actions", []):
+        raise AssertionError(json.dumps(paused, ensure_ascii=False, indent=2))
+    dispatch(control_root, runs_root, event("user_answer_received", bw, ss, agent_type="main-leader", agent_id="main", payload={"answer": "Proceed with the documented wording"}))
+    dispatch(control_root, runs_root, event("resume_same_l3_task", bw, ss, agent_type="main-leader", agent_id="main", payload={"resume_reason": "user answered clarification"}))
+    resumed = dispatch(control_root, runs_root, event("continuation_of_previous_l3", bw, ss, agent_type="main-leader", agent_id="main", payload={"continuation_reason": "continue bounded L3 documentation refresh"}))
+    return resumed
 
 
 def run_mcp_lifecycle_helper(control_root: Path, runs_root: Path) -> dict:
@@ -480,6 +544,46 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         ),
     )
 
+    leader_freeze_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="return to leader freeze smoke",
+        target_phase="leader_freeze",
+    )
+    leader_freeze_bw = leader_freeze_packet["binding"]["bridge_window_id"]
+    leader_freeze_sub = leader_freeze_packet["binding"]["sub_session_id"]
+    leader_freeze_tool = leader_freeze_packet["binding"]["parent_tool_use_id"]
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "bridge_call_intended",
+            leader_freeze_bw,
+            leader_freeze_sub,
+            agent_type="main-leader",
+            agent_id="main",
+            tool_name="call_bridge_sdk",
+            tool_use_id=leader_freeze_tool,
+            payload={"packet": leader_freeze_packet},
+        ),
+    )
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "pretooluse_denied_by_main_leader",
+            leader_freeze_bw,
+            leader_freeze_sub,
+            agent_type="main-leader",
+            agent_id="main",
+            tool_name="call_bridge_sdk",
+            tool_use_id=leader_freeze_tool,
+            payload={"reasons": ["leader freeze route smoke cleanup"]},
+        ),
+    )
+
     hardened_implement = decide_next_bridge_packet(
         str(control_root),
         "run_demo",
@@ -673,6 +777,7 @@ def main() -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     try:
         control_root, runs_root = build_fixture(runtime_dir)
+        user_clarification = run_user_clarification_resume(control_root, runs_root)
         success = run_success(control_root, runs_root)
         if success.get("current_phase") != "l4_execute":
             raise AssertionError(json.dumps({"expected_phase": "l4_execute", "snapshot": success}, ensure_ascii=False, indent=2))
@@ -688,6 +793,9 @@ def main() -> None:
             "success_phase": success["current_phase"],
             "failure_status": failure["lifecycle"]["status_index"]["bw_failed"],
             "orphan_status": orphan["lifecycle"]["status_index"]["bw_orphan"],
+            "user_clarification_status": user_clarification["lifecycle"]["status_index"]["bw_user_clarification"],
+            "user_clarification_allowed_actions": user_clarification["allowed_actions"],
+            "l3_allowed_routes": user_clarification["allowed_routes"],
             "mcp_helper_status": mcp_helper["lifecycle"]["status_index"]["bw_mcp_helper"],
             "sdk_status": sdk["bridge_result_status"],
             "sdk_replay_status": sdk["replay_status"],
@@ -704,6 +812,9 @@ def main() -> None:
         assert summary["success_status"] == "bridge_window_returned"
         assert summary["failure_status"] == "bridge_call_failed"
         assert summary["orphan_status"] == "bridge_window_orphaned"
+        assert summary["user_clarification_status"] == "continuation_of_previous_l3"
+        assert "call_bridge_sdk" in summary["user_clarification_allowed_actions"]
+        assert "l3_bridge" in summary["l3_allowed_routes"] and "leader_freeze" in summary["l3_allowed_routes"]
         assert summary["mcp_helper_status"] == "bridge_window_orphaned"
         assert summary["sdk_status"] == "succeeded"
         assert summary["sdk_replay_status"] == "bridge_window_returned"

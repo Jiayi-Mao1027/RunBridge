@@ -365,6 +365,7 @@ def _ensure_main_bridge_lifecycle_started(
         "message_dispatch_failed",
         "team_waiting",
         "team_wait_timeout",
+        "blocked_for_user_clarification",
         "task_completion_started",
         "task_completion_completed",
         "task_completion_rejected",
@@ -381,6 +382,10 @@ def _ensure_main_bridge_lifecycle_started(
         "bridge_window_partial_returned",
         "bridge_window_failed",
         "bridge_window_orphaned",
+        "paused_for_user_answer",
+        "user_answer_received",
+        "resume_same_l3_task",
+        "continuation_of_previous_l3",
     }:
         raise ValueError(f"bridge window already terminal: {status}")
 

@@ -83,6 +83,8 @@ Typical phases:
 - `l4_execute`: validation, execution, and post-run checks.
 - `l4_anomaly`: recovery path for failed, partial, blocked, or orphaned windows.
 
+From `l3_bridge`, the graph intentionally allows `l3_bridge -> l3_bridge` and `l3_bridge -> leader_freeze`. This covers the common loop where L3 inspects repo/document state, asks for user confirmation, then resumes the same L3 documentation or preflight task before moving to L4.
+
 The phase is not just a final label. It is a runtime trace of important action intent, action start, action end, denial, failure, partial completion, and orphaning. This allows later audit to distinguish "never attempted" from "attempted and failed" from "started but never returned".
 
 ## BridgePacket

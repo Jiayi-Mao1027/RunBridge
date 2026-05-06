@@ -154,6 +154,11 @@ Failure/recovery facts are first-class:
 - `team_delete_failed`
 - `bridge_window_partial_returned`
 - `bridge_window_orphaned`
+- `blocked_for_user_clarification`
+- `paused_for_user_answer`
+- `user_answer_received`
+- `resume_same_l3_task`
+- `continuation_of_previous_l3`
 
 Absence of a matching end event is meaningful and may become an orphan condition.
 
