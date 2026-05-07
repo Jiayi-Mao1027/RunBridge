@@ -382,6 +382,9 @@ function toolDetailSummary(record) {
     const s = record.search_summary;
     return `search: ${s.files_matched ?? "?"} files, ${s.matches_returned ?? "?"} matches`;
   }
+  if (normalizedToolName(record) === "LS") {
+    return `ls: ${record.output_summary?.lines_returned ?? record.output_summary?.stdout_lines ?? "?"} lines`;
+  }
   if (record.command_preview) {
     return `bash: ${record.exit_code ?? "running"}`;
   }
@@ -424,7 +427,7 @@ function normalizedToolName(record = {}) {
   const direct = raw.split(" · ")[0].trim();
   const mcp = raw.match(/mcp__[a-zA-Z0-9_]+__[a-zA-Z0-9_]+/);
   if (mcp) return mcp[0];
-  const common = raw.match(/\b(Read|Edit|Write|MultiEdit|Bash|Grep|Glob)\b/);
+  const common = raw.match(/\b(Read|Edit|Write|MultiEdit|Bash|Grep|Glob|LS)\b/);
   if (common) return common[1];
   const bridge = raw.match(/\b(team_create|task_create|team_delete|send_messages?)\b/i);
   if (bridge) return bridge[1];
@@ -442,8 +445,9 @@ function normalizedStatus(record = {}) {
 function humanizeToolActivity(record = {}) {
   const toolName = normalizedToolName(record);
   const status = normalizedStatus(record);
-  const file = concisePath(record.target || firstFileRef(record) || record.file_path || record.path || "");
+  const file = concisePath(record.target || firstFileRef(record) || record.file_path || record.path || record.normalized_input?.file_path || record.normalized_input?.path || "");
   const command = cleanCommand(record.command_preview || record.normalized_input?.command || record.safe_input_preview || "");
+  const searchPattern = record.search_summary?.pattern_preview || record.search_summary?.pattern || record.normalized_input?.pattern || record.normalized_input?.glob || "";
   const prefix = humanStatus(status);
   let text = "";
   let objectText = file;
@@ -453,8 +457,9 @@ function humanizeToolActivity(record = {}) {
   else if (toolName === "Edit") text = `${prefix}${actionVerb(status, "修改", "修改了", "修改失败")}文件${file ? `：${file}` : ""}`;
   else if (toolName === "Write") text = `${prefix}${actionVerb(status, "写入", "写入了", "写入失败")}文件${file ? `：${file}` : ""}`;
   else if (toolName === "MultiEdit") text = `${prefix}${actionVerb(status, "批量修改", "批量修改了", "批量修改失败")}文件${file ? `：${file}` : ""}`;
-  else if (toolName === "Grep") text = `${prefix}${actionVerb(status, "搜索", "完成搜索", "搜索失败")}代码${record.search_summary?.pattern ? `：${record.search_summary.pattern}` : file ? `：${file}` : ""}`;
-  else if (toolName === "Glob") text = `${prefix}${actionVerb(status, "匹配", "完成匹配", "匹配失败")}文件${record.search_summary?.pattern ? `：${record.search_summary.pattern}` : file ? `：${file}` : ""}`;
+  else if (toolName === "Grep") text = `${prefix}${actionVerb(status, "搜索", "完成搜索", "搜索失败")}代码${searchPattern ? `：${searchPattern}` : file ? `：${file}` : ""}`;
+  else if (toolName === "Glob") text = `${prefix}${actionVerb(status, "匹配", "完成匹配", "匹配失败")}文件${searchPattern ? `：${searchPattern}` : file ? `：${file}` : ""}`;
+  else if (toolName === "LS") text = `${prefix}${actionVerb(status, "列出", "列完", "列目录失败")}目录${file ? `：${file}` : ""}`;
   else if (toolName === "Bash") text = `${prefix}${actionVerb(status, "运行", "运行完", "运行失败")}命令${command ? `：${command}` : ""}`;
   else if (toolName === "mcp__bridge__build_bridge_packet") text = `${prefix}${actionVerb(status, "整理", "整理完", "整理失败")}本轮桥接任务包`;
   else if (toolName === "mcp__bridge__call_bridge_sdk") text = status === "started" ? "主控正在等待桥接窗口执行并返回结果" : actionVerb(status, "", "桥接窗口已经返回结果", "桥接窗口返回失败或异常");
@@ -470,15 +475,20 @@ function humanizeToolActivity(record = {}) {
   if (record.edit_summary) {
     const e = record.edit_summary;
     evidenceText = `改动规模：增加 ${e.lines_added ?? "?"} 行，删除 ${e.lines_removed ?? "?"} 行。`;
+  } else if (toolName === "LS") {
+    evidenceText = record.output_summary?.lines_returned || record.output_summary?.stdout_lines ? `目录输出 ${record.output_summary?.lines_returned ?? record.output_summary?.stdout_lines} 行。` : "目录读取已记录。";
   } else if (record.read_options || record.output_summary?.lines_returned) {
     evidenceText = `读取返回 ${record.output_summary?.lines_returned ?? record.output_summary?.stdout_lines ?? "?"} 行。`;
   } else if (record.search_summary) {
     const s = record.search_summary;
     evidenceText = `搜索结果：${s.files_matched ?? "?"} 个文件，${s.matches_returned ?? "?"} 条匹配。`;
   } else if (record.command_preview && record.status !== "started") {
-    evidenceText = `命令退出码：${record.exit_code ?? "未知"}。`;
+    const tail = record.stderr_tail || record.stdout_tail || "";
+    evidenceText = `命令退出码：${record.exit_code ?? "未知"}${tail ? `；尾部输出：${String(tail).replace(/\s+/g, " ").slice(0, 120)}` : ""}。`;
   } else if (record.output_summary?.notable) {
     evidenceText = String(record.output_summary.notable).slice(0, 140);
+  } else if (record.stdout_tail || record.stderr_tail) {
+    evidenceText = String(record.stderr_tail || record.stdout_tail).replace(/\s+/g, " ").slice(0, 140);
   }
 
   return {
@@ -518,7 +528,7 @@ function titleForCompanionRecord(record, source) {
   if (source === "teammate_reports") return "队员返回了进度报告";
   if (source === "process_events") return `长运行进程${record.state ? `：${record.state}` : "有新状态"}`;
   if (source === "bridge_packets") return "本轮桥接任务包已记录";
-  if (source === "session_events") return record.event_type === "user_prompt" ? "会话收到任务提示" : record.event_type === "session_started" ? "会话已启动" : record.event_type === "tool_call_started" || record.event_type === "tool_call_completed" ? humanizeToolActivity(record).text : progressLabelFor(eventTypeOf(record));
+  if (source === "session_events") return record.event_type === "user_prompt" ? "会话收到任务提示" : record.event_type === "session_started" ? "会话已启动" : ["tool_call_started", "tool_call_completed", "tool_call_failed"].includes(record.event_type) ? humanizeToolActivity(record).text : progressLabelFor(eventTypeOf(record));
   if (source === "session_tool_events") return humanizeToolActivity(record).text;
   if (source === "artifacts") return `证据文件已记录${record.artifact_ref ? `：${concisePath(record.artifact_ref)}` : ""}`;
   if (source === "completion_checks") return `完成检查${record.status ? `：${record.status}` : "已记录"}`;
@@ -526,8 +536,15 @@ function titleForCompanionRecord(record, source) {
 }
 
 function fileRefsFromRecord(record) {
-  if (Array.isArray(record.file_refs)) return record.file_refs.map(ref => typeof ref === "string" ? ref : ref.path).filter(Boolean).slice(0, 8);
-  return eventFileRefs(record);
+  const refs = [];
+  if (Array.isArray(record.file_refs)) refs.push(...record.file_refs.map(ref => typeof ref === "string" ? ref : (ref.path || ref.file_path || ref.target)).filter(Boolean));
+  if (record.target) refs.push(record.target);
+  if (record.file_path) refs.push(record.file_path);
+  if (record.path) refs.push(record.path);
+  if (record.normalized_input?.file_path) refs.push(record.normalized_input.file_path);
+  if (record.normalized_input?.path) refs.push(record.normalized_input.path);
+  if (!refs.length) refs.push(...eventFileRefs(record));
+  return [...new Set(refs.filter(Boolean))].slice(0, 8);
 }
 
 function plainSummary(value, fallback = "已记录一条 runtime 事实。") {
@@ -539,13 +556,13 @@ function plainSummary(value, fallback = "已记录一条 runtime 事实。") {
 }
 
 function summaryForCompanionRecord(record) {
+  if (record.tool_name || record.command_preview || record.edit_summary || record.read_options || record.search_summary || record.event_type === "tool_call_started" || record.event_type === "tool_call_completed" || record.event_type === "tool_call_failed") {
+    const display = humanizeToolActivity(record);
+    return display.evidenceText || (record.status === "started" ? "操作已经开始，等待完成事件返回更多证据。" : "操作已经记录，原始输入/输出保留在详情卷宗中。");
+  }
   if (record.to || record.direction || record.body_preview || record.message_preview) {
     const assignment = assignmentActionText(record);
     return assignment.text;
-  }
-  if (record.tool_name || record.command_preview || record.edit_summary || record.read_options || record.search_summary || record.event_type === "tool_call_started" || record.event_type === "tool_call_completed") {
-    const display = humanizeToolActivity(record);
-    return display.evidenceText || (record.status === "started" ? "操作已经开始，等待完成事件返回更多证据。" : "操作已经记录，原始输入/输出保留在详情卷宗中。");
   }
   if (record.progress_state && (record.completed_items || record.open_items || record.blocked_items)) {
     return `${plainSummary(record.summary, "队员进度已记录")} 完成 ${record.completed_items?.length || 0} 项，未完成 ${record.open_items?.length || 0} 项，阻塞 ${record.blocked_items?.length || 0} 项。`;
