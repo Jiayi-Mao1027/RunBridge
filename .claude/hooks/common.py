@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -294,3 +295,199 @@ def stop_block(reason: str) -> int:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+
+def emit_companion_event(kind: str, payload: dict[str, Any]) -> None:
+    run_id = payload.get("run_id") or detect_run_id(payload)
+    if not isinstance(run_id, str) or not run_id.strip():
+        return
+    run_root = runtime_runs_root() / run_id.strip()
+    event_path = run_root / f"{kind}.jsonl"
+    sequence = next_jsonl_sequence(event_path)
+    record = {
+        "timestamp": payload.get("timestamp") or now_iso(),
+        "event_type": kind,
+        **payload,
+        "run_id": run_id.strip(),
+        "sequence": payload.get("sequence") or sequence,
+        "monotonic_index": payload.get("monotonic_index") or sequence,
+    }
+    append_jsonl(event_path, record)
+    companion_path = run_root / "companion_events.jsonl"
+    companion_sequence = next_jsonl_sequence(companion_path)
+    append_jsonl(
+        companion_path,
+        {
+            **record,
+            "companion_sequence": companion_sequence,
+            "source_kind": kind,
+            "source_file": f"{kind}.jsonl",
+            "source_sequence": record["sequence"],
+            "source_offset": record["sequence"],
+        },
+    )
+
+
+def compact_tool_target(tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    keys = {
+        "Read": ("file_path", "path"),
+        "Edit": ("file_path", "path"),
+        "Write": ("file_path", "path"),
+        "MultiEdit": ("file_path", "path"),
+        "Bash": ("command",),
+        "Grep": ("pattern", "path"),
+        "Glob": ("pattern", "path"),
+        "LS": ("path",),
+    }.get(tool_name, ("file_path", "path", "command", "pattern"))
+    for key in keys:
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def compact_tool_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
+    target = compact_tool_target(tool_name, tool_input)
+    if target:
+        return f"{tool_name} {target}"
+    keys = ", ".join(sorted(str(key) for key in tool_input.keys())[:8])
+    return f"{tool_name} input keys: {keys}" if keys else tool_name
+
+
+def safe_input_preview(tool_input: dict[str, Any]) -> dict[str, Any]:
+    preview: dict[str, Any] = {}
+    key_map = {
+        "file_path": "file_path",
+        "path": "path",
+        "command": "command",
+        "pattern": "pattern",
+        "glob": "glob",
+        "description": "description",
+    }
+    for source_key, target_key in key_map.items():
+        value = tool_input.get(source_key)
+        if isinstance(value, str) and value.strip():
+            preview[target_key] = redact_observer_text(value)[:500]
+    return preview
+
+
+def normalized_tool_input(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
+    preview = safe_input_preview(tool_input)
+    if tool_name == "Bash" and "cwd" in tool_input:
+        preview["cwd"] = str(tool_input.get("cwd"))[:500]
+    return preview
+
+
+def tool_file_refs(tool_name: str, tool_input: dict[str, Any], *, after: bool = False) -> list[dict[str, Any]]:
+    role = {
+        "Read": "read",
+        "Edit": "edit",
+        "Write": "write",
+        "MultiEdit": "edit",
+        "Grep": "search",
+        "Glob": "search",
+        "LS": "cwd",
+        "Bash": "cwd",
+    }.get(tool_name, "artifact")
+    refs: list[dict[str, Any]] = []
+    for key in ("file_path", "path", "target"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            refs.append(file_ref_record(value, role=role, after=after))
+    if tool_name == "Bash":
+        cwd = tool_input.get("cwd") or tool_input.get("workdir")
+        if isinstance(cwd, str) and cwd.strip():
+            refs.append(file_ref_record(cwd, role="cwd", after=after))
+    return dedupe_file_refs(refs)
+
+
+def file_ref_record(path_text: str, *, role: str, after: bool = False) -> dict[str, Any]:
+    path = str(path_text).strip()
+    exists = Path(path).expanduser().exists() if path else False
+    return {
+        "path": path,
+        "role": role,
+        "exists_before": None if after else exists,
+        "exists_after": exists if after else None,
+    }
+
+
+def dedupe_file_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    seen = set()
+    for ref in refs:
+        key = (ref.get("path"), ref.get("role"))
+        if ref.get("path") and key not in seen:
+            result.append(ref)
+            seen.add(key)
+    return result
+
+
+def output_summary(tool_response: dict[str, Any], *, failed: bool) -> dict[str, Any]:
+    stdout = str(tool_response.get("stdout") or tool_response.get("output") or "")
+    stderr = str(tool_response.get("stderr") or "")
+    exit_code = tool_response.get("exit_code")
+    return {
+        "stdout_lines": len(stdout.splitlines()) if stdout else 0,
+        "stderr_lines": len(stderr.splitlines()) if stderr else 0,
+        "truncated": len(stdout) > 1200 or len(stderr) > 1200,
+        "notable": f"command exited {exit_code}" if exit_code is not None else ("tool failed" if failed else "tool completed"),
+    }
+
+
+def tool_start_record(run_id: str, tool_use_id: str | None) -> dict[str, Any]:
+    if not run_id or not tool_use_id:
+        return {}
+    path = runtime_runs_root() / run_id / "tool_events.jsonl"
+    for record in reversed(read_jsonl(path)):
+        if record.get("tool_use_id") == tool_use_id and record.get("status") == "started":
+            return record
+    return {}
+
+
+def duration_ms(started_at: Any, completed_at: str) -> int | None:
+    if not isinstance(started_at, str) or not started_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return max(0, int((end - start).total_seconds() * 1000))
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            parsed = json.loads(line)
+            if isinstance(parsed, dict):
+                records.append(parsed)
+    except Exception:
+        return []
+    return records
+
+
+def next_jsonl_sequence(path: Path) -> int:
+    if not path.exists():
+        return 1
+    try:
+        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()) + 1
+    except Exception:
+        return 1
+
+
+def redact_observer_text(text: str) -> str:
+    text = re.sub(r"(?i)(api[_-]?key|token|password|secret)(\s*[:=]\s*)(\S+)", r"\1\2<redacted>", text)
+    text = re.sub(r"sk-[A-Za-z0-9_-]{12,}", "sk-<redacted>", text)
+    return text

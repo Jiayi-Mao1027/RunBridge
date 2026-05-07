@@ -198,7 +198,30 @@ Long-running work is represented with `TeamIdle` events and payloads such as:
 
 For long-running execution work, especially L4 execution/training, the execution group must estimate expected wall-clock runtime before launch and include the estimate basis in the execution record. A bridge soft timeout or partial result means the bridge window stopped waiting and returned intermediate state; it does not by itself prove the owned process was killed, failed, or completed.
 
-## 9. Active Runtime Entry Point
+For L4 execute, the intended contract is stronger: if the executor launches an owned long-running process, the bridge window must remain open until the process reaches a terminal state and postrun has audited terminal logs/artifacts. `TeamIdle` is waiting/progress evidence, not permission to delete the team or return a partial bridge result while the owned process is still running. The execute timeout policy is sized for long training runs and should not use the short 900 second bridge-window default.
+
+## 9. Companion Observability
+
+Bridge Companion is a read-only observer. It must not enter agent context, control routing, create tasks, message teammates, or write authoritative workflow state.
+
+The runtime writes side-channel JSONL observability files under each run directory for Companion:
+
+- `bridge_packets.jsonl`
+- `agent_messages.jsonl`
+- `tool_events.jsonl`
+- `teammate_reports.jsonl`
+- `artifacts.jsonl`
+- `completion_checks.jsonl`
+- `process_events.jsonl`
+- `companion_events.jsonl`
+
+Observer records include a run-local `sequence` / `monotonic_index` for stable UI ordering. `companion_events.jsonl` is a merged stream and includes `source_kind`, `source_file`, `source_sequence`, and `source_offset` so UI drawers can trace every merged item back to its typed JSONL source.
+
+`tool_events.jsonl` should expose UI-safe fields only: `started_at`, `completed_at`, `duration_ms`, `normalized_input`, `safe_input_preview`, `file_refs`, and `output_summary`. It must not include secrets, full prompts, or complete large file contents. `agent_messages.jsonl` should include `message_id`, `direction`, `coverage_refs`, and whether a response is required. `teammate_reports.jsonl` should include structured progress fields such as `progress_state`, `completed_items`, `open_items`, `blocked_items`, `evidence_refs`, and `file_refs`. `completion_checks.jsonl` should include checklist-level `items` with per-item status and evidence/reason fields. `process_events.jsonl` is the read-only place for long-running process state such as PID, command preview, heartbeat, terminal state, log tail ref, and artifact probe.
+
+These files are derived from runtime events and Claude Code hooks. They are for UI/debug inspection only; authoritative workflow truth remains `run_ledger.json`, `event_log.jsonl`, task ledgers, transitions, and `runtime_snapshot.json`.
+
+## 10. Active Runtime Entry Point
 
 The Claude Code entry point is self-contained in this parent-sibling `.claude` directory.
 The `bridge` MCP server is declared in `.claude/settings.json`:
@@ -213,7 +236,7 @@ The active CLI accepts workflow events only:
 
 Legacy task-action requests are not accepted by this entry point.
 
-## 10. Completion Standard
+## 11. Completion Standard
 
 The system is behaving correctly only when:
 

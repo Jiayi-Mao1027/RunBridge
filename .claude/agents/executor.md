@@ -176,7 +176,7 @@ Do not silently run formal training with tiny batches or very low memory usage j
 
 If the first safe setting leaves substantial unused memory and the task is a formal run, tune upward inside the approved boundary before declaring the run configured. Use bounded increments and stop before reckless OOM probing. If OOM occurs during this tuning, record the failing setting and fall back to the highest observed safe setting.
 
-Formal execution may include long-running jobs such as training. A bridge soft timeout or partial bridge return means the workflow window stopped waiting and returned intermediate state; it does not by itself mean the launched process was killed, failed, or completed.
+Formal execution may include long-running jobs such as training. In L4 execute, launch long jobs in a foreground, waitable, or explicitly polled form so the bridge can remain open until terminal completion. Do not intentionally detach a formal run and return while it is still running unless the packet or user explicitly asked for detached background operation.
 
 For long-running jobs you launch, record:
 - estimated wall-clock runtime before launch, as a range
@@ -187,11 +187,11 @@ For long-running jobs you launch, record:
 - GPU/resource choice
 - log file path
 - expected checkpoint/output path
-- whether the process is still running at report time
+- terminal status of the process at report time
 
 Do not launch a long-running formal job without first stating the expected runtime range in your execution record. If no credible estimate is possible, state "estimate unavailable" with the missing evidence, then record the process and polling evidence especially carefully.
 
-If the process is still running when you must report, return an explicit in-progress report with `owned_process_refs`, partial logs/artifacts, and the next polling/audit recommendation. Do not state or imply that training stopped unless you have process/log evidence.
+If the process is still running, emit progress evidence for bridge-leader to keep waiting or polling; do not ask bridge-leader to close the L4 execute window as partial. Do not state or imply that training stopped unless you have process/log evidence.
 
 If the run cannot proceed safely under available resources, state that explicitly.
 

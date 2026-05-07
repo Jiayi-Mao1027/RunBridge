@@ -346,6 +346,44 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
     status = replay["runtime_snapshot"]["lifecycle"]["status_index"][packet["binding"]["bridge_window_id"]]
     if status != "bridge_window_returned":
         raise AssertionError(json.dumps(replay, ensure_ascii=False, indent=2))
+    run_root = runs_root / "run_demo"
+    companion_packets = _read_jsonl(run_root / "bridge_packets.jsonl")
+    companion_messages = _read_jsonl(run_root / "agent_messages.jsonl")
+    companion_tools = _read_jsonl(run_root / "tool_events.jsonl")
+    companion_reports = _read_jsonl(run_root / "teammate_reports.jsonl")
+    companion_artifacts = _read_jsonl(run_root / "artifacts.jsonl")
+    companion_checks = _read_jsonl(run_root / "completion_checks.jsonl")
+    companion_all = _read_jsonl(run_root / "companion_events.jsonl")
+    if not companion_packets or not companion_messages or not companion_tools or not companion_reports or not companion_checks or not companion_all:
+        raise AssertionError(
+            json.dumps(
+                {
+                    "bridge_packets": companion_packets,
+                    "agent_messages": companion_messages,
+                    "tool_events": companion_tools,
+                    "teammate_reports": companion_reports,
+                    "artifacts": companion_artifacts,
+                    "completion_checks": companion_checks,
+                    "companion_events": companion_all,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    if not any(item.get("instruction_coverage_checklist") for item in companion_packets):
+        raise AssertionError(json.dumps(companion_packets, ensure_ascii=False, indent=2))
+    if not all(item.get("sequence") and item.get("monotonic_index") for item in companion_tools[:3]):
+        raise AssertionError(json.dumps(companion_tools[:3], ensure_ascii=False, indent=2))
+    if not any("safe_input_preview" in item and "file_refs" in item and "output_summary" in item for item in companion_tools):
+        raise AssertionError(json.dumps(companion_tools, ensure_ascii=False, indent=2))
+    if not any(item.get("message_id") and item.get("direction") == "bridge_leader_to_teammate" and "coverage_refs" in item for item in companion_messages):
+        raise AssertionError(json.dumps(companion_messages, ensure_ascii=False, indent=2))
+    if not any(item.get("progress_state") and "completed_items" in item and "file_refs" in item for item in companion_reports):
+        raise AssertionError(json.dumps(companion_reports, ensure_ascii=False, indent=2))
+    if not any(item.get("check_type") == "completion_contract" and isinstance(item.get("items"), list) for item in companion_checks):
+        raise AssertionError(json.dumps(companion_checks, ensure_ascii=False, indent=2))
+    if not any(item.get("source_kind") and item.get("source_file") and item.get("source_sequence") for item in companion_all):
+        raise AssertionError(json.dumps(companion_all[:5], ensure_ascii=False, indent=2))
     failed_packet = decide_next_bridge_packet(
         str(control_root),
         "run_demo",
@@ -418,6 +456,38 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
     if partial_result.get("status") != "partial_or_failed":
         raise AssertionError(json.dumps(partial_result, ensure_ascii=False, indent=2))
 
+    running_partial_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="run l4 execute running partial protocol smoke",
+        task_spec={"task_subject": "sdk bridge running partial smoke", "task_kind": "bridge_window_smoke"},
+        target_phase="l4_execute",
+    )
+    running_partial_result = call_bridge_sdk(
+        str(control_root),
+        running_partial_packet,
+        runtime_runs_root=str(runs_root),
+        persist=True,
+        team_executor=lambda _: {
+            "status": "partial",
+            "waiting": True,
+            "wait_reason": "process_running",
+            "owned_process_refs": [{"pid": 12345, "status": "running", "log_path": "train.log"}],
+            "reports": [{"summary": "training still running"}],
+            "artifact_refs": [],
+            "evidence": {"process_status": "running"},
+        },
+    )
+    if running_partial_result.get("status") != "failed":
+        raise AssertionError(json.dumps(running_partial_result, ensure_ascii=False, indent=2))
+    if running_partial_result.get("error_or_null", {}).get("type") != "L4ExecutePrematurePartialReturn":
+        raise AssertionError(json.dumps(running_partial_result, ensure_ascii=False, indent=2))
+    process_events = _read_jsonl(run_root / "process_events.jsonl")
+    if not any(item.get("state") == "running" and item.get("pid") == 12345 for item in process_events):
+        raise AssertionError(json.dumps(process_events, ensure_ascii=False, indent=2))
+
     reject_packet = decide_next_bridge_packet(
         str(control_root),
         "run_demo",
@@ -436,6 +506,7 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
     failed_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][failed_packet["binding"]["bridge_window_id"]]
     exception_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][exception_packet["binding"]["bridge_window_id"]]
     partial_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][partial_packet["binding"]["bridge_window_id"]]
+    running_partial_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][running_partial_packet["binding"]["bridge_window_id"]]
     reject_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][reject_packet["binding"]["bridge_window_id"]]
     return {
         "bridge_window_id": packet["binding"]["bridge_window_id"],
@@ -444,6 +515,7 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         "failed_status": failed_status,
         "exception_status": exception_status,
         "partial_status": partial_status,
+        "running_partial_status": running_partial_status,
         "reject_status": reject_status,
         "replayed_events": replay["source_summary"]["event_count"],
     }
@@ -680,7 +752,9 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         target_phase="l4_execute",
     )
     execute_timeout = execute_packet["completion_contract"]["timeout_policy"]
-    if execute_timeout.get("soft_timeout_seconds", 0) < 3600 or execute_timeout.get("hard_timeout_seconds", 0) < 14400:
+    if execute_timeout.get("soft_timeout_seconds", 0) < 21600 or execute_timeout.get("hard_timeout_seconds", 0) < 86400:
+        raise AssertionError(json.dumps(execute_timeout, ensure_ascii=False, indent=2))
+    if execute_timeout.get("wait_until_process_complete") is not True or execute_timeout.get("partial_return_allowed_only_after_process_terminal") is not True:
         raise AssertionError(json.dumps(execute_timeout, ensure_ascii=False, indent=2))
     if execute_packet["task_spec"]["completion_contract"]["timeout_policy"] != execute_timeout:
         raise AssertionError(json.dumps(execute_packet["task_spec"]["completion_contract"], ensure_ascii=False, indent=2))
@@ -689,7 +763,7 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         for item in execute_packet.get("task_team_mapping", {}).get("teammate_assignments", [])
         if isinstance(item, dict)
     )
-    if "estimate expected wall-clock runtime" not in execute_assignments:
+    if "estimate expected wall-clock runtime" not in execute_assignments or "Do not return a final or partial bridge report while an owned process is still running" not in execute_assignments:
         raise AssertionError(json.dumps(execute_packet.get("task_team_mapping"), ensure_ascii=False, indent=2))
     execute_assignments = json.dumps(execute_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
     if "near-ceiling accelerator memory utilization" not in execute_assignments or "resource utilization" not in execute_assignments:
@@ -922,6 +996,7 @@ def main() -> None:
             "sdk_failed_status": sdk["failed_status"],
             "sdk_exception_status": sdk["exception_status"],
             "sdk_partial_status": sdk["partial_status"],
+            "sdk_running_partial_status": sdk["running_partial_status"],
             "sdk_reject_status": sdk["reject_status"],
             "negative_tests": negative["negative_tests"],
             "cli_executor_policy": cli_executor["cli_executor_policy"],
@@ -941,6 +1016,7 @@ def main() -> None:
         assert summary["sdk_failed_status"] == "bridge_window_failed"
         assert summary["sdk_exception_status"] == "bridge_window_failed"
         assert summary["sdk_partial_status"] == "bridge_window_partial_returned"
+        assert summary["sdk_running_partial_status"] == "bridge_window_failed"
         assert summary["sdk_reject_status"] == "bridge_window_failed"
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     finally:

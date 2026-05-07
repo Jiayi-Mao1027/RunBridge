@@ -9,6 +9,7 @@ from typing import Any
 
 from loader import ControlPaths, load_json_file, load_jsonl
 from persist import append_jsonl, atomic_write_json, sanitize_json_value
+from companion_observer import observe_workflow_event
 
 
 SCHEMA_VERSION = "0.4.0"
@@ -121,6 +122,8 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "user_clarification_required": "blocked_for_user_clarification",
         "blocked_for_user_clarification": "blocked_for_user_clarification",
         "wait_timeout_or_process_lost": "team_wait_timeout",
+        "bridge_leader_fails_task": "task_failed",
+        "task_failed_by_bridge_leader": "task_failed",
         "orphan_timeout_without_heartbeat": "bridge_window_orphaned",
     },
     "blocked_for_user_clarification": {
@@ -752,6 +755,10 @@ def persist_workflow_result(
 
     atomic_write_json(paths.run_ledger_path(event.run_id), run_ledger)
     atomic_write_json(snapshot_path, snapshot)
+    try:
+        companion_paths = observe_workflow_event(paths, event, snapshot)
+    except Exception as exc:
+        companion_paths = {"companion_observer_error": f"{exc.__class__.__name__}: {exc}"}
     return {
         "event_log": str(event_path),
         "check_ledger": str(check_path),
@@ -760,6 +767,7 @@ def persist_workflow_result(
         "runtime_snapshot": str(snapshot_path),
         "run_ledger": str(paths.run_ledger_path(event.run_id)),
         "transitions": str(paths.transitions_path(event.run_id)),
+        **companion_paths,
     }
 
 

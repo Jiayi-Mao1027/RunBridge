@@ -319,8 +319,138 @@ function progressLabelFor(eventType) {
   return eventType;
 }
 
-function extractPacketSummary(snapshot) {
-  const packet = snapshot?.bridge_packet || snapshot?.packet || snapshot?.last_bridge_packet || snapshot?.bridgePacket || null;
+function collectTextMatches(value, predicate, pathParts = [], out = []) {
+  if (out.length > 80 || value == null) return out;
+  if (typeof value === "string") {
+    if (predicate(value, pathParts)) out.push({ path: pathParts.join("."), value });
+    return out;
+  }
+  if (typeof value !== "object") return out;
+  if (Array.isArray(value)) {
+    value.slice(0, 20).forEach((item, index) => collectTextMatches(item, predicate, [...pathParts, String(index)], out));
+    return out;
+  }
+  for (const [key, nested] of Object.entries(value).slice(0, 80)) {
+    collectTextMatches(nested, predicate, [...pathParts, key], out);
+  }
+  return out;
+}
+
+function eventActor(event) {
+  const payload = event.payload || event.data || event;
+  return payload.teammate_id || payload.teammate_role || payload.agent_id || payload.agent_type || payload.role || payload.sender || payload.from || "runtime";
+}
+
+function eventTool(event) {
+  const payload = event.payload || event.data || event;
+  return payload.tool_name || payload.tool || payload.name || null;
+}
+
+function eventFileRefs(event) {
+  const payload = event.payload || event.data || event;
+  const refs = new Set();
+  collectTextMatches(payload, (text, pathParts) => {
+    const key = pathParts.at(-1) || "";
+    return /path|file|artifact|target|source/i.test(key) && /[\\/]|\.[a-zA-Z0-9]{1,8}$/.test(text);
+  }).forEach(match => refs.add(match.value));
+  return [...refs].slice(0, 8);
+}
+
+function classifyKind(type, source = "") {
+  const text = `${type} ${source}`.toLowerCase();
+  if (text.includes("tool")) return "tool";
+  if (text.includes("process")) return "process";
+  if (text.includes("message") || text.includes("agent_messages")) return "message";
+  if (text.includes("artifact")) return "artifact";
+  if (text.includes("report") || text.includes("teammate_reports")) return "report";
+  if (text.includes("completion")) return "check";
+  if (text.includes("packet") || text.includes("bridge_packets")) return "packet";
+  if (text.includes("inbox")) return "inbox";
+  return "event";
+}
+
+function titleForCompanionRecord(record, source) {
+  if (source === "tool_events") return `${record.status || "tool"} · ${record.action || record.tool_name || "tool_call"}`;
+  if (source === "agent_messages") return `${record.from || "agent"} → ${record.to || "teammate"}`;
+  if (source === "teammate_reports") return `${record.agent_type || record.teammate_id || "teammate"} report · ${record.progress_state || record.report_type || "progress"}`;
+  if (source === "process_events") return `进程 ${record.state || "unknown"} · ${record.process_ref || record.pid || "process"}`;
+  if (source === "bridge_packets") return "BridgePacket 任务包记录";
+  if (source === "artifacts") return "Artifact 产物记录";
+  if (source === "completion_checks") return `完成检查 · ${record.status || "unknown"}`;
+  return progressLabelFor(eventTypeOf(record));
+}
+
+function fileRefsFromRecord(record) {
+  if (Array.isArray(record.file_refs)) return record.file_refs.map(ref => typeof ref === "string" ? ref : ref.path).filter(Boolean).slice(0, 8);
+  return eventFileRefs(record);
+}
+
+function summaryForCompanionRecord(record) {
+  if (record.output_summary) {
+    const notable = record.output_summary.notable || "工具调用已记录";
+    const lines = `stdout ${record.output_summary.stdout_lines || 0} 行 / stderr ${record.output_summary.stderr_lines || 0} 行`;
+    return `${record.summary || notable}；${lines}`;
+  }
+  if (record.progress_state && (record.completed_items || record.open_items || record.blocked_items)) {
+    return `${record.summary || "队员进度已记录"}；完成 ${record.completed_items?.length || 0} 项，未完成 ${record.open_items?.length || 0} 项，阻塞 ${record.blocked_items?.length || 0} 项`;
+  }
+  if (record.state && record.process_ref) return record.summary || `${record.process_ref} ${record.state}`;
+  return record.summary || summarizeEvent(record);
+}
+
+function toActivityItem(record, source = "event_log") {
+  const type = eventTypeOf(record);
+  return {
+    kind: classifyKind(type, source),
+    source,
+    sequence: record.companion_sequence || record.sequence || record.monotonic_index || null,
+    timestamp: timestampOf(record),
+    actor: eventActor(record),
+    title: titleForCompanionRecord(record, source),
+    eventType: type,
+    tool: eventTool(record),
+    files: fileRefsFromRecord(record),
+    summary: summaryForCompanionRecord(record),
+    status: record.status,
+    raw: record
+  };
+}
+
+function buildActivityFeed(events, inbox, companion = {}) {
+  const items = [
+    ...events.slice(-60).map(item => toActivityItem(item, "event_log")),
+    ...inbox.slice(-20).map(item => toActivityItem(item, "main_leader_inbox")),
+    ...(companion.bridgePackets || []).slice(-10).map(item => toActivityItem(item, "bridge_packets")),
+    ...(companion.agentMessages || []).slice(-30).map(item => toActivityItem(item, "agent_messages")),
+    ...(companion.toolEvents || []).slice(-80).map(item => toActivityItem(item, "tool_events")),
+    ...(companion.teammateReports || []).slice(-30).map(item => toActivityItem(item, "teammate_reports")),
+    ...(companion.processEvents || []).slice(-30).map(item => toActivityItem(item, "process_events")),
+    ...(companion.artifactEvents || []).slice(-20).map(item => toActivityItem(item, "artifacts")),
+    ...(companion.completionChecks || []).slice(-20).map(item => toActivityItem(item, "completion_checks"))
+  ];
+  return items
+    .sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")) || Number(a.sequence || 0) - Number(b.sequence || 0))
+    .slice(-120);
+}
+
+function buildCommunicationFeed(events, inbox, companion = {}) {
+  const combined = [...events, ...inbox, ...(companion.agentMessages || []), ...(companion.teammateReports || [])];
+  return combined.filter(item => {
+    const text = JSON.stringify(item).toLowerCase();
+    const type = eventTypeOf(item).toLowerCase();
+    return type.includes("message") || type.includes("dispatch") || type.includes("report") || text.includes("teammate") || text.includes("agent") || text.includes("report");
+  }).slice(-50).map(item => ({
+    timestamp: timestampOf(item),
+    actor: eventActor(item),
+    eventType: eventTypeOf(item),
+    summary: item.summary || summarizeEvent(item),
+    raw: item
+  }));
+}
+
+function extractPacketSummary(snapshot, companion = {}) {
+  const latestPacketRecord = (companion.bridgePackets || []).at(-1) || null;
+  const packet = snapshot?.bridge_packet || snapshot?.packet || snapshot?.last_bridge_packet || snapshot?.bridgePacket || latestPacketRecord || null;
   const semantics = snapshot?.frozen_semantics || packet?.frozen_semantics || {};
   const scope = snapshot?.frozen_scope || packet?.frozen_scope || {};
   const taskSpec = snapshot?.task_spec || packet?.task_spec || {};
@@ -338,8 +468,9 @@ function extractPacketSummary(snapshot) {
   };
 }
 
-function extractTeammates(snapshot, events) {
-  const fromSnapshot = snapshot?.teammates || snapshot?.team?.teammates || snapshot?.team_spec?.teammates || snapshot?.team_spec?.members || [];
+function extractTeammates(snapshot, events, companion = {}) {
+  const latestPacketRecord = (companion.bridgePackets || []).at(-1) || {};
+  const fromSnapshot = snapshot?.teammates || snapshot?.team?.teammates || snapshot?.team_spec?.teammates || snapshot?.team_spec?.members || latestPacketRecord.team_spec || [];
   const teammates = Array.isArray(fromSnapshot) ? fromSnapshot.map((item, index) => ({
     id: item.id || item.teammate_id || item.name || `teammate_${index + 1}`,
     role: item.role || item.agent_type || item.type || item.name || "teammate",
@@ -348,7 +479,7 @@ function extractTeammates(snapshot, events) {
   })) : [];
 
   const eventRoles = new Map();
-  for (const event of events) {
+  for (const event of [...events, ...(companion.toolEvents || []), ...(companion.teammateReports || []), ...(companion.agentMessages || []), ...(companion.processEvents || [])]) {
     const payload = event.payload || event.data || event;
     const role = payload.teammate_role || payload.teammate_id || payload.agent_type || payload.agent_id;
     if (!role) continue;
@@ -362,8 +493,9 @@ function extractTeammates(snapshot, events) {
   return [...teammates, ...eventRoles.values()].slice(0, 8);
 }
 
-function buildInternalProgress(snapshot, events, inbox, artifacts) {
-  const recentEvents = events.slice(-8).map(event => {
+function buildInternalProgress(snapshot, events, inbox, artifacts, companion = {}) {
+  const allEvents = [...events, ...(companion.agentMessages || []), ...(companion.toolEvents || []), ...(companion.teammateReports || []), ...(companion.processEvents || []), ...(companion.artifactEvents || []), ...(companion.completionChecks || [])];
+  const recentEvents = allEvents.slice(-12).map(event => {
     const type = eventTypeOf(event);
     return {
       eventType: type,
@@ -377,6 +509,7 @@ function buildInternalProgress(snapshot, events, inbox, artifacts) {
   if (snapshot?.last_bridge_result) reportCandidates.push({ source: "last_bridge_result", value: snapshot.last_bridge_result });
   if (snapshot?.completion_report) reportCandidates.push({ source: "completion_report", value: snapshot.completion_report });
   if (snapshot?.partial_reports) reportCandidates.push({ source: "partial_reports", value: snapshot.partial_reports });
+  for (const report of companion.teammateReports || []) reportCandidates.push({ source: "teammate_reports", value: report });
   for (const item of inbox.slice(-5)) {
     const type = eventTypeOf(item).toLowerCase();
     const text = JSON.stringify(item).toLowerCase();
@@ -388,7 +521,10 @@ function buildInternalProgress(snapshot, events, inbox, artifacts) {
   const evidence = [];
   if (recentEvents.length) evidence.push(`最近 ${recentEvents.length} 条 runtime 事件可读。`);
   if (reportCandidates.length) evidence.push(`已发现 ${reportCandidates.length} 条 report / result 相关记录。`);
-  if (Array.isArray(artifacts) && artifacts.length) evidence.push(`已记录 ${artifacts.length} 个 artifact 引用。`);
+  const artifactTotal = (Array.isArray(artifacts) ? artifacts.length : 0) + (companion.artifactEvents || []).length;
+  if (artifactTotal) evidence.push(`已记录 ${artifactTotal} 个 artifact 引用。`);
+  if ((companion.toolEvents || []).length) evidence.push(`已记录 ${(companion.toolEvents || []).length} 条直接工具调用事件。`);
+  if ((companion.processEvents || []).length) evidence.push(`已记录 ${(companion.processEvents || []).length} 条长运行进程事件。`);
   if (snapshot?.team_idle?.wait_reason || snapshot?.wait_reason) evidence.push(`等待原因：${snapshot?.team_idle?.wait_reason || snapshot?.wait_reason}`);
 
   const lastMeaningful = [...recentEvents].reverse().find(item => !item.eventType.toLowerCase().includes("idle")) || recentEvents.at(-1) || null;
@@ -402,24 +538,26 @@ function buildInternalProgress(snapshot, events, inbox, artifacts) {
       source: item.source,
       summary: typeof item.value === "string" ? item.value.slice(0, 220) : JSON.stringify(item.value).slice(0, 220)
     })),
-    artifactCount: Array.isArray(artifacts) ? artifacts.length : 0,
-    hasInternalEvidence: Boolean(recentEvents.length || reportCandidates.length || (Array.isArray(artifacts) && artifacts.length))
+    artifactCount: artifactTotal,
+    hasInternalEvidence: Boolean(recentEvents.length || reportCandidates.length || artifactTotal)
   };
 }
 
-function normalizeStatus(runId, snapshot, events, inbox, artifacts) {
+function normalizeStatus(runId, snapshot, events, inbox, artifacts, companion = {}) {
   const latest = events.at(-1) || null;
   const lifecycleState = inferLifecycle(snapshot, events);
   const copy = statusCopy[lifecycleState] || statusCopy.unknown;
-  const hasCompletionReport = Boolean(snapshot?.last_bridge_result || snapshot?.completion_report || events.some(e => eventTypeOf(e).includes("completion")));
-  const hasArtifacts = Boolean((artifacts && artifacts.length) || snapshot?.artifacts || events.some(e => eventTypeOf(e).includes("artifact")));
+  const hasCompletionReport = Boolean(snapshot?.last_bridge_result || snapshot?.completion_report || events.some(e => eventTypeOf(e).includes("completion")) || (companion.completionChecks || []).length || (companion.teammateReports || []).length);
+  const hasArtifacts = Boolean((artifacts && artifacts.length) || snapshot?.artifacts || events.some(e => eventTypeOf(e).includes("artifact")) || (companion.artifactEvents || []).length);
   const phase = snapshot?.phase || snapshot?.target_phase || snapshot?.route_state?.current_phase || "未知阶段";
   const lastUpdatedAt = latest ? timestampOf(latest) : (snapshot?.updated_at || snapshot?.last_updated_at || null);
   const possibleNextEvents = lifecycleNextEvents[lifecycleState] || [];
   const unknowns = buildUnknowns(lifecycleState, snapshot, events, hasCompletionReport, hasArtifacts);
-  const internalProgress = buildInternalProgress(snapshot, events, inbox, artifacts);
-  const packetSummary = extractPacketSummary(snapshot);
-  const teammates = extractTeammates(snapshot, events);
+  const internalProgress = buildInternalProgress(snapshot, events, inbox, artifacts, companion);
+  const packetSummary = extractPacketSummary(snapshot, companion);
+  const teammates = extractTeammates(snapshot, events, companion);
+  const activityFeed = buildActivityFeed(events, inbox, companion);
+  const communicationFeed = buildCommunicationFeed(events, inbox, companion);
 
   return {
     runId,
@@ -446,11 +584,18 @@ function normalizeStatus(runId, snapshot, events, inbox, artifacts) {
     internalProgress,
     packetSummary,
     teammates,
+    activityFeed,
+    communicationFeed,
     detail: {
       packet: packetSummary,
       teammates,
+      activityFeed,
+      communicationFeed,
       reports: internalProgress.reports,
-      artifacts,
+      artifacts: [...(Array.isArray(artifacts) ? artifacts : []), ...(companion.artifactEvents || [])],
+      completionChecks: companion.completionChecks || [],
+      processEvents: companion.processEvents || [],
+      companionEvents: companion.companionEvents || [],
       recentEvents: internalProgress.recentEvents,
       inbox: inbox.slice(-10)
     },
@@ -496,8 +641,18 @@ async function getRunBundle(runId) {
   const snapshot = await readJsonIfExists(path.join(runDir, "runtime_snapshot.json"), null);
   const events = await readJsonlIfExists(path.join(runDir, "event_log.jsonl"));
   const inbox = await readJsonlIfExists(path.join(runDir, "main_leader_inbox.jsonl"));
+  const companion = {
+    bridgePackets: await readJsonlIfExists(path.join(runDir, "bridge_packets.jsonl")),
+    agentMessages: await readJsonlIfExists(path.join(runDir, "agent_messages.jsonl")),
+    toolEvents: await readJsonlIfExists(path.join(runDir, "tool_events.jsonl")),
+    teammateReports: await readJsonlIfExists(path.join(runDir, "teammate_reports.jsonl")),
+    artifactEvents: await readJsonlIfExists(path.join(runDir, "artifacts.jsonl")),
+    completionChecks: await readJsonlIfExists(path.join(runDir, "completion_checks.jsonl")),
+    processEvents: await readJsonlIfExists(path.join(runDir, "process_events.jsonl")),
+    companionEvents: await readJsonlIfExists(path.join(runDir, "companion_events.jsonl"))
+  };
   const artifacts = snapshot?.artifacts || snapshot?.artifact_refs || [];
-  return { snapshot, events, inbox, artifacts };
+  return { snapshot, events, inbox, artifacts, companion };
 }
 
 function readRequestJson(req, limitBytes = 200000) {
@@ -592,7 +747,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 404, { error: "Runtime root is not configured or run id is invalid.", runId });
         return;
       }
-      if (kind === "status") sendJson(res, 200, normalizeStatus(runId, bundle.snapshot, bundle.events, bundle.inbox, bundle.artifacts));
+      if (kind === "status") sendJson(res, 200, normalizeStatus(runId, bundle.snapshot, bundle.events, bundle.inbox, bundle.artifacts, bundle.companion));
       else if (kind === "events") sendJson(res, 200, { runId, events: bundle.events });
       else if (kind === "inbox") sendJson(res, 200, { runId, inbox: bundle.inbox });
       else if (kind === "artifacts") sendJson(res, 200, { runId, artifacts: bundle.artifacts });
@@ -605,12 +760,12 @@ const server = http.createServer(async (req, res) => {
         });
         const writeStatus = async () => {
           const fresh = await getRunBundle(runId);
-          const status = fresh ? normalizeStatus(runId, fresh.snapshot, fresh.events, fresh.inbox, fresh.artifacts) : { error: "run unavailable" };
+          const status = fresh ? normalizeStatus(runId, fresh.snapshot, fresh.events, fresh.inbox, fresh.artifacts, fresh.companion) : { error: "run unavailable" };
           res.write(`event: status\n`);
           res.write(`data: ${JSON.stringify(status)}\n\n`);
         };
         await writeStatus();
-        const timer = setInterval(writeStatus, 2500);
+        const timer = setInterval(writeStatus, 1000);
         req.on("close", () => clearInterval(timer));
       }
       return;

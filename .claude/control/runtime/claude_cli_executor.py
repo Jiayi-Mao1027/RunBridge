@@ -270,6 +270,11 @@ def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any
         "Teammate dispatch guard: include packet-derived task, scope, tool, completion, and report instructions "
         "directly in each Agent message. Do not ask teammates to read .claude/runtime_state/bridge_prompts; "
         "that prompt artifact is for audit only.\n\n"
+        "L4 execute wait guard: if packet.target_phase is l4_execute and executor launches an owned long-running "
+        "process, keep the bridge window alive until that process reaches a terminal state and postrun has audited "
+        "the terminal logs/artifacts. TeamIdle is only waiting/progress evidence. Do not return status partial, "
+        "partial_or_failed, or succeeded while an owned process is still running; record progress and continue "
+        "waiting or polling inside this bridge window.\n\n"
         f"Runtime binding:\n{json.dumps(binding, ensure_ascii=False, indent=2)}\n\n"
         f"BridgePacket:\n{json.dumps(packet, ensure_ascii=False, indent=2)}"
     )

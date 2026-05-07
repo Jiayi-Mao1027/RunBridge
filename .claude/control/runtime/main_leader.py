@@ -48,9 +48,11 @@ DEFAULT_TIMEOUT_POLICY = {
 PHASE_TIMEOUT_POLICY = {
     "l4_execute": {
         "heartbeat_interval_seconds": 120,
-        "soft_timeout_seconds": 3600,
-        "hard_timeout_seconds": 14400,
+        "soft_timeout_seconds": 21600,
+        "hard_timeout_seconds": 86400,
         "timeout_action": "ask_main_leader",
+        "wait_until_process_complete": True,
+        "partial_return_allowed_only_after_process_terminal": True,
     },
 }
 
@@ -360,10 +362,12 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
         return [
             "Long-task ETA rule: before launching any long-running command, estimate expected wall-clock runtime as a range, state the basis for the estimate, and include that estimate in the execution report.",
             "If runtime cannot be estimated, state that explicitly with the missing information and still record command, start time, owned process refs, logs, and expected outputs.",
+            "L4 execute terminality rule: run formal long jobs in a way the bridge can wait on or poll until terminal completion. Do not return a final or partial bridge report while an owned process is still running; emit progress evidence and keep waiting.",
         ]
     if target_phase == "l4_execute" and teammate_name == "postrun":
         return [
             "Audit ETA rule: compare actual runtime against the executor's estimate when available, and flag material deviation as execution evidence rather than treating it as chat context.",
+            "Postrun must run after the formal execution process has reached a terminal state or produced terminal failure evidence; do not audit a still-running process as complete.",
         ]
     return []
 

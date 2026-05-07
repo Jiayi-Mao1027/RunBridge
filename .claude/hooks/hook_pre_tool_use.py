@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 from common import (
+    compact_tool_summary,
+    compact_tool_target,
     control_binding_value,
     control_main_session_id,
     detect_run_id,
+    emit_companion_event,
     invoke_runtime_event,
+    is_bridge_child_session,
     load_last_bridge_packet,
     now_iso,
+    normalized_tool_input,
     pretool_deny,
     read_hook_input,
+    safe_input_preview,
+    tool_file_refs,
 )
 
 
@@ -26,10 +33,12 @@ START_BY_TOOL = {
 def main() -> int:
     payload = read_hook_input()
     tool_name = str(payload.get("tool_name") or "").strip()
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    if is_bridge_child_session() and tool_name:
+        _emit_child_tool_event(payload, tool_input, tool_name, status="started")
     if tool_name not in BRIDGE_TOOL_NAMES and tool_name not in START_BY_TOOL:
         return 0
 
-    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     packet = tool_input.get("packet") if isinstance(tool_input, dict) else None
     tool_arguments = tool_input.get("arguments") if isinstance(tool_input.get("arguments"), dict) else {}
     if packet is None and isinstance(tool_arguments, dict):
@@ -141,6 +150,51 @@ def main() -> int:
         return pretool_deny(f"bridge start denied: {check.get('reasons')}")
 
     return 0
+
+
+def _emit_child_tool_event(payload: dict, tool_input: dict, tool_name: str, *, status: str) -> None:
+    timestamp = now_iso()
+    emit_companion_event(
+        "tool_events",
+        {
+            "timestamp": timestamp,
+            "run_id": detect_run_id(payload) or "",
+            "main_session_id": control_main_session_id(payload, tool_input),
+            "sub_session_id": control_binding_value("sub_session_id", payload, tool_input),
+            "bridge_window_id": control_binding_value("bridge_window_id", payload, tool_input),
+            "team_id": control_binding_value("team_id", payload, tool_input),
+            "task_id": control_binding_value("task_id", payload, tool_input),
+            "teammate_id": payload.get("agent_id") or tool_input.get("agent_id"),
+            "agent_id": payload.get("agent_id") or tool_input.get("agent_id"),
+            "agent_type": payload.get("agent_type") or tool_input.get("agent_type"),
+            "tool_name": tool_name,
+            "tool_use_id": payload.get("tool_use_id") or tool_input.get("tool_use_id"),
+            "action": _action_for_tool(tool_name),
+            "target": compact_tool_target(tool_name, tool_input),
+            "summary": compact_tool_summary(tool_name, tool_input),
+            "status": status,
+            "started_at": timestamp,
+            "completed_at": None,
+            "duration_ms": None,
+            "normalized_input": normalized_tool_input(tool_name, tool_input),
+            "safe_input_preview": safe_input_preview(tool_input),
+            "file_refs": tool_file_refs(tool_name, tool_input, after=False),
+            "output_summary": None,
+        },
+    )
+
+
+def _action_for_tool(tool_name: str) -> str:
+    return {
+        "Read": "read_file",
+        "Grep": "search_text",
+        "Glob": "match_files",
+        "LS": "list_directory",
+        "Edit": "edit_file",
+        "Write": "write_file",
+        "MultiEdit": "edit_file",
+        "Bash": "run_command",
+    }.get(tool_name, "tool_call")
 
 
 if __name__ == "__main__":

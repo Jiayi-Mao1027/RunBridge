@@ -94,6 +94,23 @@ class BridgeLeaderRuntime:
             if execution.get("status") in {"partial", "partial_or_failed"}:
                 if not execution.get("waiting"):
                     self._team_waiting(execution)
+                if self._l4_execute_owned_process_still_running(execution):
+                    execution = deepcopy(execution)
+                    execution["error_or_null"] = {
+                        "message": "l4_execute team returned partial while an owned process was still running",
+                        "type": "L4ExecutePrematurePartialReturn",
+                    }
+                    evidence = execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {}
+                    execution["evidence"] = {
+                        **evidence,
+                        "protocol_violation": "l4_execute_partial_returned_before_owned_process_terminal",
+                        "owned_process_refs": execution.get("owned_process_refs", []),
+                    }
+                    self._fail_task(execution, event_kind="bridge_leader_fails_task")
+                    self._team_delete()
+                    bridge_result = self._bridge_result("failed", "team_wait", execution)
+                    self._return_bridge_result("bridge_result_returned_with_failure", bridge_result)
+                    return bridge_result
                 self._wait_timeout(execution)
                 self._event("partial_evidence_collected", team_id=self.team_id, task_id=self.task_id, payload={"evidence": execution.get("evidence"), "reports": execution.get("reports", []), "artifact_refs": execution.get("artifact_refs", [])})
                 self._team_delete()
@@ -313,6 +330,23 @@ class BridgeLeaderRuntime:
             payload={"bridge_result": bridge_result},
         )
 
+    def _l4_execute_owned_process_still_running(self, execution: dict[str, Any]) -> bool:
+        if str(self.packet.get("target_phase")) != "l4_execute":
+            return False
+        refs = execution.get("owned_process_refs")
+        if not isinstance(refs, list) or not refs:
+            return bool(execution.get("waiting")) and _status_looks_running(execution.get("process_status"))
+        terminal = {"completed", "complete", "succeeded", "success", "failed", "failure", "exited", "stopped", "dead", "terminated", "terminal"}
+        for ref in refs:
+            if not isinstance(ref, dict):
+                return True
+            status = str(ref.get("status") or ref.get("state") or ref.get("process_status") or "").strip().lower()
+            if not status:
+                return bool(execution.get("waiting"))
+            if status not in terminal:
+                return True
+        return False
+
     def _fail_window(self, exc: BridgeExecutionError) -> dict[str, Any]:
         bridge_result = self._bridge_result("failed", exc.failure_stage, {"error_or_null": {"message": str(exc), **exc.payload}})
         if exc.failure_stage == "packet_accept":
@@ -421,6 +455,12 @@ def _checks_satisfied(checks: dict[str, Any]) -> bool:
         and not checks.get("missing_artifacts")
         and not checks.get("failed_validations")
     )
+
+
+def _status_looks_running(status: Any) -> bool:
+    if not status:
+        return False
+    return str(status).strip().lower() not in {"completed", "complete", "succeeded", "success", "failed", "failure", "exited", "stopped", "dead", "terminated", "terminal"}
 
 
 def _teammate_ids(team_spec: dict[str, Any]) -> list[str]:

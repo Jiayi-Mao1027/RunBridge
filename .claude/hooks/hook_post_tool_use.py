@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 from common import (
+    compact_tool_summary,
+    compact_tool_target,
     control_binding_value,
     control_main_session_id,
     detect_run_id,
+    emit_companion_event,
     invoke_runtime_event,
+    is_bridge_child_session,
     load_last_bridge_packet,
     now_iso,
+    normalized_tool_input,
+    output_summary,
     read_hook_input,
+    safe_input_preview,
     simple_block,
+    tool_file_refs,
+    tool_start_record,
+    duration_ms,
 )
 
 
@@ -32,6 +42,13 @@ FAILURE_BY_TOOL = {
 def main() -> int:
     payload = read_hook_input()
     tool_name = str(payload.get("tool_name") or "").strip()
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    tool_response = payload.get("tool_response") if isinstance(payload.get("tool_response"), dict) else {}
+    status = str(payload.get("status") or tool_response.get("status") or "").lower()
+    error = payload.get("error") or tool_response.get("error") or tool_response.get("error_or_null")
+    failed = bool(error) or status in {"error", "failed", "failure"}
+    if is_bridge_child_session() and tool_name:
+        _emit_child_tool_event(payload, tool_input, tool_response, tool_name, failed=failed, error=error)
     if tool_name not in BRIDGE_TOOL_NAMES and tool_name not in SUCCESS_BY_TOOL:
         return 0
 
@@ -45,12 +62,7 @@ def main() -> int:
     if not run_id:
         return simple_block("PostToolUse blocked: runtime run binding missing; SessionStart active-run is required.")
 
-    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-    tool_response = payload.get("tool_response") if isinstance(payload.get("tool_response"), dict) else {}
     tool_arguments = tool_input.get("arguments") if isinstance(tool_input.get("arguments"), dict) else {}
-    status = str(payload.get("status") or tool_response.get("status") or "").lower()
-    error = payload.get("error") or tool_response.get("error") or tool_response.get("error_or_null")
-    failed = bool(error) or status in {"error", "failed", "failure"}
 
     packet = tool_input.get("packet") if isinstance(tool_input.get("packet"), dict) else {}
     if not packet and isinstance(tool_arguments.get("packet"), dict):
@@ -106,6 +118,65 @@ def main() -> int:
         check = workflow.get("check_result", {})
         return simple_block(f"PostToolUse blocked: {check.get('decision')} {check.get('reasons')}")
     return 0
+
+
+def _emit_child_tool_event(payload: dict, tool_input: dict, tool_response: dict, tool_name: str, *, failed: bool, error: object) -> None:
+    run_id = detect_run_id(payload) or ""
+    tool_use_id = payload.get("tool_use_id") or tool_input.get("tool_use_id")
+    completed_at = now_iso()
+    started = tool_start_record(run_id, str(tool_use_id) if tool_use_id else None)
+    started_at = started.get("started_at") or started.get("timestamp")
+    emit_companion_event(
+        "tool_events",
+        {
+            "timestamp": completed_at,
+            "run_id": run_id,
+            "main_session_id": control_main_session_id(payload, tool_input),
+            "sub_session_id": control_binding_value("sub_session_id", payload, tool_input),
+            "bridge_window_id": control_binding_value("bridge_window_id", payload, tool_input),
+            "team_id": control_binding_value("team_id", payload, tool_input),
+            "task_id": control_binding_value("task_id", payload, tool_input),
+            "teammate_id": payload.get("agent_id") or tool_input.get("agent_id"),
+            "agent_id": payload.get("agent_id") or tool_input.get("agent_id"),
+            "agent_type": payload.get("agent_type") or tool_input.get("agent_type"),
+            "tool_name": tool_name,
+            "tool_use_id": tool_use_id,
+            "action": _action_for_tool(tool_name),
+            "target": compact_tool_target(tool_name, tool_input),
+            "summary": compact_tool_summary(tool_name, tool_input),
+            "status": "failed" if failed else "completed",
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_ms": duration_ms(started_at, completed_at),
+            "normalized_input": normalized_tool_input(tool_name, tool_input),
+            "safe_input_preview": safe_input_preview(tool_input),
+            "file_refs": tool_file_refs(tool_name, tool_input, after=True),
+            "output_summary": output_summary(tool_response, failed=failed),
+            "exit_code": tool_response.get("exit_code"),
+            "stdout_tail": _tail(tool_response.get("stdout") or tool_response.get("output")),
+            "stderr_tail": _tail(tool_response.get("stderr")),
+            "error_or_null": error,
+        },
+    )
+
+
+def _action_for_tool(tool_name: str) -> str:
+    return {
+        "Read": "read_file",
+        "Grep": "search_text",
+        "Glob": "match_files",
+        "LS": "list_directory",
+        "Edit": "edit_file",
+        "Write": "write_file",
+        "MultiEdit": "edit_file",
+        "Bash": "run_command",
+    }.get(tool_name, "tool_call")
+
+
+def _tail(value: object, limit: int = 1200) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value[-limit:]
 
 
 if __name__ == "__main__":

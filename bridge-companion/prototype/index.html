@@ -3,527 +3,155 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Bridge Companion · Contract Board</title>
+  <title>Bridge Companion · Ops Board</title>
   <style>
     :root {
+      --bg: #070707;
+      --panel: rgba(6, 6, 6, .76);
+      --panel-strong: rgba(4, 4, 4, .9);
+      --line: rgba(183, 126, 68, .28);
+      --line-strong: rgba(204, 145, 78, .46);
       --ink: #d9c49a;
       --ink-strong: #f0dcad;
-      --muted: #a99168;
-      --gold: #c69a57;
-      --paper: rgba(208, 174, 121, 0.82);
-      --black: rgba(5, 5, 5, 0.70);
-      --black-strong: rgba(4, 4, 4, 0.88);
-      --line: rgba(185, 126, 67, 0.34);
-      --red-glow: rgba(191, 68, 52, 0.64);
-      --stage-w: min(100vw, calc(100vh * 16 / 9));
-      --stage-h: calc(var(--stage-w) * 9 / 16);
-      --stage-scale: calc(var(--stage-w) / 1920);
+      --muted: #9f8762;
+      --gold: #c99b58;
+      --paper: rgba(207, 172, 119, .86);
+      --paper-text: #24170f;
+      --danger: #b24a3e;
+      --ok: #91ad72;
     }
-
     * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      overflow: auto;
-      color: var(--ink);
-      font-family: "Times New Roman", "Noto Serif SC", "Songti SC", serif;
-      background: #070707;
-    }
-
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      box-shadow: inset 0 0 140px rgba(0,0,0,.92);
-      z-index: 4;
-    }
-
-    .viewport {
-      width: 100vw;
-      min-height: 100vh;
-      display: grid;
-      place-items: start center;
-      background: #070707;
-    }
-
-    .stage {
-      position: relative;
-      width: var(--stage-w);
-      height: var(--stage-h);
-      min-width: 960px;
-      min-height: 540px;
-      overflow: hidden;
-      background: url("../acb4f3c90af4c527737fda2bd8145c82.png") center / cover no-repeat;
-      transform-origin: top center;
-    }
-
-    .stage::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
-      background:
-        linear-gradient(90deg, rgba(0,0,0,.54), rgba(0,0,0,.06) 24%, rgba(0,0,0,.08) 70%, rgba(0,0,0,.42)),
-        linear-gradient(180deg, rgba(0,0,0,.08), rgba(0,0,0,.36));
-      z-index: 1;
-    }
-
-    .ui { position: absolute; inset: 0; z-index: 3; }
-
-    .brand {
-      position: absolute;
-      left: calc(226 * var(--stage-scale));
-      top: calc(34 * var(--stage-scale));
-      text-shadow: 0 4px 16px #000;
-    }
-
-    .brand h1 {
-      margin: 0;
-      color: var(--ink-strong);
-      font-size: calc(46 * var(--stage-scale));
-      line-height: 1;
-      font-weight: 400;
-    }
-
-    .brand p {
-      margin: calc(8 * var(--stage-scale)) 0 0;
-      color: var(--gold);
-      font-size: calc(24 * var(--stage-scale));
-      letter-spacing: .16em;
-    }
-
-    .top-chip {
-      position: absolute;
-      top: calc(30 * var(--stage-scale));
-      width: calc(260 * var(--stage-scale));
-      height: calc(82 * var(--stage-scale));
-      padding: calc(14 * var(--stage-scale)) calc(22 * var(--stage-scale));
-      background: rgba(5,5,5,.62);
-      border: 1px solid rgba(184,126,69,.34);
-      box-shadow: inset 0 0 22px rgba(0,0,0,.86);
-    }
-
-    .top-chip .k { color: var(--muted); font-size: calc(16 * var(--stage-scale)); margin-bottom: calc(8 * var(--stage-scale)); }
-    .top-chip .v { color: var(--ink-strong); font-size: calc(18 * var(--stage-scale)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .run { left: calc(1188 * var(--stage-scale)); }
-    .phase { left: calc(1465 * var(--stage-scale)); }
-    .gateway { left: calc(1738 * var(--stage-scale)); width: calc(250 * var(--stage-scale)); }
-
-    .contract-title {
-      position: absolute;
-      left: calc(112 * var(--stage-scale));
-      top: calc(186 * var(--stage-scale));
-      width: calc(1010 * var(--stage-scale));
-      text-shadow: 0 4px 18px #000;
-    }
-
-    .contract-title h2 {
-      margin: 0;
-      color: var(--ink-strong);
-      font-size: calc(58 * var(--stage-scale));
-      font-weight: 400;
-      letter-spacing: .08em;
-      line-height: 1.12;
-    }
-
-    .contract-title p {
-      margin: calc(28 * var(--stage-scale)) 0 0;
-      color: var(--muted);
-      font-size: calc(25 * var(--stage-scale));
-      letter-spacing: .06em;
-    }
-
-    .status-panel {
-      position: absolute;
-      left: calc(520 * var(--stage-scale));
-      top: calc(338 * var(--stage-scale));
-      width: calc(548 * var(--stage-scale));
-      height: calc(190 * var(--stage-scale));
-      padding: calc(30 * var(--stage-scale)) calc(38 * var(--stage-scale));
-      color: #24170f;
-      background: linear-gradient(90deg, rgba(238,205,148,.22), rgba(102,60,26,.10)), var(--paper);
-      border: 1px solid rgba(74,42,22,.34);
-      box-shadow: inset 0 0 32px rgba(67,34,13,.32), 0 16px 28px rgba(0,0,0,.42);
-      clip-path: polygon(1% 0, 99% 0, 100% 8%, 99% 92%, 97% 100%, 1.5% 100%, 0 91%, .8% 8%);
-    }
-
-    .status-panel h3 { margin: 0 0 calc(18 * var(--stage-scale)); font-size: calc(34 * var(--stage-scale)); line-height: 1.1; font-weight: 500; }
-    .status-panel p { margin: 0; font-size: calc(20 * var(--stage-scale)); line-height: 1.5; font-weight: 700; }
-
-    .bridge-progress {
-      position: absolute;
-      left: calc(520 * var(--stage-scale));
-      top: calc(548 * var(--stage-scale));
-      width: calc(548 * var(--stage-scale));
-      height: calc(170 * var(--stage-scale));
-      padding: calc(20 * var(--stage-scale)) calc(28 * var(--stage-scale));
-      background: rgba(5,5,5,.66);
-      border: 1px solid rgba(171,111,62,.28);
-      box-shadow: inset 0 0 22px rgba(0,0,0,.86), 0 14px 30px rgba(0,0,0,.45);
-    }
-
-    .bridge-progress h3 { margin: 0 0 calc(10 * var(--stage-scale)); color: var(--ink-strong); font-size: calc(26 * var(--stage-scale)); font-weight: 400; letter-spacing: .08em; }
-    .progress-summary { margin: 0 0 calc(10 * var(--stage-scale)); color: var(--gold); font-size: calc(17 * var(--stage-scale)); line-height: 1.35; }
-    .progress-list { display: grid; gap: calc(4 * var(--stage-scale)); color: var(--muted); font-size: calc(14 * var(--stage-scale)); line-height: 1.22; }
-    .progress-item::before { content: "›"; color: #8b3025; margin-right: .45em; }
-
-    .packet-panel {
-      position: absolute;
-      left: calc(1088 * var(--stage-scale));
-      top: calc(338 * var(--stage-scale));
-      width: calc(315 * var(--stage-scale));
-      height: calc(380 * var(--stage-scale));
-      padding: calc(20 * var(--stage-scale));
-      background: rgba(5,5,5,.64);
-      border: 1px solid rgba(171,111,62,.25);
-      box-shadow: inset 0 0 22px rgba(0,0,0,.86), 0 14px 30px rgba(0,0,0,.45);
-    }
-
-    .packet-panel h3, .team-panel h3 { margin: 0 0 calc(12 * var(--stage-scale)); color: var(--ink-strong); font-size: calc(24 * var(--stage-scale)); font-weight: 400; letter-spacing: .08em; }
-    .mini-label { color: var(--gold); font-size: calc(13 * var(--stage-scale)); margin-top: calc(10 * var(--stage-scale)); }
-    .mini-text { color: var(--muted); font-size: calc(14 * var(--stage-scale)); line-height: 1.38; margin-top: calc(4 * var(--stage-scale)); max-height: calc(70 * var(--stage-scale)); overflow: hidden; }
-
-    .team-panel {
-      position: absolute;
-      left: calc(1418 * var(--stage-scale));
-      top: calc(338 * var(--stage-scale));
-      width: calc(430 * var(--stage-scale));
-      height: calc(380 * var(--stage-scale));
-      padding: calc(20 * var(--stage-scale));
-      background: rgba(5,5,5,.66);
-      border: 1px solid rgba(171,111,62,.25);
-      box-shadow: inset 0 0 22px rgba(0,0,0,.86), 0 14px 30px rgba(0,0,0,.45);
-    }
-
-    .team-list { display: grid; gap: calc(8 * var(--stage-scale)); }
-    .teammate { display: grid; grid-template-columns: calc(96 * var(--stage-scale)) 1fr; gap: calc(10 * var(--stage-scale)); padding: calc(8 * var(--stage-scale)); border: 1px solid rgba(171,111,62,.14); background: rgba(0,0,0,.22); }
-    .teammate .role { color: var(--gold); font-size: calc(14 * var(--stage-scale)); }
-    .teammate .status { color: var(--muted); font-size: calc(13 * var(--stage-scale)); line-height: 1.3; }
-
-    .right-card {
-      position: absolute;
-      left: calc(1418 * var(--stage-scale));
-      width: calc(430 * var(--stage-scale));
-      height: calc(108 * var(--stage-scale));
-      display: grid;
-      grid-template-columns: calc(56 * var(--stage-scale)) 1fr;
-      gap: calc(18 * var(--stage-scale));
-      align-items: center;
-      padding: calc(16 * var(--stage-scale));
-      background: rgba(5,5,5,.68);
-      border: 1px solid rgba(171,111,62,.25);
-      box-shadow: inset 0 0 20px rgba(0,0,0,.86), 0 12px 26px rgba(0,0,0,.42);
-    }
-    .interpret { top: calc(738 * var(--stage-scale)); }
-    .next { top: calc(858 * var(--stage-scale)); }
-    .latest { top: calc(978 * var(--stage-scale)); }
-    .right-card .icon { width: calc(46 * var(--stage-scale)); height: calc(46 * var(--stage-scale)); display: grid; place-items: center; color: var(--gold); font-size: calc(28 * var(--stage-scale)); border: 1px solid rgba(181,126,72,.22); background: rgba(0,0,0,.38); }
-    .right-card h3 { margin: 0 0 calc(6 * var(--stage-scale)); color: var(--ink-strong); font-size: calc(22 * var(--stage-scale)); font-weight: 400; }
-    .right-card p { margin: 0; color: var(--muted); font-size: calc(14 * var(--stage-scale)); line-height: 1.34; }
-
-    .stage-row {
-      position: absolute;
-      left: calc(110 * var(--stage-scale));
-      top: calc(752 * var(--stage-scale));
-      width: calc(960 * var(--stage-scale));
-      display: grid;
-      grid-template-columns: repeat(6, 1fr);
-      text-align: center;
-    }
-    .phase-step { position: relative; color: var(--muted); cursor: help; transition: transform .18s ease, color .18s ease; }
-    .phase-step:not(:last-child)::after { content: ""; position: absolute; top: calc(30 * var(--stage-scale)); left: calc(50% + 30 * var(--stage-scale)); width: calc(100% - 60 * var(--stage-scale)); height: 1px; background: rgba(180,124,68,.38); }
-    .phase-step .orb { width: calc(62 * var(--stage-scale)); height: calc(62 * var(--stage-scale)); margin: 0 auto calc(10 * var(--stage-scale)); display: grid; place-items: center; border-radius: 50%; border: 1px solid rgba(165,113,67,.58); color: var(--gold); background: radial-gradient(circle, rgba(79,54,35,.48), rgba(2,2,2,.84)); box-shadow: inset 0 0 16px #000, 0 8px 20px rgba(0,0,0,.55); font-size: calc(28 * var(--stage-scale)); }
+    body { margin: 0; min-height: 100vh; overflow: hidden; color: var(--ink); background: var(--bg); font-family: "Times New Roman", "Noto Serif SC", "Songti SC", serif; }
+    body::before { content: ""; position: fixed; inset: 0; background: url("../acb4f3c90af4c527737fda2bd8145c82.png") center / cover no-repeat; opacity: .78; filter: saturate(.92) brightness(.72); }
+    body::after { content: ""; position: fixed; inset: 0; pointer-events: none; background: linear-gradient(90deg, rgba(0,0,0,.74), rgba(0,0,0,.18) 24%, rgba(0,0,0,.22) 72%, rgba(0,0,0,.72)), radial-gradient(circle at 72% 24%, rgba(190,94,66,.13), transparent 20rem); box-shadow: inset 0 0 140px rgba(0,0,0,.92); }
+    .app { position: relative; z-index: 1; height: 100vh; display: grid; grid-template-rows: 96px 1fr; padding: 24px 32px 28px 96px; gap: 18px; }
+    .topbar { display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: start; }
+    .brand h1 { margin: 0; color: var(--ink-strong); font-size: 42px; line-height: 1; font-weight: 400; text-shadow: 0 4px 18px #000; }
+    .brand p { margin: 8px 0 0; color: var(--gold); font-size: 20px; letter-spacing: .16em; }
+    .chips { display: flex; gap: 12px; align-items: start; }
+    .chip { min-width: 170px; padding: 12px 16px; background: rgba(5,5,5,.66); border: 1px solid var(--line); box-shadow: inset 0 0 20px rgba(0,0,0,.82); }
+    .chip .k { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+    .chip .v { color: var(--ink-strong); font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 210px; }
+    .chip .v.live { color: #a7d487; text-shadow: 0 0 10px rgba(145,173,114,.42); }
+    .chip .v.warn { color: #d69a75; }
+    .layout { min-height: 0; display: grid; grid-template-columns: minmax(520px, 1.1fr) minmax(430px, .95fr) minmax(420px, .85fr); gap: 18px; }
+    .column { min-height: 0; display: grid; gap: 14px; }
+    .left { grid-template-rows: 160px 1fr 140px; }
+    .middle { grid-template-rows: 260px 1fr; }
+    .right { grid-template-rows: 1fr 190px; }
+    .panel { min-height: 0; background: var(--panel); border: 1px solid var(--line); box-shadow: inset 0 0 24px rgba(0,0,0,.82), 0 16px 36px rgba(0,0,0,.45); overflow: hidden; }
+    .panel-header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; padding: 14px 16px 10px; border-bottom: 1px solid rgba(183,126,68,.18); }
+    .panel-header h2, .panel-header h3 { margin: 0; color: var(--ink-strong); font-weight: 400; letter-spacing: .06em; }
+    .panel-header h2 { font-size: 24px; }
+    .panel-header h3 { font-size: 20px; }
+    .panel-header .meta { color: var(--muted); font-size: 13px; }
+    .panel-body { padding: 14px 16px; min-height: 0; }
+    .status-card { background: linear-gradient(90deg, rgba(238,205,148,.22), rgba(102,60,26,.10)), var(--paper); color: var(--paper-text); padding: 24px 28px; clip-path: polygon(1% 0, 99% 0, 100% 8%, 99% 92%, 97% 100%, 1.5% 100%, 0 91%, .8% 8%); box-shadow: inset 0 0 32px rgba(67,34,13,.32), 0 16px 30px rgba(0,0,0,.42); }
+    .status-card h2 { margin: 0 0 12px; font-size: 30px; font-weight: 500; }
+    .status-card p { margin: 0; font-size: 18px; line-height: 1.48; font-weight: 700; }
+    .task-title { font-size: 32px; color: var(--ink-strong); text-shadow: 0 4px 16px #000; margin: 0 0 12px; }
+    .task-subtitle { margin: 0; color: var(--muted); font-size: 18px; }
+    .brief-text { color: var(--muted); font-size: 15px; line-height: 1.55; white-space: pre-wrap; overflow: auto; max-height: 180px; padding-right: 8px; }
+    .kv { display: grid; gap: 12px; }
+    .kv .label { color: var(--gold); font-size: 13px; letter-spacing: .08em; margin-bottom: 4px; }
+    .kv .value { color: var(--muted); font-size: 14px; line-height: 1.42; max-height: 74px; overflow: auto; }
+    .team-list { display: grid; gap: 10px; overflow: auto; max-height: 178px; padding-right: 4px; }
+    .teammate { display: grid; grid-template-columns: 116px 1fr; gap: 10px; padding: 10px; background: rgba(0,0,0,.26); border: 1px solid rgba(183,126,68,.16); }
+    .role { color: var(--gold); font-size: 14px; overflow: hidden; text-overflow: ellipsis; }
+    .status { color: var(--muted); font-size: 13px; line-height: 1.36; }
+    .activity-feed { overflow: auto; padding: 4px 12px 14px 0; max-height: 100%; }
+    .activity-item { display: grid; grid-template-columns: 86px 1fr; gap: 12px; padding: 11px 0 11px 16px; border-left: 1px solid rgba(183,126,68,.22); position: relative; }
+    .activity-item::before { content: ""; position: absolute; left: -4px; top: 17px; width: 7px; height: 7px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 12px rgba(201,155,88,.52); }
+    .activity-time { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .activity-main { min-width: 0; }
+    .activity-title { color: var(--ink-strong); font-size: 15px; margin-bottom: 4px; }
+    .activity-summary { color: var(--muted); font-size: 13px; line-height: 1.36; overflow-wrap: anywhere; }
+    .activity-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+    .tag { font-size: 11px; color: #d8b579; border: 1px solid rgba(183,126,68,.22); padding: 2px 6px; background: rgba(0,0,0,.24); }
+    .phase-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; padding: 12px; }
+    .phase-step { text-align: center; color: var(--muted); font-size: 12px; }
+    .phase-step .orb { width: 40px; height: 40px; margin: 0 auto 6px; display: grid; place-items: center; border-radius: 50%; border: 1px solid rgba(165,113,67,.58); color: var(--gold); background: radial-gradient(circle, rgba(79,54,35,.48), rgba(2,2,2,.84)); box-shadow: inset 0 0 12px #000; }
     .phase-step.active { color: var(--ink-strong); }
-    .phase-step.active .orb { border-color: rgba(226,101,73,.92); color: #ffd19b; box-shadow: 0 0 26px var(--red-glow), inset 0 0 18px #000; }
-    .phase-step:hover { transform: translateY(calc(-4 * var(--stage-scale))); color: var(--ink-strong); }
-    .phase-step .name { font-size: calc(15 * var(--stage-scale)); text-shadow: 0 2px 8px #000; }
-
-    .notes {
-      position: absolute;
-      left: calc(110 * var(--stage-scale));
-      top: calc(895 * var(--stage-scale));
-      width: calc(960 * var(--stage-scale));
-      height: calc(120 * var(--stage-scale));
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      background: rgba(5,5,5,.58);
-      border: 1px solid rgba(171,111,62,.22);
-      box-shadow: inset 0 0 24px rgba(0,0,0,.86);
-    }
-    .note { padding: calc(16 * var(--stage-scale)); border-right: 1px solid rgba(171,111,62,.16); color: var(--muted); font-size: calc(15 * var(--stage-scale)); line-height: 1.42; overflow: hidden; }
+    .phase-step.active .orb { border-color: rgba(226,101,73,.92); box-shadow: 0 0 22px var(--red-glow), inset 0 0 12px #000; }
+    .notes { display: grid; grid-template-columns: repeat(3, 1fr); height: 100%; }
+    .note { padding: 14px; border-right: 1px solid rgba(183,126,68,.16); color: var(--muted); font-size: 13px; line-height: 1.38; overflow: hidden; }
     .note:last-child { border-right: 0; }
-    .note::before { content: "✦"; color: #7d2d22; margin-right: .55rem; }
-
-    .button-row { position: absolute; left: calc(1088 * var(--stage-scale)); top: calc(738 * var(--stage-scale)); width: calc(315 * var(--stage-scale)); display: grid; gap: calc(10 * var(--stage-scale)); }
-    .ui-button { border: 1px solid rgba(180,124,68,.36); background: rgba(5,5,5,.72); color: var(--ink-strong); padding: calc(13 * var(--stage-scale)); font-size: calc(16 * var(--stage-scale)); cursor: pointer; }
-    .ui-button:hover { background: rgba(45,25,15,.82); }
-
-    .atmosphere { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }
-    .animated-region { position: absolute; background-image: url("../acb4f3c90af4c527737fda2bd8145c82.png"); background-size: var(--stage-w) var(--stage-h); opacity: .70; mix-blend-mode: screen; will-change: transform, filter, opacity; }
-    .animated-region::after { content: ""; position: absolute; inset: -18%; pointer-events: none; background: radial-gradient(ellipse at center, rgba(255,172,76,.22), rgba(215,83,48,.08) 46%, transparent 72%); opacity: .65; filter: blur(8px); animation: regionGlow 1.7s ease-in-out infinite alternate; }
-    .image-flame { filter: brightness(1.72) contrast(1.08) saturate(1.35) blur(.15px); -webkit-mask-image: radial-gradient(ellipse at 50% 54%, #000 0 28%, rgba(0,0,0,.86) 42%, transparent 70%); mask-image: radial-gradient(ellipse at 50% 54%, #000 0 28%, rgba(0,0,0,.86) 42%, transparent 70%); animation: originalFlicker .86s steps(3,end) infinite alternate; }
-    .image-flame.left-main { left: 0; bottom: 0; width: calc(170 * var(--stage-scale)); height: calc(210 * var(--stage-scale)); background-position: left bottom; }
-    .image-flame.right-main { right: 0; bottom: 0; width: calc(175 * var(--stage-scale)); height: calc(185 * var(--stage-scale)); background-position: right bottom; opacity: .56; }
-    .image-portal { left: calc(1328 * var(--stage-scale)); top: calc(150 * var(--stage-scale)); width: calc(250 * var(--stage-scale)); height: calc(260 * var(--stage-scale)); background-position: center; filter: brightness(1.45) contrast(1.05) saturate(1.22) blur(.25px); opacity: .48; -webkit-mask-image: radial-gradient(ellipse at 52% 48%, #000 0 34%, rgba(0,0,0,.62) 50%, transparent 72%); mask-image: radial-gradient(ellipse at 52% 48%, #000 0 34%, rgba(0,0,0,.62) 50%, transparent 72%); animation: originalPortal 2.8s ease-in-out infinite alternate; }
-    .light-breath { position: absolute; border-radius: 50%; background: radial-gradient(circle, rgba(255,154,69,.22), rgba(198,76,39,.08) 42%, transparent 72%); mix-blend-mode: screen; filter: blur(8px); animation: lightBreath 1.65s ease-in-out infinite alternate; }
-    .light-breath.left { left: -5%; bottom: -12%; width: calc(360 * var(--stage-scale)); height: calc(360 * var(--stage-scale)); }
-    .light-breath.right { right: -5%; bottom: -12%; width: calc(310 * var(--stage-scale)); height: calc(310 * var(--stage-scale)); animation-delay: -.5s; opacity: .68; }
-
-    @keyframes originalFlicker { 0% { opacity:.42; filter:brightness(1.34) saturate(1.18); transform:scale(.996,.988); } 45% { opacity:.82; filter:brightness(1.92) saturate(1.48); transform:scale(1.012,1.028); } 100% { opacity:.9; filter:brightness(2.08) saturate(1.52); transform:scale(.996,1.04); } }
-    @keyframes originalPortal { from { opacity:.32; filter:brightness(1.2) saturate(1.1) blur(.4px); transform:scale(.992); } to { opacity:.66; filter:brightness(1.72) saturate(1.35) blur(.18px); transform:scale(1.012); } }
-    @keyframes regionGlow { from { opacity:.25; transform:scale(.96); } to { opacity:.72; transform:scale(1.06); } }
-    @keyframes lightBreath { from { opacity:.38; transform:scale(.97); } to { opacity:.78; transform:scale(1.07); } }
-
-    .brief-panel {
-      position: absolute;
-      left: calc(1088 * var(--stage-scale));
-      top: calc(842 * var(--stage-scale));
-      width: calc(315 * var(--stage-scale));
-      height: calc(174 * var(--stage-scale));
-      padding: calc(16 * var(--stage-scale));
-      background: rgba(5,5,5,.70);
-      border: 1px solid rgba(171,111,62,.28);
-      box-shadow: inset 0 0 20px rgba(0,0,0,.86), 0 14px 30px rgba(0,0,0,.45);
-      overflow: hidden;
-    }
-    .brief-panel h3 { margin: 0 0 calc(8 * var(--stage-scale)); color: var(--ink-strong); font-size: calc(20 * var(--stage-scale)); font-weight: 400; }
-    .brief-text { color: var(--muted); font-size: calc(13 * var(--stage-scale)); line-height: 1.34; white-space: pre-wrap; max-height: calc(118 * var(--stage-scale)); overflow: hidden; }
-
-    .detail-drawer {
-      position: fixed;
-      z-index: 20;
-      right: 0;
-      top: 0;
-      width: min(720px, 92vw);
-      height: 100vh;
-      padding: 24px;
-      background: rgba(5,5,5,.94);
-      border-left: 1px solid rgba(185,126,67,.38);
-      color: var(--ink);
-      transform: translateX(102%);
-      transition: transform .22s ease;
-      overflow: auto;
-      box-shadow: -24px 0 80px rgba(0,0,0,.65);
-    }
+    .note::before { content: "✦"; color: #8b3025; margin-right: .5em; }
+    .actions { display: flex; gap: 10px; padding: 12px 16px; border-top: 1px solid rgba(183,126,68,.18); }
+    .button { border: 1px solid rgba(180,124,68,.36); background: rgba(5,5,5,.72); color: var(--ink-strong); padding: 10px 12px; font-size: 14px; cursor: pointer; }
+    .button:hover { background: rgba(45,25,15,.82); }
+    .detail-drawer { position: fixed; z-index: 20; right: 0; top: 0; width: min(780px, 92vw); height: 100vh; padding: 24px; background: rgba(5,5,5,.95); border-left: 1px solid rgba(185,126,67,.38); color: var(--ink); transform: translateX(102%); transition: transform .22s ease; overflow: auto; box-shadow: -24px 0 80px rgba(0,0,0,.65); }
     .detail-drawer.open { transform: translateX(0); }
     .detail-drawer h2 { margin: 0 0 16px; color: var(--ink-strong); font-weight: 400; }
     .detail-section { border-top: 1px solid rgba(185,126,67,.22); padding-top: 16px; margin-top: 16px; }
     .detail-section h3 { margin: 0 0 10px; color: var(--gold); font-weight: 400; }
     pre { white-space: pre-wrap; word-break: break-word; color: var(--muted); font-size: 13px; line-height: 1.45; }
     .drawer-close { float: right; border: 1px solid rgba(185,126,67,.34); background: rgba(0,0,0,.6); color: var(--ink); padding: 8px 12px; cursor: pointer; }
-
-    .control { position: fixed; z-index: 21; left: 1rem; bottom: 1rem; display: flex; gap: .5rem; opacity: .22; transition: opacity .18s ease; }
+    .control { position: fixed; z-index: 21; left: 1rem; bottom: 1rem; display: flex; gap: .5rem; opacity: .24; transition: opacity .18s ease; }
     .control:hover { opacity: 1; }
     .control input, .control button { border: 1px solid rgba(180,124,68,.38); background: rgba(5,5,5,.88); color: var(--ink); padding: .55rem .7rem; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .control input { width: 280px; }
     .control button { cursor: pointer; }
-
-    @media (max-width: 1100px) {
-      :root { --stage-w: 1100px; --stage-h: 619px; }
-      .viewport { place-items: start; overflow: auto; }
-    }
+    @media (max-width: 1400px) { body { overflow: auto; } .app { min-width: 1400px; min-height: 900px; } }
   </style>
 </head>
 <body>
-  <div class="viewport">
-    <main class="stage">
-      <div class="atmosphere" aria-hidden="true">
-        <div class="animated-region image-flame left-main"></div>
-        <div class="animated-region image-flame right-main"></div>
-        <div class="animated-region image-portal"></div>
-        <div class="light-breath left"></div>
-        <div class="light-breath right"></div>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand"><h1>Bridge Contract</h1><p>远程运行观演层</p></div>
+      <div class="chips">
+        <div class="chip"><div class="k">Run ID</div><div class="v" id="runIdChip">run_demo</div></div>
+        <div class="chip"><div class="k">当前阶段</div><div class="v" id="phaseChip">实现阶段</div></div>
+        <div class="chip"><div class="k">网关状态</div><div class="v" id="gatewayChip">Mock</div></div>
+        <div class="chip"><div class="k">实时跟随</div><div class="v" id="liveChip">未开启</div></div>
       </div>
-
-      <section class="ui">
-        <header class="brand"><h1>Bridge Contract</h1><p>远程委托卷宗</p></header>
-        <section class="top-chip run"><div class="k">Run ID</div><div class="v" id="runIdChip">run_demo</div></section>
-        <section class="top-chip phase"><div class="k">当前阶段</div><div class="v" id="phaseChip">实现阶段</div></section>
-        <section class="top-chip gateway"><div class="k">网关状态</div><div class="v" id="gatewayChip">Mock</div></section>
-
-        <section class="contract-title"><h2 id="taskTitle">当前委托：搭建 DPO 框架</h2><p>正在观察远端 Bridge Runtime 的真实执行事件。</p></section>
-
-        <article class="status-panel"><h3 id="statusTitle">等待执行结果</h3><p id="factText">任务说明已下发，执行团队正在后台处理。runtime 暂未收到新的结构化报告或 artifact。</p></article>
-
-        <article class="bridge-progress"><h3>桥内进展</h3><p class="progress-summary" id="internalSummary">任务说明已下发，随后进入等待回报。</p><div class="progress-list" id="internalProgressList"></div></article>
-
-        <article class="packet-panel"><h3>任务包摘要</h3><div class="mini-label">目标</div><div class="mini-text" id="packetObjective">等待 BridgePacket / task_spec 数据。</div><div class="mini-label">完成条件</div><div class="mini-text" id="packetCompletion">尚未读取 completion contract。</div><div class="mini-label">报告要求</div><div class="mini-text" id="packetReport">尚未读取 report contract。</div></article>
-
-        <article class="team-panel"><h3>队员状态</h3><div class="team-list" id="teamList"><div class="teammate"><div class="role">未知</div><div class="status">尚未读到 teammate 状态。</div></div></div></article>
-
-        <div class="button-row"><button class="ui-button" id="openDetailButton">查看运行卷宗详情</button><button class="ui-button" id="modelBriefButton">刷新模型解读</button></div>
-
-        <article class="brief-panel"><h3>模型整理</h3><div class="brief-text" id="modelBriefText">模型解读尚未生成。它会把 packet、队员状态、事件和未知项整理成自然语言，但不会补写 runtime 未记录的进展。</div></article>
-
-        <aside class="right-card interpret"><div class="icon">☞</div><div><h3>当前解读</h3><p id="explanationText">任务已经进入 bridge window 内部执行阶段，但尚未收到结构化回报。</p></div></aside>
-        <aside class="right-card next"><div class="icon">✉</div><div><h3>下一步</h3><p id="nextStepText">下一步将来自 lifecycle 允许的后续事件，不预测内部进展。</p></div></aside>
-        <aside class="right-card latest"><div class="icon">◷</div><div><h3>最新事件</h3><p id="latestEventText">team_idle_waiting · 14:02:20</p></div></aside>
-
-        <nav class="stage-row" aria-label="runtime phase line">
-          <div class="phase-step" data-stage="freeze"><div class="orb">§</div><div class="name">接取委托</div></div>
-          <div class="phase-step" data-stage="packet"><div class="orb">◈</div><div class="name">整备物资</div></div>
-          <div class="phase-step" data-stage="bridge"><div class="orb">⌂</div><div class="name">开启桥门</div></div>
-          <div class="phase-step active" data-stage="waiting"><div class="orb">♜</div><div class="name">等待回报</div></div>
-          <div class="phase-step" data-stage="verify"><div class="orb">†</div><div class="name">试炼验证</div></div>
-          <div class="phase-step" data-stage="done"><div class="orb">☉</div><div class="name">封卷交付</div></div>
-        </nav>
-
-        <section class="notes"><div class="note" id="unknownNote">如果 report / event 未记录文件名，则当前无法确认具体正在修改哪些文件。</div><div class="note" id="quietNote">尚未收到 completion report。</div><div class="note" id="companionNote">主信息只显示 runtime 已记录的事实，不补写内部进展。</div></section>
+    </header>
+    <section class="layout">
+      <section class="column left">
+        <div><h2 class="task-title" id="taskTitle">当前委托：搭建 DPO 框架</h2><p class="task-subtitle">主界面展示 packet、队员、事件、工具/文件证据；详情抽屉保留原始卷宗。</p></div>
+        <article class="status-card"><h2 id="statusTitle">等待执行结果</h2><p id="factText">任务说明已下发，执行团队正在后台处理。runtime 暂未收到新的结构化报告或 artifact。</p></article>
+        <article class="panel"><div class="panel-header"><h3>阶段路线</h3><span class="meta">来自 lifecycle</span></div><nav class="phase-row" aria-label="runtime phase line"><div class="phase-step" data-stage="freeze"><div class="orb">§</div>接取委托</div><div class="phase-step" data-stage="packet"><div class="orb">◈</div>任务包</div><div class="phase-step" data-stage="bridge"><div class="orb">⌂</div>桥接窗口</div><div class="phase-step active" data-stage="waiting"><div class="orb">♜</div>执行/等待</div><div class="phase-step" data-stage="verify"><div class="orb">†</div>完成检查</div><div class="phase-step" data-stage="done"><div class="orb">☉</div>返回结果</div></nav></article>
       </section>
-    </main>
-  </div>
-
+      <section class="column middle">
+        <article class="panel"><div class="panel-header"><h3>任务包摘要</h3><span class="meta">BridgePacket / task_spec</span></div><div class="panel-body kv"><div><div class="label">目标</div><div class="value" id="packetObjective">等待 BridgePacket / task_spec 数据。</div></div><div><div class="label">完成条件</div><div class="value" id="packetCompletion">尚未读取 completion contract。</div></div><div><div class="label">报告要求</div><div class="value" id="packetReport">尚未读取 report contract。</div></div></div></article>
+        <article class="panel"><div class="panel-header"><h3>桥内活动流</h3><span class="meta" id="activityMeta">runtime events / inbox</span></div><div class="panel-body activity-feed" id="activityFeed"></div></article>
+      </section>
+      <section class="column right">
+        <article class="panel"><div class="panel-header"><h3>队员与交流</h3><span class="meta">teammates / reports</span></div><div class="panel-body"><div class="team-list" id="teamList"></div></div><div class="actions"><button class="button" id="openDetailButton">查看运行卷宗详情</button><button class="button" id="modelBriefButton">刷新模型整理</button></div></article>
+        <article class="panel"><div class="panel-header"><h3>模型整理</h3><span class="meta">事实约束叙事</span></div><div class="panel-body"><div class="brief-text" id="modelBriefText">模型解读尚未生成。它会把 packet、队员状态、事件、报告和未知项整理成自然语言，但不会补写 runtime 未记录的进展。</div></div></article>
+      </section>
+    </section>
+    <section class="notes"><div class="note" id="unknownNote">如果 report / event 未记录文件名，则当前无法确认具体正在修改哪些文件。</div><div class="note" id="quietNote">尚未收到 completion report。</div><div class="note" id="companionNote">主信息只显示 runtime 已记录的事实，不补写内部进展。</div></section>
+  </main>
   <aside class="detail-drawer" id="detailDrawer"><button class="drawer-close" id="closeDetailButton">关闭</button><h2>运行卷宗详情</h2><div id="detailContent"></div></aside>
-
-  <section class="control" aria-label="gateway controls"><input id="runIdInput" placeholder="run id" value="run_demo_20260505_140220" /><button id="loadStatusButton">读取网关</button><button id="useMockButton">Mock</button></section>
-
+  <section class="control" aria-label="gateway controls"><input id="runIdInput" placeholder="run id" value="run_demo_20260505_140220" /><button id="loadStatusButton">读取网关</button><button id="liveButton">实时跟随</button><button id="useMockButton">Mock</button></section>
   <script>
-    const mockStatus = {
-      runId: "run_demo_20260505_140220",
-      taskTitle: "搭建 DPO 框架",
-      phase: "l4_implement / 实现阶段",
-      lifecycleState: "team_waiting",
-      latestEvent: { eventType: "team_idle_waiting", timestamp: "14:02:20" },
-      gateway: { state: "mock", label: "Mock 数据" },
-      packetSummary: {
-        hasPacket: true,
-        objective: "搭建 DPO 框架。",
-        targetPhase: "l4_implement",
-        completionSummary: "需要返回实现结果、验证证据和 completion report。",
-        reportSummary: "报告应说明改动、证据、风险和未完成项。",
-        allowedTools: []
-      },
-      teammates: [
-        { role: "bridge-leader", status: "已创建 team/task，等待队员结构化回报。" },
-        { role: "implementor", status: "runtime 尚未收到明确 report，不能确认文件级动作。" }
-      ],
-      unknowns: ["如果 report / event 未记录文件名，则当前无法确认具体正在修改哪些文件。", "尚未收到 completion report。", "尚未收到 artifact。"],
-      internalProgress: {
-        summary: "任务说明已下发，随后进入等待回报。",
-        recentEvents: [
-          { eventType: "bridge_window_opened", label: "桥接窗口已开启", timestamp: "14:01:02" },
-          { eventType: "team_create_completed", label: "执行团队已创建", timestamp: "14:01:10" },
-          { eventType: "message_dispatch_completed", label: "任务说明已下发", timestamp: "14:01:18" },
-          { eventType: "team_idle_waiting", label: "等待队员回报", timestamp: "14:02:20" }
-        ],
-        evidence: ["最近 4 条 runtime 事件可读。", "尚未收到 report / artifact，因此不能确认文件级进展。"],
-        reports: [],
-        artifactCount: 0,
-        hasInternalEvidence: true
-      },
-      detail: {},
-      display: {
-        title: "等待执行结果",
-        factText: "任务说明已下发，执行团队正在后台处理。runtime 暂未收到新的结构化报告或 artifact。",
-        explanationText: "这表示任务已经进入 bridge window 内部执行阶段。前台暂时安静，不等于卡死；它只表示当前还没有新的 runtime 事件。",
-        nextStepText: "后续可能收到阶段性报告、artifact、完成检查结果，或超时/失败事件。",
-        companionNote: "小队还没有带回新卷宗。这里不会猜测尚未返回的细节。"
-      }
-    };
-
+    const mockStatus = { runId: "run_demo_20260505_140220", taskTitle: "搭建 DPO 框架", phase: "l4_implement / 实现阶段", lifecycleState: "team_waiting", latestEvent: { eventType: "team_idle_waiting", timestamp: "14:02:20" }, gateway: { state: "mock", label: "Mock 数据" }, packetSummary: { objective: "搭建 DPO 框架。", targetPhase: "l4_implement", completionSummary: "需要返回实现结果、验证证据和 completion report。", reportSummary: "报告应说明改动、证据、风险和未完成项。" }, teammates: [{ role: "bridge-leader", status: "已创建 team/task，等待队员结构化回报。" }, { role: "implementor", status: "runtime 尚未收到明确 report，不能确认文件级动作。" }], activityFeed: [{ timestamp: "14:01:02", actor: "bridge-leader", title: "桥接窗口已开启", eventType: "bridge_window_opened", kind: "event", summary: "Bridge leader 接收任务包并创建执行窗口。" }, { timestamp: "14:01:10", actor: "bridge-leader", title: "执行团队已创建", eventType: "team_create_completed", kind: "event", summary: "执行团队已绑定到本轮 bridge window。" }, { timestamp: "14:01:18", actor: "bridge-leader", title: "任务说明已下发", eventType: "message_dispatch_completed", kind: "message", summary: "任务目标、完成条件和报告要求已发送给队员。" }, { timestamp: "14:02:20", actor: "runtime", title: "等待队员回报", eventType: "team_idle_waiting", kind: "event", summary: "暂未收到新的结构化报告、artifact 或完成信号。" }], unknowns: ["如果 report / event 未记录文件名，则当前无法确认具体正在修改哪些文件。", "尚未收到 completion report。", "尚未收到 artifact。"], internalProgress: { summary: "任务说明已下发，随后进入等待回报。", recentEvents: [], evidence: ["最近 4 条 runtime 事件可读。", "尚未收到 report / artifact，因此不能确认文件级进展。"], reports: [], artifactCount: 0 }, detail: {}, display: { title: "等待执行结果", factText: "任务说明已下发，执行团队正在后台处理。runtime 暂未收到新的结构化报告或 artifact。", explanationText: "这表示任务已经进入 bridge window 内部执行阶段。前台暂时安静，不等于卡死；它只表示当前还没有新的 runtime 事件。", nextStepText: "后续可能收到阶段性报告、artifact、完成检查结果，或超时/失败事件。", companionNote: "小队还没有带回新卷宗。这里不会猜测尚未返回的细节。" } };
     const stageMap = { leader_freeze: "freeze", bridge_packet_built: "packet", bridge_window_opened: "bridge", bridge_packet_accepted: "bridge", team_create_completed: "bridge", message_dispatch_completed: "waiting", team_waiting: "waiting", artifacts_ready: "verify", task_completion_rejected: "verify", task_completion_completed: "done", bridge_window_returned: "done", bridge_window_partial_returned: "verify", task_failed: "verify" };
     let currentStatus = mockStatus;
+    let liveSource = null;
+    let livePollTimer = null;
+    let liveMode = "off";
     const el = id => document.getElementById(id);
     const escapeHtml = value => String(value ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
     function shortPhase(phase) { if (!phase) return "未知"; if (phase.includes("implement")) return "实现阶段"; if (phase.includes("execute")) return "验证阶段"; if (phase.includes("anomaly")) return "异常阶段"; if (phase.includes("bridge")) return "桥接阶段"; return String(phase).split("/").at(-1).trim(); }
-
-    function renderInternalProgress(progress) {
-      const safe = progress || { summary: "尚未读到 bridge 内部进展事件", recentEvents: [], evidence: [] };
-      el("internalSummary").textContent = safe.summary || "尚未读到 bridge 内部进展事件";
-      const events = Array.isArray(safe.recentEvents) ? safe.recentEvents.slice(-4) : [];
-      const evidence = Array.isArray(safe.evidence) ? safe.evidence.slice(0, 2) : [];
-      const items = events.map(item => `${item.timestamp || "未知时间"} · ${item.label || item.eventType || "runtime event"}`).concat(evidence);
-      el("internalProgressList").innerHTML = (items.length ? items : ["没有可读内部事件；当前只能显示等待状态。"]).map(text => `<div class="progress-item">${escapeHtml(text)}</div>`).join("");
-    }
-
-    function renderPacket(packet) {
-      const safe = packet || {};
-      el("packetObjective").textContent = safe.objective || "尚未读取 task_spec / frozen semantics。";
-      el("packetCompletion").textContent = safe.completionSummary && safe.completionSummary !== "{}" ? safe.completionSummary : "尚未读取 completion contract。";
-      el("packetReport").textContent = safe.reportSummary && safe.reportSummary !== "{}" ? safe.reportSummary : "尚未读取 report contract。";
-    }
-
-    function renderTeam(teammates) {
-      const list = Array.isArray(teammates) && teammates.length ? teammates.slice(0, 5) : [{ role: "未知", status: "尚未读到 teammate 状态。" }];
-      el("teamList").innerHTML = list.map(member => `<div class="teammate"><div class="role">${escapeHtml(member.role || member.id || "teammate")}</div><div class="status">${escapeHtml(member.status || member.latest || "状态未知")}</div></div>`).join("");
-    }
-
-    function render(status) {
-      currentStatus = status;
-      const display = { ...mockStatus.display, ...(status.display || {}) };
-      const latest = status.latestEvent || { eventType: "unknown", timestamp: "未知" };
-      const gateway = status.gateway || { state: "unknown", label: "未知" };
-      const unknowns = Array.isArray(status.unknowns) && status.unknowns.length ? status.unknowns : ["当前没有足够信息确认文件级进展。"];
-      el("runIdChip").textContent = status.runId || "未知";
-      el("phaseChip").textContent = shortPhase(status.phase);
-      el("gatewayChip").textContent = gateway.label || gateway.state || "未知";
-      el("taskTitle").textContent = "当前委托：" + (status.taskTitle || "未命名任务");
-      el("statusTitle").textContent = display.title;
-      el("factText").textContent = display.factText;
-      el("explanationText").textContent = display.explanationText;
-      el("nextStepText").textContent = display.nextStepText;
-      el("latestEventText").textContent = `${latest.eventType || "unknown"} · ${latest.timestamp || "未知"}`;
-      renderInternalProgress(status.internalProgress);
-      renderPacket(status.packetSummary);
-      renderTeam(status.teammates);
-      el("unknownNote").textContent = unknowns[0];
-      el("quietNote").textContent = unknowns[1] || "没有 runtime 事实时，界面不会补写进展。";
-      el("companionNote").textContent = display.companionNote;
-      el("runIdInput").value = status.runId || "";
-      const active = stageMap[status.lifecycleState] || "waiting";
-      document.querySelectorAll(".phase-step").forEach(node => node.classList.toggle("active", node.dataset.stage === active));
-    }
-
-    function renderDetail() {
-      const detail = currentStatus.detail || {};
-      const payload = {
-        packet: currentStatus.packetSummary || detail.packet,
-        teammates: currentStatus.teammates || detail.teammates,
-        internalProgress: currentStatus.internalProgress,
-        reports: detail.reports || currentStatus.internalProgress?.reports || [],
-        artifacts: detail.artifacts || [],
-        recentEvents: detail.recentEvents || currentStatus.internalProgress?.recentEvents || [],
-        inbox: detail.inbox || []
-      };
-      el("detailContent").innerHTML = Object.entries(payload).map(([key, value]) => `<section class="detail-section"><h3>${escapeHtml(key)}</h3><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre></section>`).join("");
-    }
-
-    async function loadFromGateway() {
-      const runId = el("runIdInput").value.trim();
-      if (!runId) return;
-      try {
-        const response = await fetch(`/runs/${encodeURIComponent(runId)}/status`, { cache: "no-store" });
-        if (!response.ok) throw new Error(String(response.status));
-        render(await response.json());
-      } catch {
-        render({ ...mockStatus, lifecycleState: "unknown", gateway: { state: "disconnected", label: "网关不可读" }, latestEvent: { eventType: "unknown", timestamp: "未知" }, unknowns: ["当前无法读取本地 runtime 网关。", "任务真实状态未知；这不代表远端任务失败或停止。"], display: { title: "网关不可读", factText: "当前无法读取本地 runtime 网关。任务真实状态未知；这不代表远端任务失败或停止。", explanationText: "请检查本地 gateway 是否启动、Cursor 映射是否打开、runId 是否存在。", nextStepText: "下一步是恢复只读网关连接，而不是对任务执行状态做猜测。", companionNote: "通往本地卷宗的映射暂时断开。" } });
-      }
-    }
-
-    el("loadStatusButton").addEventListener("click", loadFromGateway);
-    el("useMockButton").addEventListener("click", () => render(mockStatus));
+    function renderPacket(packet) { const safe = packet || {}; el("packetObjective").textContent = safe.objective || "尚未读取 task_spec / frozen semantics。"; el("packetCompletion").textContent = safe.completionSummary && safe.completionSummary !== "{}" ? safe.completionSummary : "尚未读取 completion contract。"; el("packetReport").textContent = safe.reportSummary && safe.reportSummary !== "{}" ? safe.reportSummary : "尚未读取 report contract。"; }
+    function renderTeam(teammates) { const list = Array.isArray(teammates) && teammates.length ? teammates.slice(0, 8) : [{ role: "未知", status: "尚未读到 teammate 状态。" }]; el("teamList").innerHTML = list.map(member => `<div class="teammate"><div class="role">${escapeHtml(member.role || member.id || "teammate")}</div><div class="status">${escapeHtml(member.status || member.latest || "状态未知")}</div></div>`).join(""); }
+    function renderActivity(status) { const feed = Array.isArray(status.activityFeed) && status.activityFeed.length ? status.activityFeed.slice(-30) : (Array.isArray(status.internalProgress?.recentEvents) ? status.internalProgress.recentEvents : []); el("activityMeta").textContent = `${feed.length} 条可读活动 · 直接来自 event_log / observer JSONL`; el("activityFeed").innerHTML = (feed.length ? feed : [{ timestamp: "—", actor: "runtime", title: "没有可读内部事件", summary: "当前只能显示等待状态。" }]).map(item => `<article class="activity-item"><div class="activity-time">${escapeHtml(item.timestamp || "未知")}</div><div class="activity-main"><div class="activity-title">${escapeHtml(item.title || item.label || item.eventType || "runtime event")}</div><div class="activity-summary">${escapeHtml(item.summary || "无摘要")}</div><div class="activity-tags"><span class="tag">${escapeHtml(item.kind || "event")}</span><span class="tag">${escapeHtml(item.actor || "runtime")}</span>${item.source ? `<span class="tag">${escapeHtml(item.source)}</span>` : ""}${item.tool ? `<span class="tag">tool:${escapeHtml(item.tool)}</span>` : ""}${Array.isArray(item.files) ? item.files.slice(0,2).map(file => `<span class="tag">${escapeHtml(file)}</span>`).join("") : ""}</div></div></article>`).join(""); }
+    function setLiveChip(text, state = "") { const node = el("liveChip"); node.textContent = text; node.classList.toggle("live", state === "live"); node.classList.toggle("warn", state === "warn"); }
+    function render(status) { currentStatus = status; const display = { ...mockStatus.display, ...(status.display || {}) }; const latest = status.latestEvent || { eventType: "unknown", timestamp: "未知" }; const gateway = status.gateway || { state: "unknown", label: "未知" }; const unknowns = Array.isArray(status.unknowns) && status.unknowns.length ? status.unknowns : ["当前没有足够信息确认文件级进展。"]; el("runIdChip").textContent = status.runId || "未知"; el("phaseChip").textContent = shortPhase(status.phase); el("gatewayChip").textContent = gateway.label || gateway.state || "未知"; if (liveMode === "off") setLiveChip("未开启"); el("taskTitle").textContent = "当前委托：" + (status.taskTitle || "未命名任务"); el("statusTitle").textContent = display.title; el("factText").textContent = display.factText; renderPacket(status.packetSummary); renderTeam(status.teammates); renderActivity(status); el("unknownNote").textContent = unknowns[0]; el("quietNote").textContent = unknowns[1] || "没有 runtime 事实时，界面不会补写进展。"; el("companionNote").textContent = display.companionNote || `${latest.eventType || "unknown"} · ${latest.timestamp || "未知"}`; if (liveMode === "off") el("runIdInput").value = status.runId || ""; const active = stageMap[status.lifecycleState] || "waiting"; document.querySelectorAll(".phase-step").forEach(node => node.classList.toggle("active", node.dataset.stage === active)); }
+    function renderDetail() { const detail = currentStatus.detail || {}; const payload = { packet: currentStatus.packetSummary || detail.packet, teammates: currentStatus.teammates || detail.teammates, activityFeed: currentStatus.activityFeed || detail.activityFeed, communicationFeed: currentStatus.communicationFeed || detail.communicationFeed, internalProgress: currentStatus.internalProgress, reports: detail.reports || currentStatus.internalProgress?.reports || [], artifacts: detail.artifacts || [], recentEvents: detail.recentEvents || currentStatus.internalProgress?.recentEvents || [], inbox: detail.inbox || [] }; el("detailContent").innerHTML = Object.entries(payload).map(([key, value]) => `<section class="detail-section"><h3>${escapeHtml(key)}</h3><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre></section>`).join(""); }
+    async function loadFromGateway() { const runId = el("runIdInput").value.trim(); if (!runId) return; try { const response = await fetch(`/runs/${encodeURIComponent(runId)}/status`, { cache: "no-store" }); if (!response.ok) throw new Error(String(response.status)); render(await response.json()); } catch { render({ ...mockStatus, lifecycleState: "unknown", gateway: { state: "disconnected", label: "网关不可读" }, latestEvent: { eventType: "unknown", timestamp: "未知" }, unknowns: ["当前无法读取本地 runtime 网关。", "任务真实状态未知；这不代表远端任务失败或停止。"], display: { title: "网关不可读", factText: "当前无法读取本地 runtime 网关。任务真实状态未知；这不代表远端任务失败或停止。", companionNote: "通往本地卷宗的映射暂时断开。" } }); } }
+    function stopLive() { if (liveSource) { liveSource.close(); liveSource = null; } if (livePollTimer) { clearInterval(livePollTimer); livePollTimer = null; } liveMode = "off"; setLiveChip("未开启"); }
+    async function pollLiveOnce(runId) { const response = await fetch(`/runs/${encodeURIComponent(runId)}/status`, { cache: "no-store" }); if (!response.ok) throw new Error(String(response.status)); render(await response.json()); }
+    function startPolling(runId, reason = "") { if (livePollTimer) clearInterval(livePollTimer); liveMode = "poll"; setLiveChip(reason ? `1s 轮询 · ${reason}` : "1s 轮询", "live"); pollLiveOnce(runId).catch(() => setLiveChip("轮询不可读", "warn")); livePollTimer = setInterval(() => { pollLiveOnce(runId).then(() => setLiveChip("1s 轮询", "live")).catch(() => setLiveChip("轮询不可读", "warn")); }, 1000); }
+    function startLive() { const runId = el("runIdInput").value.trim(); if (!runId) return; stopLive(); if (typeof EventSource === "undefined") { startPolling(runId, "fallback"); return; } liveMode = "sse"; setLiveChip("SSE 连接中", "warn"); liveSource = new EventSource(`/runs/${encodeURIComponent(runId)}/stream`); liveSource.addEventListener("status", event => { try { render(JSON.parse(event.data)); setLiveChip("SSE 秒级", "live"); } catch { setLiveChip("SSE 解析失败", "warn"); } }); liveSource.onerror = () => { if (liveSource) liveSource.close(); liveSource = null; startPolling(runId, "SSE fallback"); }; }
+    el("loadStatusButton").addEventListener("click", () => { stopLive(); loadFromGateway(); });
+    el("liveButton").addEventListener("click", () => liveMode === "off" ? startLive() : stopLive());
+    el("useMockButton").addEventListener("click", () => { stopLive(); render(mockStatus); });
     el("openDetailButton").addEventListener("click", () => { renderDetail(); el("detailDrawer").classList.add("open"); });
     el("closeDetailButton").addEventListener("click", () => el("detailDrawer").classList.remove("open"));
-    el("modelBriefButton").addEventListener("click", async () => {
-      el("companionNote").textContent = "正在请求模型基于 runtime facts 生成解读。";
-      try {
-        const response = await fetch("/brief", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ status: currentStatus })
-        });
-        if (!response.ok) throw new Error(String(response.status));
-        const brief = await response.json();
-        const text = brief.text || "模型没有返回可读解读。";
-        el("modelBriefText").textContent = text;
-        el("companionNote").textContent = "模型解读已基于当前 runtime facts 更新。";
-      } catch (error) {
-        el("modelBriefText").textContent = "模型解读失败：请检查 gateway 端 key.json / brief-secret.json 配置或网络连接。";
-        el("companionNote").textContent = "模型解读失败；主界面仍显示 runtime 原始事实。";
-      }
-    });
+    el("modelBriefButton").addEventListener("click", async () => { el("modelBriefText").textContent = "正在请求模型基于 runtime facts 生成解读。"; try { const response = await fetch("/brief", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: currentStatus }) }); if (!response.ok) throw new Error(String(response.status)); const brief = await response.json(); el("modelBriefText").textContent = brief.text || "模型没有返回可读解读。"; el("companionNote").textContent = "模型解读已基于当前 runtime facts 更新。"; } catch { el("modelBriefText").textContent = "模型解读失败：请检查 gateway 端 key.json / brief-secret.json 配置或网络连接。"; el("companionNote").textContent = "模型解读失败；主界面仍显示 runtime 原始事实。"; } });
     render(mockStatus);
   </script>
 </body>

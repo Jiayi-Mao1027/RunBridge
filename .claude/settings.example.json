@@ -23,7 +23,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "mcp__bridge__call_bridge_sdk|call_bridge_sdk|team_create|task_create|send_messages|send_message|task_complete|team_delete",
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
@@ -34,7 +34,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "mcp__bridge__call_bridge_sdk|call_bridge_sdk|team_create|task_create|send_messages|send_message|team_delete",
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",

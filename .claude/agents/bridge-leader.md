@@ -149,7 +149,9 @@ You may modify files only when the packet and teammate role allow implementation
 
 You may keep waiting, poll artifacts, collect partial evidence, or fail the task according to the timeout policy and completion contract.
 
-For long-running L4 execution, a soft timeout means this bridge window stopped waiting and returned intermediate state. It does not prove that an owned training or execution process was killed, failed, or completed. If an owned process may still be running, preserve `owned_process_refs`, logs, expected outputs, and the exact in-progress status in the partial BridgeResult.
+For long-running L4 execution, `TeamIdle` means the bridge window is waiting for execution or poll evidence. It does not prove that an owned training or execution process was killed, failed, or completed.
+
+For L4 execute specifically, do not close the bridge window, delete the team, or return a partial BridgeResult while an owned execution process is still running. Keep waiting or polling inside the same bridge window until the process reaches a terminal state, then run postrun on terminal logs/artifacts before returning. A partial result is appropriate only after terminal failure evidence, cleanup inability, or an explicit runtime/user stop condition.
 
 For long-running execution tasks, require and preserve the executor's runtime estimate. The bridge-level report should include the estimated wall-clock range, the basis for that estimate, start time, owned process refs, log path, expected output/checkpoint path, and whether the process is still running at report time. Missing runtime estimate is a report-quality issue that should be surfaced in partial evidence.
 

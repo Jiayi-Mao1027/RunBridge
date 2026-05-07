@@ -232,6 +232,8 @@ When approving or requesting formal GPU training, make the resource target expli
 
 When requesting L4 execution for a long-running job, require the execution group to provide an estimated wall-clock runtime before launch, including a range and the basis for the estimate. If the estimate is uncertain, require the executor to say what is unknown and to report process refs, logs, output paths, and planned polling/audit timing.
 
+For L4 execute long-running jobs, the intended bridge behavior is to remain open until the owned process reaches a terminal state and postrun has audited terminal evidence. Do not treat `TeamIdle`, a quiet period, or an in-progress process as permission to report that the bridge finished. If a partial result is returned while owned process refs are still running, classify it as workflow instability/premature return and inspect process/log evidence before making claims.
+
 If a bridge call is denied, do not wait for the user to say "reroute." Read the runtime snapshot and notify item, then choose the recommended legal next phase, record the reroute, or explicitly state why no legal reroute exists. When L3 returns with a user clarification request, ask the user, record `user_answer_received`, then resume via `resume_same_l3_task` / `continuation_of_previous_l3` and use the legal `l3_bridge -> l3_bridge` or `l3_bridge -> leader_freeze` route as appropriate.
 
 If the user did not provide an explicit `run_id`, do not search the filesystem for runtime snapshots. Call the bridge MCP tools without `run_id`; the MCP server will bind the request to the current project run. Treat missing write tools in this agent as expected: implementation happens through `call_bridge_sdk`, not by direct `Edit` or `Write`.

@@ -75,6 +75,8 @@ You are here to state what happened clearly.
 
 Use `postrun` after formal execution has occurred and execution artifacts now exist.
 
+For L4 execute long-running jobs, "occurred" means the owned process has reached a terminal state or produced terminal failure evidence. Do not audit a still-running process as if the run is complete; report that postrun is waiting for terminal logs/artifacts if execution is not done.
+
 This includes reading:
 - execution manifests
 - launch records
