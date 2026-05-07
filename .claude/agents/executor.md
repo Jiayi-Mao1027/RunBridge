@@ -149,6 +149,18 @@ You are not trying to look bold.
 You are not trying to look safe.
 You are trying to execute faithfully inside the accepted boundary and record the real choice honestly.
 
+### Conda Environment
+
+All formal execution commands must run in the conda environment named `mjy`.
+
+Prefer auditable one-shot commands such as:
+
+`conda run -n mjy python ...`
+
+An explicit shell activation is acceptable only when the execution record clearly shows the equivalent `conda activate mjy` context before the command. Do not create or use `venv`, `.venv`, `virtualenv`, or ad hoc Python environments for L4 execute.
+
+Record the environment evidence, such as the command prefix, `CONDA_DEFAULT_ENV`, Python path, or `conda info/env list` when relevant. Missing environment evidence is an execution-record defect.
+
 ---
 
 ## 7. Resource and Process Rule
@@ -163,18 +175,25 @@ When accelerators or constrained resources matter:
 
 ### GPU Memory Utilization
 
-For formal training or throughput-sensitive execution, low memory usage is not automatically acceptable. Unless the frozen task explicitly says this is a smoke/dry-run/conservative run, choose settings that aim for evidence-backed near-ceiling use of the selected accelerator memory while preserving a reasonable safety margin against OOM.
+For formal training or throughput-sensitive execution, low memory usage is not acceptable. Unless the frozen task explicitly says this is a smoke/dry-run/conservative run, choose settings that force observed memory use above 90% of the selected GPU's total memory after warmup while preserving a narrow safety margin against OOM.
+
+For the common 80GB GPU case, this usually means observed usage above 70GB. Treat materially lower formal-run usage as a configuration failure or execution deviation unless there is explicit user approval for a conservative run or hard resource evidence that prevents higher utilization.
 
 You should inspect and report:
 - total and free memory before launch
 - competing processes on the selected device
-- intended per-device batch size, microbatch size, gradient accumulation, sequence length, precision, optimizer/checkpointing choices, and any memory-saving settings
+- smoke-test evidence used to choose formal execution settings
+- intended per-device batch size, microbatch size, gradient accumulation, sequence length, precision, optimizer/checkpointing choices, effective batch size, and any memory-saving settings
 - why those settings are expected to approach the safe memory ceiling
+- why formal settings differ from smoke settings
 - observed memory usage after launch or during warmup
+- whether observed memory exceeded 90% of total memory, and the absolute observed value in GB
 
 Do not silently run formal training with tiny batches or very low memory usage just because it is less likely to fail. If a low-memory run is chosen, label it explicitly as a smoke/conservative run or explain the hard constraint that prevents higher utilization.
 
-If the first safe setting leaves substantial unused memory and the task is a formal run, tune upward inside the approved boundary before declaring the run configured. Use bounded increments and stop before reckless OOM probing. If OOM occurs during this tuning, record the failing setting and fall back to the highest observed safe setting.
+Before a formal training/evaluation launch, run the bounded smoke test needed to validate shape, memory trend, config wiring, and output/log paths. Smoke batch size is not the formal batch size. Use smoke evidence to choose formal per-device batch size, microbatch, gradient accumulation, sequence length, precision, and effective batch size, then record that choice.
+
+If the first safe setting uses at most 90% of selected GPU memory and the task is a formal run, tune upward inside the approved boundary before declaring the run configured. Use bounded increments and stop before reckless OOM probing. If OOM occurs during this tuning, record the failing setting and fall back to the highest observed safe setting only if it still satisfies the formal threshold or the run is explicitly reclassified as blocked/deviated.
 
 Formal execution may include long-running jobs such as training. In L4 execute, launch long jobs in a foreground, waitable, or explicitly polled form so the bridge can remain open until terminal completion. Do not intentionally detach a formal run and return while it is still running unless the packet or user explicitly asked for detached background operation.
 
@@ -185,6 +204,8 @@ For long-running jobs you launch, record:
 - start time
 - PID or process/session reference when available
 - GPU/resource choice
+- conda environment evidence proving `mjy`
+- observed GPU memory peak and percentage of total memory
 - log file path
 - expected checkpoint/output path
 - terminal status of the process at report time

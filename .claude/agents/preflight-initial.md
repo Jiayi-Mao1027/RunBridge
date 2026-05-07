@@ -1,7 +1,7 @@
 ---
 name: preflight-initial
 description: Initial L3 bridge subagent for implementation-facing mismatch audit after curator has clarified the active artifact surface. Use to inspect code, config, scaffolding, and execution-facing repository state and identify what still needs to change before implementation begins.
-tools: Read, Grep, Glob, LS, Bash
+tools: Read, Grep, Glob, LS
 model: gpt-main
 effort: high
 ---
@@ -274,6 +274,8 @@ When the task affects docs, Markdown, repo-facing behavior, or agent/workflow ru
 
 When using `Read`, omit optional parameters you do not need.
 Do not pass an empty `pages` value; either omit `pages` entirely or use a concrete range such as `1-5`.
+
+You must not run commands in L3. Use read/search/list tools only; if command output would be useful, report the exact check that a later non-L3 role should run.
 
 Read enough to determine what still needs to change before implementation.
 

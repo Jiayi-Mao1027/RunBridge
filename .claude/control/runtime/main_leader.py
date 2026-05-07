@@ -16,11 +16,12 @@ DEFAULT_BRIDGE_ACTIONS = ["team_create", "task_create", "send_messages", "task_c
 READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "LS"]
 RESEARCH_TOOLS = [*READ_ONLY_TOOLS, "WebSearch", "WebFetch"]
 READ_CHECK_TOOLS = [*READ_ONLY_TOOLS, "Bash"]
+L3_WRITE_TOOLS = [*READ_ONLY_TOOLS, "Edit", "Write"]
 WRITE_TOOLS = [*READ_ONLY_TOOLS, "Bash", "Edit", "Write"]
 DEFAULT_BRIDGE_LEADER_TOOLS = ["Agent", *WRITE_TOOLS]
 PHASE_BRIDGE_TOOLS = {
     "l2_advisory": ["Agent", *RESEARCH_TOOLS],
-    "l3_bridge": DEFAULT_BRIDGE_LEADER_TOOLS,
+    "l3_bridge": ["Agent", *L3_WRITE_TOOLS],
     "l4_implement": DEFAULT_BRIDGE_LEADER_TOOLS,
     "l4_execute": ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "Write"],
     "l4_anomaly": ["Agent", *READ_CHECK_TOOLS],
@@ -79,8 +80,8 @@ PHASE_TEAM_DEFAULTS = {
         ("chiefmate-b", "advisory", RESEARCH_TOOLS, "produce independent upstream advisory judgment and critique chiefmate-a when relevant"),
     ],
     "l3_bridge": [
-        ("curator", "artifact_curation", WRITE_TOOLS, "clarify active logs, datasets, checkpoints, outputs, archive boundaries, and traceability"),
-        ("preflight-initial", "preflight_audit", READ_CHECK_TOOLS, "inspect implementation-facing repo/config state and surface required changes before implementation"),
+        ("curator", "artifact_curation", L3_WRITE_TOOLS, "clarify active logs, datasets, checkpoints, outputs, archive boundaries, and traceability without running commands"),
+        ("preflight-initial", "preflight_audit", READ_ONLY_TOOLS, "inspect implementation-facing repo/config state and surface required changes before implementation without running commands"),
         ("refresher", "documentation_refresh", ["Read", "Grep", "Glob", "LS", "Edit", "Write"], "refresh CLAUDE.md and bounded human-facing repository documentation when needed"),
     ],
     "l4_implement": [
@@ -88,8 +89,8 @@ PHASE_TEAM_DEFAULTS = {
         ("rungater", "implementation_gate", READ_CHECK_TOOLS, "judge post-implementation readiness and recommend proceed, repair, reroute, or stop"),
     ],
     "l4_execute": [
-        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow with evidence-backed near-ceiling accelerator memory utilization when applicable, and record exact execution evidence"),
-        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, resource utilization, outcome classification, and recommend anomaly routing when needed"),
+        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow through conda env mjy, force formal GPU runs above 90% of selected GPU memory when applicable, and record exact execution evidence"),
+        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, conda env use, GPU memory utilization, outcome classification, and recommend anomaly routing when needed"),
     ],
     "l4_anomaly": [
         ("anomaly-analyst-a", "anomaly_analysis", READ_CHECK_TOOLS, "build evidence-backed anomaly hypotheses and discriminative next checks"),
@@ -321,6 +322,7 @@ def _normalize_task_spec(
         "task_description": description,
         "original_user_instruction": original_instruction,
         "instruction_coverage_checklist": _derive_instruction_coverage_checklist(source, original_instruction, description),
+        "semantic_resolution_contract": _semantic_resolution_contract(source, original_instruction, target_phase),
         "preserved_task_context": _preserved_task_context(source),
         "task_kind": str(source.get("task_kind") or "bridge_window_task"),
         "target_phase": target_phase,
@@ -344,9 +346,12 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
                         f"{name}: {task_spec['task_description']}",
                         f"Original user instruction: {task_spec.get('original_user_instruction') or task_spec['task_description']}",
                         f"Instruction coverage checklist: {_json_list(task_spec.get('instruction_coverage_checklist'))}",
+                        f"Semantic resolution contract: {_json_dict(task_spec.get('semantic_resolution_contract'))}",
                         f"Preserved task context: {_json_dict(task_spec.get('preserved_task_context'))}",
                         "Coverage rule: do not mark the task complete until every checklist item is completed, explicitly deferred with a concrete reason, or escalated to main-leader/user.",
+                        "Semantic identity rule: resolve or explicitly carry model/method identity, checkpoint identity, dataset identity, prompt identity, code/config basis, and inherited defaults before downstream implementation or execution. Do not silently change them.",
                         "Report rule: include an instruction coverage section that lists completed, deferred, blocked, and escalated checklist items.",
+                        "Report rule: include a semantic identity resolution section with resolved, inherited, unknown, blocked, or escalated disposition for each required identity field.",
                         f"Role: {teammate.get('role') or 'bridge teammate'}",
                         f"Responsibilities: {_json_list(responsibilities)}",
                         f"Allowed tools: {_json_list(teammate.get('allowed_tools'))}",
@@ -374,6 +379,10 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
 def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> list[str]:
     if target_phase == "l3_bridge":
         return [
+            "L3 no-run-tools rule: do not run shell commands or other execution tools in L3. Use Read/Grep/Glob/LS for inspection and Edit/Write only for explicitly permitted curation or documentation updates.",
+            "L3 semantic identity rule: actively identify which model/method/checkpoint/dataset/prompt/config the user means. For comparisons such as DPO vs OPD, report the concrete ckpts or say exactly what is ambiguous.",
+            "L3 inheritance rule: when the user does not request a dataset, prompt, split, metric, or config change, inspect the active repo/docs enough to identify the current basis and explicitly recommend inheriting it.",
+            "L3 packet handoff rule: report the resolved semantic basis in a form L4 implement/execute can copy directly: model/method identity, ckpt paths/IDs, dataset/split, prompt/template, config files, and any unresolved field.",
             "L3 minimum-active-surface rule: first identify what this step is trying to do, what prior work is already done, and what files/artifacts are genuinely required for the next phase.",
             "Archive-first curation rule: keep the active code, log, checkpoint, data, document, and script surfaces minimum viable. Archive or move out stale, duplicate, ambiguous, or non-current material instead of leaving it active with only a label.",
             "Active-retention burden: every retained log/dataset/checkpoint/output/scratch script/document/code copy needs a concrete current-step or next-phase reason. If the reason is weak, archive it.",
@@ -385,6 +394,7 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
         ]
     if target_phase == "l4_implement":
         base = [
+            "Semantic basis rule: implement exactly against the resolved semantic identity in task_spec.semantic_resolution_contract and preserved context; do not silently swap checkpoint, dataset, prompt, metric, or objective identity.",
             "Minimum-viable repository rule: keep the active project surface as small as practical while implementing.",
             "Prefer modifying existing code/config over creating new long-lived files. For one-off analysis or migration, use temporary scripts and cleanly archive/remove them from the active surface before handoff.",
             "New long-lived code, script, data, checkpoint, or document files need a concrete durable reason and must be reported explicitly.",
@@ -398,14 +408,22 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
         return base
     if target_phase == "l4_execute" and teammate_name == "executor":
         return [
+            "Semantic basis rule: execute exactly the resolved model/method, checkpoint, dataset, prompt/template, config, and metric basis. If any identity field is unresolved, stop and report blocked rather than guessing.",
+            "Execution environment rule: all formal execute commands must use the conda environment named mjy. Prefer `conda run -n mjy ...` for auditable commands, or explicitly record an equivalent `conda activate mjy` shell context. Do not create or use venv.",
             "Long-task ETA rule: before launching any long-running command, estimate expected wall-clock runtime as a range, state the basis for the estimate, and include that estimate in the execution report.",
+            "Smoke-shape rule: before formal execution, use bounded smoke evidence to choose formal parameters such as per-device batch size, microbatch size, gradient accumulation, sequence length, precision, and effective batch size. Record why formal settings differ from smoke settings.",
             "If runtime cannot be estimated, state that explicitly with the missing information and still record command, start time, owned process refs, logs, and expected outputs.",
             "L4 execute terminality rule: run formal long jobs in a way the bridge can wait on or poll until terminal completion. Do not return a final or partial bridge report while an owned process is still running; emit progress evidence and keep waiting.",
+            "Formal GPU memory rule: unless the task is explicitly smoke/dry-run/conservative, configure formal GPU execution to exceed 90% of the selected GPU's total memory after warmup. On a typical 80GB GPU this usually means observed usage above 70GB.",
+            "If >90% memory use cannot be reached safely, stop or classify the run as blocked/deviated with evidence; do not silently accept a low-memory formal run.",
         ]
     if target_phase == "l4_execute" and teammate_name == "postrun":
         return [
+            "Semantic audit rule: verify the actual run used the resolved model/method, checkpoint, dataset, prompt/template, config, and metric basis; classify mismatches as execution deviations or defects.",
             "Audit ETA rule: compare actual runtime against the executor's estimate when available, and flag material deviation as execution evidence rather than treating it as chat context.",
             "Postrun must run after the formal execution process has reached a terminal state or produced terminal failure evidence; do not audit a still-running process as complete.",
+            "Environment audit rule: verify formal execution used conda env mjy and did not use venv. Missing or contradictory environment evidence is an execution deviation.",
+            "GPU memory audit rule: for formal GPU execution, verify observed memory exceeded 90% of selected GPU total memory after warmup; for typical 80GB GPUs, usage should usually exceed 70GB. Lower usage requires explicit smoke/conservative approval or hard resource evidence.",
         ]
     return []
 
@@ -437,8 +455,8 @@ def _default_completion_contract(target_phase: str | None = None) -> dict[str, A
 
 def _default_report_contract() -> dict[str, Any]:
     return {
-        "required_sections": ["summary", "evidence", "instruction_coverage"],
-        "required_evidence": ["runtime event ids", "instruction coverage disposition"],
+        "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution"],
+        "required_evidence": ["runtime event ids", "instruction coverage disposition", "semantic identity resolution"],
         "artifact_reporting_format": "list",
         "include_failure_reason": True,
         "include_next_action_recommendation": True,
@@ -469,6 +487,41 @@ def _derive_instruction_coverage_checklist(source: dict[str, Any], original_inst
     return _dedupe_nonempty(items) or [str(description)]
 
 
+def _semantic_resolution_contract(source: dict[str, Any], original_instruction: str, target_phase: str) -> dict[str, Any]:
+    supplied = source.get("semantic_resolution_contract")
+    if isinstance(supplied, dict):
+        contract = deepcopy(supplied)
+    else:
+        contract = {}
+    required_fields = [
+        "model_or_method_identity",
+        "checkpoint_identity",
+        "dataset_identity",
+        "prompt_or_template_identity",
+        "code_config_basis",
+        "metric_or_objective_identity",
+        "inherited_defaults",
+    ]
+    contract.setdefault("required_identity_fields", required_fields)
+    contract.setdefault("user_instruction_preview", _derive_subject(original_instruction))
+    contract.setdefault("target_phase", target_phase)
+    contract.setdefault(
+        "resolution_policy",
+        [
+            "actively resolve identities from the frozen instruction and current repository state",
+            "if the user did not request a change, inherit the current active dataset/prompt/config basis and say where it came from",
+            "for model or method comparisons, name the concrete checkpoints or checkpoint-selection rule for each side",
+            "do not let L4 implement or execute infer unresolved identities silently",
+            "unknown identity fields must be marked unknown, blocked, or escalated with a concrete reason",
+        ],
+    )
+    contract.setdefault(
+        "report_disposition_values",
+        ["resolved", "inherited", "unknown", "blocked", "escalated", "not_applicable"],
+    )
+    return contract
+
+
 def _preserved_task_context(source: dict[str, Any]) -> dict[str, Any]:
     reserved = {
         "task_id_or_null",
@@ -485,6 +538,7 @@ def _preserved_task_context(source: dict[str, Any]) -> dict[str, Any]:
         "constraints",
         "must_do",
         "must_not_do",
+        "semantic_resolution_contract",
         "task_kind",
     }
     preserved = {}

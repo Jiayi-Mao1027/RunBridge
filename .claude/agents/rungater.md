@@ -78,14 +78,16 @@ You should inspect, when relevant:
 - smoke evidence
 - whether the active repository surface is minimum viable for formal execution
 - entrypoints and execution-facing manifests
+- resolved semantic identity basis: model/method, checkpoint, dataset/split, prompt/template, config, metric/objective, inherited defaults
 - resource/runtime evidence
 - runtime-shape evidence
 - GPU visibility and memory-use evidence when applicable
-- batch-size-related or throughput-critical parameter choices when applicable
+- batch-size-related or throughput-critical parameter choices, including effective batch size, when applicable
 
 You should focus on whether:
 - the intended behavior is actually implemented
 - the delivered config is aligned enough with the frozen basis
+- no model/checkpoint/dataset/prompt/config identity is being silently changed or left for executor to guess
 - visible defects would likely break formal execution
 - debug evidence suggests fragility
 - execution-facing state is still incomplete
@@ -164,19 +166,23 @@ Do require operational credibility.
 When runtime shape matters, you must inspect whether the final delivered state is supported by meaningful evidence.
 
 This includes checking:
+- whether the semantic identity basis is explicit enough for execute to use without guessing
 - whether throughput-critical settings were tested near a realistic safe range
 - whether memory usage was observed in a way that is actually informative
 - whether the final delivered configuration is based on evidence rather than guesswork
 - whether the implementation/debug phase stopped at a trivially safe placeholder without justification
+- whether formal execution can run under conda env `mjy` without relying on `venv`, `.venv`, or `virtualenv`
 
 Do not demand reckless maximum utilization.
 Do not accept obvious under-testing as good enough without explanation.
 
 For GPU training, distinguish:
 - smoke/preflight settings, which may intentionally use low memory
-- formal execution settings, which should target evidence-backed near-ceiling memory utilization with a safety margin
+- formal execution settings, which must target observed memory above 90% of selected GPU total memory after warmup unless explicitly approved as conservative/smoke
 
-If the delivered config would run formal training far below available memory without a clear reason, classify it as an execution-facing risk or must-fix depending on severity. Executor should not inherit a low-memory placeholder as if it were the intended production setting.
+On typical 80GB GPUs, formal settings should usually exceed 70GB observed memory. If the delivered config would run formal training below that threshold or below 90% of selected GPU memory without a clear approved reason, classify it as a must-fix before execute. Executor should not inherit a low-memory placeholder as if it were the intended production setting. The gate report should state the expected formal per-device batch size, microbatch, gradient accumulation, and effective batch size when those choices matter.
+
+If the project setup only works through venv or lacks a working `mjy` conda path for formal execution, classify that as an execution-layer fix before execute.
 
 You are optimizing for:
 - evidence-backed near-safe utilization

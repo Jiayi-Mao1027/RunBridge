@@ -13,6 +13,22 @@ from companion_observer import observe_workflow_event
 
 
 SCHEMA_VERSION = "0.4.0"
+SNAPSHOT_DETAIL_LEVEL = "compact"
+SNAPSHOT_TEXT_LIMIT = 700
+SNAPSHOT_LIST_LIMIT = 8
+SNAPSHOT_RECENT_BINDING_LIMIT = 12
+ORCHESTRATION_ANOMALY_OPEN_SECONDS = 300
+ORCHESTRATION_ANOMALY_STUCK_STATUSES = {
+    "bridge_call_started",
+    "bridge_window_opened",
+    "bridge_packet_accepted",
+    "team_create_completed",
+    "task_create_completed",
+    "task_created_recorded",
+    "message_dispatch_completed",
+}
+EXECUTE_WATCHDOG_HEARTBEAT_GRACE_MULTIPLIER = 3
+EXECUTE_WATCHDOG_MIN_STALE_SECONDS = 300
 
 AGENT_TYPES = {"main-leader", "bridge-leader", "teammate", "hook", "runtime"}
 AGENT_TYPE_ALIASES = {
@@ -679,12 +695,23 @@ def build_runtime_snapshot(paths: ControlPaths, run_ledger: dict[str, Any]) -> d
     phase_graph = load_json_file(paths.phase_graph_path(), default={}) or {}
     current_phase = str(run.get("current_phase") or "leader_freeze")
     allowed_routes = _allowed_routes_for_phase(phase_graph, current_phase)
-    integrity = _derive_integrity(run)
     lifecycle = _derive_lifecycle(run)
+    snapshot_refs = _snapshot_refs(paths, run["run_id"])
+    observer_summary = _observer_summary(paths, run["run_id"])
+    runtime_diagnostics = _derive_runtime_diagnostics(run, lifecycle, snapshot_refs, observer_summary)
+    integrity = _derive_integrity(run, runtime_diagnostics)
     phase_exit_readiness = _derive_phase_exit_readiness(run)
 
     snapshot = {
         "schema_version": SCHEMA_VERSION,
+        "snapshot_detail_level": SNAPSHOT_DETAIL_LEVEL,
+        "snapshot_policy": {
+            "purpose": "control_state_only",
+            "large_payloads_live_in_refs": True,
+            "text_preview_limit": SNAPSHOT_TEXT_LIMIT,
+            "list_preview_limit": SNAPSHOT_LIST_LIMIT,
+        },
+        "snapshot_refs": snapshot_refs,
         "run_id": run["run_id"],
         "main_session_id": run.get("main_session_id") or run["run_id"],
         "current_phase": current_phase,
@@ -700,11 +727,12 @@ def build_runtime_snapshot(paths: ControlPaths, run_ledger: dict[str, Any]) -> d
             },
         ),
         "lifecycle": lifecycle,
-        "bindings": run.get("bindings", _empty_bindings()),
+        "bindings": _compact_bindings_for_snapshot(run.get("bindings", _empty_bindings()), lifecycle),
         "allowed_actions": _derive_allowed_actions(integrity, lifecycle),
         "allowed_routes": allowed_routes,
         "integrity": integrity,
-        "last_bridge_result": run.get("last_bridge_result"),
+        "runtime_diagnostics": runtime_diagnostics,
+        "last_bridge_result": _compact_bridge_result_for_snapshot(run.get("last_bridge_result"), snapshot_refs),
         "phase_exit_readiness": phase_exit_readiness,
     }
     return snapshot
@@ -1163,7 +1191,374 @@ def _build_bridge_result(event: WorkflowEvent, to_status: str) -> dict[str, Any]
     return result
 
 
-def _derive_integrity(run: dict[str, Any]) -> dict[str, Any]:
+def _snapshot_refs(paths: ControlPaths, run_id: str) -> dict[str, str]:
+    run_root = paths.run_root(run_id)
+    return {
+        "run_ledger": str(run_root / "run_ledger.json"),
+        "event_log": str(run_root / "event_log.jsonl"),
+        "transitions": str(run_root / "transitions.jsonl"),
+        "main_leader_inbox": str(run_root / "main_leader_inbox.jsonl"),
+        "teammate_reports": str(run_root / "teammate_reports.jsonl"),
+        "tool_events": str(run_root / "tool_events.jsonl"),
+        "artifacts": str(run_root / "artifacts.jsonl"),
+        "process_events": str(run_root / "process_events.jsonl"),
+        "completion_checks": str(run_root / "completion_checks.jsonl"),
+        "active_operations": str(run_root / "active_operations.json"),
+        "bridge_prompts_dir": str(run_root.parent.parent / "bridge_prompts" / run_id),
+        "run_root": str(run_root),
+    }
+
+
+def _observer_summary(paths: ControlPaths, run_id: str) -> dict[str, Any]:
+    run_root = paths.run_root(run_id)
+    streams = {
+        "teammate_reports": run_root / "teammate_reports.jsonl",
+        "artifacts": run_root / "artifacts.jsonl",
+        "process_events": run_root / "process_events.jsonl",
+        "completion_checks": run_root / "completion_checks.jsonl",
+        "tool_events": run_root / "tool_events.jsonl",
+        "agent_messages": run_root / "agent_messages.jsonl",
+    }
+    by_window: dict[str, dict[str, int]] = {}
+    totals: dict[str, int] = {}
+    for kind, path in streams.items():
+        try:
+            records = load_jsonl(path) or []
+        except Exception:
+            records = []
+        totals[kind] = len(records)
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            bridge_window_id = str(record.get("bridge_window_id") or "").strip()
+            if not bridge_window_id:
+                continue
+            by_window.setdefault(bridge_window_id, {})
+            by_window[bridge_window_id][kind] = by_window[bridge_window_id].get(kind, 0) + 1
+    return {"totals": totals, "by_bridge_window_id": by_window}
+
+
+def _derive_runtime_diagnostics(
+    run: dict[str, Any],
+    lifecycle: dict[str, Any],
+    refs: dict[str, str],
+    observer_summary: dict[str, Any],
+) -> dict[str, Any]:
+    anomalies: list[dict[str, Any]] = []
+    watchdog_alerts: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    status_index = lifecycle.get("status_index") if isinstance(lifecycle.get("status_index"), dict) else {}
+    open_window_ids = [str(item) for item in lifecycle.get("open_bridge_window_ids", []) if str(item)]
+    observer_by_window = observer_summary.get("by_bridge_window_id") if isinstance(observer_summary.get("by_bridge_window_id"), dict) else {}
+    for bridge_window_id in open_window_ids:
+        status = str(status_index.get(bridge_window_id) or "")
+        binding = run.get("bindings", {}).get("bridge_windows", {}).get(bridge_window_id, {})
+        if not isinstance(binding, dict):
+            binding = {}
+        latest_transition = _latest_transition_for_window(run, bridge_window_id)
+        created_at = _parse_iso(binding.get("created_at")) or _parse_iso(latest_transition.get("timestamp"))
+        last_event_at = _parse_iso(latest_transition.get("timestamp")) or created_at
+        open_seconds = _elapsed_seconds(created_at, now)
+        last_event_age_seconds = _elapsed_seconds(last_event_at, now)
+        counts = observer_by_window.get(bridge_window_id) if isinstance(observer_by_window.get(bridge_window_id), dict) else {}
+        process_count = int(counts.get("process_events", 0) or 0)
+        report_count = int(counts.get("teammate_reports", 0) or 0)
+        artifact_count = int(counts.get("artifacts", 0) or 0)
+        completion_count = int(counts.get("completion_checks", 0) or 0)
+        no_downstream_evidence = process_count == 0 and report_count == 0 and artifact_count == 0 and completion_count == 0
+        stuck_after_dispatch = status == "message_dispatch_completed" and no_downstream_evidence
+        open_too_long = open_seconds is not None and open_seconds >= ORCHESTRATION_ANOMALY_OPEN_SECONDS
+        if status in ORCHESTRATION_ANOMALY_STUCK_STATUSES and open_too_long and no_downstream_evidence:
+            conditions = ["bridge_window_open_too_long", "no_process_refs", "no_reports", "no_artifacts"]
+            if stuck_after_dispatch:
+                conditions.append("status_stuck_at_message_dispatch_completed")
+            anomalies.append(
+                {
+                    "level": "blocking",
+                    "category": "workflow_instability",
+                    "classification": "bridge_orchestration_hang",
+                    "message": "bridge window is open too long without process, report, artifact, or completion evidence",
+                    "bridge_window_id": bridge_window_id,
+                    "status": status,
+                    "conditions": conditions,
+                    "open_seconds": open_seconds,
+                    "last_event_age_seconds": last_event_age_seconds,
+                    "last_event_id": latest_transition.get("based_on_event"),
+                    "team_id_or_null": binding.get("team_id_or_null"),
+                    "task_id_or_null": binding.get("task_id_or_null"),
+                    "observer_counts": {
+                        "process_events": process_count,
+                        "teammate_reports": report_count,
+                        "artifacts": artifact_count,
+                        "completion_checks": completion_count,
+                    },
+                    "diagnostic_refs": {
+                        "runtime_snapshot": refs.get("run_root"),
+                        "event_log": refs.get("event_log"),
+                        "transitions": refs.get("transitions"),
+                        "teammate_reports": refs.get("teammate_reports"),
+                        "artifacts": refs.get("artifacts"),
+                        "process_events": refs.get("process_events"),
+                        "tool_events": refs.get("tool_events"),
+                        "active_operations": refs.get("active_operations"),
+                        "bridge_prompts_dir": refs.get("bridge_prompts_dir"),
+                    },
+                    "diagnostic_checklist": [
+                        "do_not_continue_waiting",
+                        "classify_as_workflow_instability_bridge_orchestration_hang",
+                        "inspect_runtime_snapshot",
+                        "inspect_event_log_and_artifact_refs",
+                        "inspect_known_output_dirs",
+                        "inspect_known_logs",
+                        "tell_user_bridge_orchestration_is_hung_before_retry_or_reroute",
+                    ],
+                    "recommended_action_or_null": "do_not_wait; mark_bridge_orphaned_or_reroute_l4_anomaly_after_snapshot_event_log_artifact_process_checks",
+                }
+            )
+        if status == "team_waiting":
+            wait_payload = latest_transition.get("payload") if isinstance(latest_transition.get("payload"), dict) else {}
+            process_refs = wait_payload.get("owned_process_refs") if isinstance(wait_payload.get("owned_process_refs"), list) else []
+            timeout_policy = wait_payload.get("timeout_policy") if isinstance(wait_payload.get("timeout_policy"), dict) else {}
+            heartbeat_seconds = _positive_int(timeout_policy.get("heartbeat_interval_seconds"), default=60)
+            stale_after = max(heartbeat_seconds * EXECUTE_WATCHDOG_HEARTBEAT_GRACE_MULTIPLIER, EXECUTE_WATCHDOG_MIN_STALE_SECONDS)
+            last_heartbeat_at = _parse_iso(wait_payload.get("last_heartbeat_at")) or last_event_at
+            heartbeat_age_seconds = _elapsed_seconds(last_heartbeat_at, now)
+            running_refs = [ref for ref in process_refs if _process_ref_looks_running(ref)]
+            if running_refs and heartbeat_age_seconds is not None and heartbeat_age_seconds >= stale_after:
+                watchdog_alerts.append(
+                    {
+                        "level": "warn",
+                        "category": "execute_watchdog",
+                        "classification": "execute_stale_heartbeat_with_owned_process_refs",
+                        "message": "owned process refs exist but bridge heartbeat is stale; inspect process/log/artifact state instead of waiting for hard timeout",
+                        "bridge_window_id": bridge_window_id,
+                        "status": status,
+                        "heartbeat_age_seconds": heartbeat_age_seconds,
+                        "heartbeat_interval_seconds": heartbeat_seconds,
+                        "stale_after_seconds": stale_after,
+                        "owned_process_ref_count": len(process_refs),
+                        "running_owned_process_ref_count": len(running_refs),
+                        "last_event_id": latest_transition.get("based_on_event"),
+                        "diagnostic_refs": {
+                            "event_log": refs.get("event_log"),
+                            "transitions": refs.get("transitions"),
+                            "process_events": refs.get("process_events"),
+                            "tool_events": refs.get("tool_events"),
+                            "active_operations": refs.get("active_operations"),
+                            "known_logs_ref": refs.get("tool_events"),
+                            "known_outputs_ref": refs.get("artifacts"),
+                        },
+                        "diagnostic_checklist": [
+                            "do_not_wait_until_hard_timeout_blindly",
+                            "inspect_owned_process_refs",
+                            "inspect_process_events_and_active_operations",
+                            "inspect_known_logs",
+                            "inspect_known_output_dirs",
+                            "ask_or_trigger_bridge_poll_heartbeat_before_declaring_failure",
+                            "emit_team_idle_or_wait_timeout_or_process_lost_based_on_evidence",
+                        ],
+                        "recommended_action_or_null": "run_watchdog_probe_or_route_to_l4_anomaly_if_process_status_cannot_be_confirmed",
+                    }
+                )
+    return {
+        "detail_level": "compact",
+        "observer_stream_counts": observer_summary.get("totals", {}),
+        "orchestration_anomalies": anomalies[:SNAPSHOT_LIST_LIMIT],
+        "execute_watchdog_alerts": watchdog_alerts[:SNAPSHOT_LIST_LIMIT],
+        "has_blocking_orchestration_anomaly": any(item.get("level") == "blocking" for item in anomalies),
+        "has_execute_watchdog_alert": bool(watchdog_alerts),
+        "omitted": {
+            "orchestration_anomalies": max(0, len(anomalies) - SNAPSHOT_LIST_LIMIT),
+            "execute_watchdog_alerts": max(0, len(watchdog_alerts) - SNAPSHOT_LIST_LIMIT),
+        },
+    }
+
+
+def _compact_bridge_result_for_snapshot(result: Any, refs: dict[str, str]) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    reports = result.get("reports") if isinstance(result.get("reports"), list) else []
+    artifacts = result.get("artifact_refs") if isinstance(result.get("artifact_refs"), list) else []
+    evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else result.get("evidence")
+    error = result.get("error_or_null")
+    return {
+        "detail_level": "compact",
+        "full_result_ref": refs.get("run_ledger"),
+        "report_stream_ref": refs.get("teammate_reports"),
+        "artifact_stream_ref": refs.get("artifacts"),
+        "status": result.get("status"),
+        "failure_stage_or_null": result.get("failure_stage_or_null"),
+        "run_id": result.get("run_id"),
+        "main_session_id": result.get("main_session_id"),
+        "sub_session_id": result.get("sub_session_id"),
+        "bridge_window_id": result.get("bridge_window_id"),
+        "team_id_or_null": result.get("team_id_or_null"),
+        "task_id_or_null": result.get("task_id_or_null"),
+        "returned_at": result.get("returned_at"),
+        "cleanup_required": bool(result.get("cleanup_required", False)),
+        "report_count": len(reports),
+        "artifact_count": len(artifacts),
+        "reports_preview": [_compact_value_for_snapshot(item) for item in reports[:SNAPSHOT_LIST_LIMIT]],
+        "artifact_refs_preview": [_compact_text(str(item)) for item in artifacts[:SNAPSHOT_LIST_LIMIT]],
+        "evidence_summary": _compact_value_for_snapshot(evidence),
+        "error_or_null": _compact_value_for_snapshot(error),
+        "omitted": {
+            "reports": max(0, len(reports) - SNAPSHOT_LIST_LIMIT),
+            "artifact_refs": max(0, len(artifacts) - SNAPSHOT_LIST_LIMIT),
+            "full_evidence": _value_size(evidence) > SNAPSHOT_TEXT_LIMIT,
+        },
+    }
+
+
+def _compact_bindings_for_snapshot(bindings: Any, lifecycle: dict[str, Any]) -> dict[str, Any]:
+    source = bindings if isinstance(bindings, dict) else _empty_bindings()
+    open_windows = set(str(item) for item in lifecycle.get("open_bridge_window_ids", []) if item)
+    bridge_windows = source.get("bridge_windows") if isinstance(source.get("bridge_windows"), dict) else {}
+    teams = source.get("teams") if isinstance(source.get("teams"), dict) else {}
+    tasks = source.get("tasks") if isinstance(source.get("tasks"), dict) else {}
+    tool_uses = source.get("tool_uses") if isinstance(source.get("tool_uses"), dict) else {}
+
+    kept_window_ids = set(open_windows)
+    kept_window_ids.update(_latest_mapping_keys(bridge_windows, SNAPSHOT_RECENT_BINDING_LIMIT))
+    kept_team_ids = {
+        str(binding.get("team_id_or_null"))
+        for window_id, binding in bridge_windows.items()
+        if str(window_id) in kept_window_ids and isinstance(binding, dict) and binding.get("team_id_or_null")
+    }
+    kept_task_ids = {
+        str(binding.get("task_id_or_null"))
+        for window_id, binding in bridge_windows.items()
+        if str(window_id) in kept_window_ids and isinstance(binding, dict) and binding.get("task_id_or_null")
+    }
+    compact_tool_uses = {
+        key: _compact_value_for_snapshot(value)
+        for key, value in _latest_mapping_items(tool_uses, SNAPSHOT_RECENT_BINDING_LIMIT)
+    }
+    return {
+        "detail_level": "compact",
+        "counts": {
+            "bridge_windows": len(bridge_windows),
+            "teams": len(teams),
+            "tasks": len(tasks),
+            "tool_uses": len(tool_uses),
+        },
+        "bridge_windows": {
+            key: _compact_value_for_snapshot(value)
+            for key, value in bridge_windows.items()
+            if str(key) in kept_window_ids
+        },
+        "teams": {
+            key: _compact_value_for_snapshot(value)
+            for key, value in teams.items()
+            if str(key) in kept_team_ids or str(value.get("bridge_window_id") if isinstance(value, dict) else "") in kept_window_ids
+        },
+        "tasks": {
+            key: _compact_value_for_snapshot(value)
+            for key, value in tasks.items()
+            if str(key) in kept_task_ids or str(value.get("bridge_window_id") if isinstance(value, dict) else "") in kept_window_ids
+        },
+        "tool_uses": compact_tool_uses,
+        "omitted": {
+            "bridge_windows": max(0, len(bridge_windows) - len(kept_window_ids)),
+            "tool_uses": max(0, len(tool_uses) - len(compact_tool_uses)),
+        },
+    }
+
+
+def _latest_mapping_keys(mapping: dict[str, Any], limit: int) -> list[str]:
+    return [str(key) for key in list(mapping.keys())[-limit:]]
+
+
+def _latest_mapping_items(mapping: dict[str, Any], limit: int) -> list[tuple[str, Any]]:
+    return [(str(key), value) for key, value in list(mapping.items())[-limit:]]
+
+
+def _compact_value_for_snapshot(value: Any, *, depth: int = 0) -> Any:
+    if depth > 3:
+        return _compact_text(str(value))
+    if isinstance(value, str):
+        return _compact_text(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_compact_value_for_snapshot(item, depth=depth + 1) for item in value[:SNAPSHOT_LIST_LIMIT]]
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, nested in list(value.items())[:SNAPSHOT_LIST_LIMIT]:
+            compact[str(key)] = _compact_value_for_snapshot(nested, depth=depth + 1)
+        omitted_keys = max(0, len(value) - SNAPSHOT_LIST_LIMIT)
+        if omitted_keys:
+            compact["_omitted_keys"] = omitted_keys
+        return compact
+    return _compact_text(str(sanitize_json_value(value)))
+
+
+def _compact_text(text: str) -> str:
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) <= SNAPSHOT_TEXT_LIMIT:
+        return cleaned
+    return cleaned[:SNAPSHOT_TEXT_LIMIT] + f"... <truncated {len(cleaned) - SNAPSHOT_TEXT_LIMIT} chars>"
+
+
+def _value_size(value: Any) -> int:
+    try:
+        import json
+
+        return len(json.dumps(sanitize_json_value(value), ensure_ascii=False, default=str))
+    except Exception:
+        return len(str(value))
+
+
+def _latest_transition_for_window(run: dict[str, Any], bridge_window_id: str) -> dict[str, Any]:
+    transitions = run.get("workflow_transitions")
+    if not isinstance(transitions, list):
+        return {}
+    for transition in reversed(transitions):
+        if isinstance(transition, dict) and str(transition.get("bridge_window_id") or "") == bridge_window_id:
+            return transition
+    return {}
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _elapsed_seconds(start: datetime | None, end: datetime) -> int | None:
+    if start is None:
+        return None
+    return max(0, int((end - start).total_seconds()))
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
+def _process_ref_looks_running(ref: Any) -> bool:
+    if not isinstance(ref, dict):
+        return False
+    status = str(ref.get("status") or ref.get("state") or "").strip().casefold()
+    if status in {"running", "started", "active", "polling", "unknown"}:
+        return True
+    if status in {"completed", "complete", "succeeded", "failed", "error", "exited", "terminated", "killed", "cancelled", "canceled"}:
+        return False
+    return bool(ref.get("pid") or ref.get("process_ref") or ref.get("process_id"))
+
+
+def _derive_integrity(run: dict[str, Any], runtime_diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
     approval = run.get("approval_state", {})
     hard_stop = run.get("hard_stop", {})
     alerts = []
@@ -1191,11 +1586,40 @@ def _derive_integrity(run: dict[str, Any]) -> dict[str, Any]:
                 "related_ids": {"bridge_window_id": bridge_window_id},
             }
         )
+    diagnostics = runtime_diagnostics if isinstance(runtime_diagnostics, dict) else {}
+    for anomaly in diagnostics.get("orchestration_anomalies", []) if isinstance(diagnostics.get("orchestration_anomalies"), list) else []:
+        if not isinstance(anomaly, dict):
+            continue
+        if anomaly.get("level") != "blocking":
+            continue
+        alerts.append(
+            {
+                "level": "blocking",
+                "category": anomaly.get("classification") or "bridge_orchestration_hang",
+                "message": anomaly.get("message") or "bridge orchestration anomaly detected",
+                "related_ids": {"bridge_window_id": anomaly.get("bridge_window_id")},
+                "recommended_action_or_null": anomaly.get("recommended_action_or_null"),
+            }
+        )
+    for alert in diagnostics.get("execute_watchdog_alerts", []) if isinstance(diagnostics.get("execute_watchdog_alerts"), list) else []:
+        if not isinstance(alert, dict):
+            continue
+        alerts.append(
+            {
+                "level": alert.get("level") or "warn",
+                "category": alert.get("classification") or "execute_watchdog",
+                "message": alert.get("message") or "execute watchdog alert detected",
+                "related_ids": {"bridge_window_id": alert.get("bridge_window_id")},
+                "recommended_action_or_null": alert.get("recommended_action_or_null"),
+            }
+        )
     return {
         "has_hard_stop": bool(hard_stop.get("active", False)),
         "awaiting_approval": bool(approval.get("pending", False)),
         "awaiting_user_answer": bool(awaiting_user_answer_ids),
         "awaiting_user_answer_bridge_window_ids": awaiting_user_answer_ids,
+        "has_blocking_orchestration_anomaly": bool(diagnostics.get("has_blocking_orchestration_anomaly", False)),
+        "has_execute_watchdog_alert": bool(diagnostics.get("has_execute_watchdog_alert", False)),
         "open_alerts": alerts,
     }
 
@@ -1333,6 +1757,7 @@ def _validate_packet_policy_fields(packet: dict[str, Any], snapshot: dict[str, A
     reasons: list[str] = []
     completion = packet.get("completion_contract") if isinstance(packet.get("completion_contract"), dict) else {}
     report = packet.get("report_contract") if isinstance(packet.get("report_contract"), dict) else {}
+    task_spec = packet.get("task_spec") if isinstance(packet.get("task_spec"), dict) else {}
     if "report" not in set(completion.get("required_outputs", [])):
         reasons.append("bridge_packet_completion_contract_not_policy_owned")
     if not isinstance(completion.get("timeout_policy"), dict) or completion.get("timeout_policy", {}).get("timeout_action") != "ask_main_leader":
@@ -1341,8 +1766,15 @@ def _validate_packet_policy_fields(packet: dict[str, Any], snapshot: dict[str, A
         reasons.append("bridge_packet_report_contract_not_policy_owned")
     if "runtime event ids" not in set(report.get("required_evidence", [])):
         reasons.append("bridge_packet_report_contract_not_policy_owned")
+    if "semantic_identity_resolution" not in set(report.get("required_sections", [])):
+        reasons.append("bridge_packet_report_contract_not_policy_owned")
+    if "semantic identity resolution" not in set(report.get("required_evidence", [])):
+        reasons.append("bridge_packet_report_contract_not_policy_owned")
     if report.get("include_failure_reason") is not True or report.get("include_next_action_recommendation") is not True:
         reasons.append("bridge_packet_report_contract_not_policy_owned")
+    semantic_contract = task_spec.get("semantic_resolution_contract")
+    if not isinstance(semantic_contract, dict) or not semantic_contract.get("required_identity_fields"):
+        reasons.append("bridge_packet_missing_semantic_resolution_contract")
     if packet.get("approval_requirements") not in (None, []):
         reasons.append("bridge_packet_approval_requirements_not_runtime_owned")
     if packet.get("expires_at") is not None:

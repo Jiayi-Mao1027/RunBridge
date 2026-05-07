@@ -120,6 +120,10 @@
     {
       "rule_id": "failure_events_are_authoritative",
       "description": "Denied, failed, partial, timeout, and orphaned lifecycle facts must be persisted instead of erased."
+    },
+    {
+      "rule_id": "orchestration_anomaly_preempts_waiting",
+      "description": "If runtime diagnostics classify an open bridge window as a bridge orchestration hang, main-leader should stop ordinary waiting and diagnose through snapshot refs before retrying or rerouting."
     }
   ],
   "completion_policy": {

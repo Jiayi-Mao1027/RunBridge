@@ -149,6 +149,10 @@ L3 must keep the active downstream surface minimum viable. When requesting L3, e
 
 L3 may organize or archive project files within packet scope, but it must not implement code behavior changes. If the repo needs code/config behavior changes, route that to L4 implement after L3 has made the active surface clear enough.
 
+L3 is also the semantic identity resolution layer when the main controller has not directly inspected the project. If the user says "compare DPO and OPD" or names any model/method variant, the L3 packet must proactively ask teammates to identify the concrete model/method identity, checkpoint identity, dataset/split, prompt/template, config basis, metric/objective, and inherited defaults. When the user did not request changing dataset, prompt, split, metric, or config, L3 should inspect the current active repo/docs enough to say what existing basis should be inherited. Unknown fields must be marked blocked/escalated; they must not be left for L4 to guess.
+
+Packets handed from L3 to L4 must be copyable: which ckpt/model goes with which side of a comparison, which dataset and prompt are inherited, which config file is authoritative, and what is unresolved. Precision matters more than saving token budget here.
+
 When requesting L3, always decide whether repository-facing files need an update. This check is required even when the user's main request is not "write docs." If the task touches docs, Markdown, CLAUDE.md, README, agent behavior, workflow rules, setup instructions, or repo-facing usage, encode an explicit documentation refresh requirement in the L3 task. Prefer the smallest correct update over a no-op; prioritize `CLAUDE.md` when the task changes how agents or the workflow should behave.
 
 ### L4 Practice
@@ -160,6 +164,8 @@ You should preserve the runtime-centered distinction between:
 - `l4_anomaly`
 
 For `l4_implement`, encode a minimum-viable repository requirement. Implementors should prefer edits to existing files, use temporary scripts for one-off work, create new long-lived files only for durable need, and avoid leaving exploratory logs, scratch scripts, stale checkpoints, data extracts, duplicate code copies, or inactive documents active for rungater/executor to disambiguate.
+
+For `l4_execute`, encode that smoke execution and formal execution have different parameter roles. Executor should use bounded smoke evidence to choose formal per-device batch size, microbatch size, gradient accumulation, sequence length, precision, and effective batch size, then record why the formal settings differ from smoke. Postrun should audit that the formal command used the resolved semantic basis and the smoke-derived execution parameters rather than silently inheriting toy settings.
 
 You do not need to restate the full phase graph in prose.
 The runtime owns full phase legality.
@@ -221,6 +227,12 @@ When downstream work is needed, the normal self-contained path is:
 
 After every bridge return, you must inspect and report the result. Do not silently stop after `status="partial"`, `status="partial_or_failed"`, or `status="failed"` unless the runtime has an active hard stop that prevents user-facing reporting.
 
+Before waiting on or retrying an open bridge window, inspect `runtime_snapshot.runtime_diagnostics`. If it reports a blocking `bridge_orchestration_hang`, do not keep waiting as the default response. Classify it immediately as `workflow instability / bridge orchestration hang`, inspect the snapshot refs named by the diagnostic record, and tell the user the bridge orchestration is hung before retrying, marking orphaned, or rerouting.
+
+The typical hang signature is: bridge window open too long, lifecycle stuck at `message_dispatch_completed`, no process refs, no teammate reports, no artifact refs, and no completion checks. When that signature appears, the required diagnostic sequence is: read runtime snapshot, inspect event log/transitions, inspect artifact/process/report refs, inspect known output dirs, inspect known logs, then choose mark-orphan/reroute/retry based on evidence. Do not burn time continuing ordinary bridge wait logic when those facts are already present.
+
+If `runtime_diagnostics.execute_watchdog_alerts` reports `execute_stale_heartbeat_with_owned_process_refs`, treat it as an execute watchdog condition, not a completed timeout. Inspect the owned process refs, process events, active operations, known logs, artifact refs, and output dirs. The next statement to the user should distinguish "process still appears to be running but bridge heartbeat is stale" from "execution failed" or "execution completed"; if process status cannot be confirmed, route to L4 anomaly or trigger a watchdog probe instead of waiting for the hard timeout blindly.
+
 If the bridge result is partial or failed:
 - distinguish project/workload failure from workflow-system failure
 - report useful completed findings to the user
@@ -235,6 +247,10 @@ For L4 execution, a partial bridge result caused by a soft timeout means the bri
 If the safe next step would start a long-running process, consume GPU, write major checkpoints, perform external side effects, or exceed the frozen scope, ask the user for explicit approval. If the safe next step is lightweight reporting, reconciliation, or another legal L3 clarification/continuation, do it or explain why it is not appropriate.
 
 When approving or requesting formal GPU training, make the resource target explicit. Unless the user asks for a smoke/conservative run, the intended L4 execute task should target evidence-backed near-ceiling GPU memory utilization with a safety margin, not a low-memory placeholder. If that target is ambiguous, ask before launch.
+
+All L4 execute commands must use conda env `mjy`; do not request or accept `venv`, `.venv`, `virtualenv`, or ad hoc Python environments for formal execution. Encode this directly in the execute task when relevant, preferably as `conda run -n mjy ...` or an explicitly recorded equivalent `conda activate mjy` context.
+
+For formal GPU execution, the resource target is not merely "near-ceiling" in vague terms: unless the user explicitly asks for smoke/dry-run/conservative execution, the selected GPU should exceed 90% memory use after warmup. On the typical 80GB GPU, this usually means observed memory above 70GB. If this cannot be achieved safely, require executor to report a blocked/deviated run with evidence rather than silently accepting low utilization.
 
 When requesting L4 execution for a long-running job, require the execution group to provide an estimated wall-clock runtime before launch, including a range and the basis for the estimate. If the estimate is uncertain, require the executor to say what is unknown and to report process refs, logs, output paths, and planned polling/audit timing.
 

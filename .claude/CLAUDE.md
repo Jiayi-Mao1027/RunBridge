@@ -132,11 +132,15 @@ One bridge window binds exactly one team and one task. The task may have multipl
 
 The task spec must preserve the full user-facing intent, not only a shortened description. Complex instructions should be carried as `original_user_instruction`, `instruction_coverage_checklist`, and preserved context fields. Downstream assignments must require every checklist item to be completed, explicitly deferred with a concrete reason, or escalated; reports must include the same coverage disposition. This prevents main-leader from executing only the first or easiest half of a compound request.
 
+The task spec must also carry a `semantic_resolution_contract`. L3 must actively resolve model/method, checkpoint, dataset/split, prompt/template, config, metric/objective, and inherited-default identities before L4 inherits the task. If the user did not ask to change dataset, prompt, split, metric, or config, the downstream packet should preserve the current active basis and name the evidence for that inheritance. L4 implement and execute must not silently guess or swap unresolved semantic identities.
+
 L3 bridge packets must make repository-facing documentation freshness explicit. When a task touches docs, Markdown, `CLAUDE.md`, README, setup/usage instructions, agent behavior, or workflow rules, the L3 task should require the team to inspect whether docs need updating and to make the smallest correct update inside writable scope. `CLAUDE.md` is a first-class L3 documentation target when workflow or agent behavior changes.
 
 L3 also owns minimum-viable active-surface curation. Before preflight or implementation proceeds, curator should establish what the current step is, what prior work is already completed, and which files/artifacts are genuinely required by the next phase. Stale, duplicate, ambiguous, or non-current logs, datasets, checkpoints, generated outputs, stale code copies, scratch scripts, and misleading inactive documents should be archived out of active reach by default. Physical deletion is exceptional and should be limited to clearly regenerable trash, empty duplicates, or explicitly approved removals. L3 may archive or organize project files, but code/config behavior changes belong to L4 implement.
 
 L4 implement must preserve the same minimum-viable project surface while changing code. Implementors should prefer modifying existing files, use temporary scripts for one-off work, create new long-lived files only when there is a durable need, and clear or archive implementation byproducts before rungater/executor inherit the repo.
+
+L4 execute treats smoke parameters and formal parameters as different decisions. Executor should run bounded smoke checks to choose formal per-device batch size, microbatch, gradient accumulation, precision, sequence length, and effective batch size. Postrun audits that the formal command used the resolved semantic basis and smoke-derived parameter evidence.
 
 ## 6. Lifecycle
 
@@ -170,19 +174,27 @@ Failure/recovery facts are first-class:
 
 Absence of a matching end event is meaningful and may become an orphan condition.
 
+Open-window orchestration anomalies are first-class routing facts. If a bridge window stays open past the anomaly threshold while stuck in an early lifecycle state, especially `message_dispatch_completed`, and there are no process refs, teammate reports, artifact refs, or completion checks, main-leader should stop ordinary waiting and classify it as `workflow instability / bridge orchestration hang`. The next response is diagnostic: inspect `runtime_snapshot.runtime_diagnostics`, event log/transitions, process/report/artifact refs, known output dirs, and known logs before retrying, marking orphaned, or rerouting to anomaly work.
+
+Execute watchdog alerts are first-class warning facts. If a bridge window is in `team_waiting` with owned process refs that still look running but `last_heartbeat_at` is stale, `runtime_diagnostics.execute_watchdog_alerts` reports `execute_stale_heartbeat_with_owned_process_refs`. This is not proof of failure or completion; main-leader should inspect process refs, process events, active operations, logs, artifact refs, and known output dirs before deciding whether to poll, keep waiting, reroute to anomaly, or classify process loss.
+
 ## 7. Snapshot And Notify
 
 `RuntimeSnapshot` contains:
 
+- compact snapshot policy and refs to full ledgers/observer streams
 - frozen semantic/scope state
 - route state
 - lifecycle status index
-- bridge/team/task/tool bindings
+- compact bridge/team/task/tool binding summaries
 - allowed actions
 - allowed routes
 - integrity alerts
-- last bridge result
+- compact runtime diagnostics, including bridge orchestration hang candidates
+- compact last bridge result summary
 - phase exit readiness
+
+`RuntimeSnapshot` is intentionally a compact control view, not a transcript, report store, or evidence bundle. It should preserve enough information for main-leader routing and recovery without pulling long reports, full evidence, complete tool streams, or historical binding maps into context. Full details remain in `run_ledger.json`, `event_log.jsonl`, `transitions.jsonl`, `main_leader_inbox.jsonl`, and observer JSONL files referenced by `snapshot_refs`.
 
 `NotifyResult` writes items to the main-leader inbox. Blocking/error/warn/info messages are derived from check results, update results, integrity state, bridge results, TeamIdle, timeout, cleanup, and orphan events.
 
@@ -203,6 +215,8 @@ Long-running work is represented with `TeamIdle` events and payloads such as:
 For long-running execution work, especially L4 execution/training, the execution group must estimate expected wall-clock runtime before launch and include the estimate basis in the execution record. A bridge soft timeout or partial result means the bridge window stopped waiting and returned intermediate state; it does not by itself prove the owned process was killed, failed, or completed.
 
 For L4 execute, the intended contract is stronger: if the executor launches an owned long-running process, the bridge window must remain open until the process reaches a terminal state and postrun has audited terminal logs/artifacts. `TeamIdle` is waiting/progress evidence, not permission to delete the team or return a partial bridge result while the owned process is still running. The execute timeout policy is sized for long training runs and should not use the short 900 second bridge-window default.
+
+L4 execute environment and GPU policy are strict. Formal execution commands must run under conda env `mjy`, preferably via `conda run -n mjy ...` or an explicitly recorded equivalent `conda activate mjy` shell context. Do not use `venv`, `.venv`, `virtualenv`, or ad hoc Python environments for formal execute. For formal GPU training or throughput-sensitive runs, unless the user explicitly requested smoke/dry-run/conservative execution, executor must configure the run to exceed 90% of selected GPU total memory after warmup; on typical 80GB GPUs this usually means observed usage above 70GB. Lower formal-run utilization requires explicit conservative approval or hard blocking evidence and must be surfaced as a deviation, not treated as success.
 
 ## 9. Companion Observability
 

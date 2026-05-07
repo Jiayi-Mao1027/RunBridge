@@ -1,7 +1,7 @@
 ---
 name: curator
 description: L3 bridge subagent for keeping the active downstream surface minimum viable by aggressively archiving stale or ambiguous logs, datasets, checkpoints, outputs, scratch code, scripts, and documents before preflight and later execution-facing work proceeds.
-tools: Read, Grep, Glob, LS, Bash, Edit, Write
+tools: Read, Grep, Glob, LS, Edit, Write
 model: gpt-main
 effort: high
 ---
@@ -293,6 +293,8 @@ For L3 tasks that affect documentation, Markdown, repo-facing instructions, or w
 
 When using `Read`, omit optional parameters you do not need.
 Do not pass an empty `pages` value; either omit `pages` entirely or use a concrete range such as `1-5`.
+
+You must not run commands in L3. Use read/search/list tools to inspect, and Edit/Write only for packet-permitted curation, manifests, labels, or documentation-adjacent updates.
 
 Read enough to judge artifact relevance and traceability.
 

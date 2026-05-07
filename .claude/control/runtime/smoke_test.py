@@ -20,6 +20,17 @@ from workflow_runtime import dispatch_workflow_event
 from workflow_runtime import reconcile_workflow_from_ledger
 
 
+SEMANTIC_REQUIRED_FIELDS = [
+    "model_or_method_identity",
+    "checkpoint_identity",
+    "dataset_identity",
+    "prompt_or_template_identity",
+    "code_config_basis",
+    "metric_or_objective_identity",
+    "inherited_defaults",
+]
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -108,6 +119,11 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
             "task_description": "smoke task",
             "task_kind": "bridge_window_smoke",
             "target_phase": "l4_execute",
+            "semantic_resolution_contract": {
+                "required_identity_fields": SEMANTIC_REQUIRED_FIELDS,
+                "resolution_policy": ["inherit current active basis unless the user explicitly changed it"],
+                "report_disposition_values": ["resolved", "inherited", "unknown", "blocked", "escalated", "not_applicable"],
+            },
             "completion_contract": {
                 "required_outputs": ["report"],
                 "required_artifacts": ["artifact"],
@@ -122,8 +138,8 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
                 },
             },
             "report_contract": {
-                "required_sections": ["summary", "evidence"],
-                "required_evidence": ["runtime event ids", "artifact"],
+                "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution"],
+                "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution"],
                 "artifact_reporting_format": "list",
                 "include_failure_reason": True,
                 "include_next_action_recommendation": True,
@@ -148,8 +164,8 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
             },
         },
         "report_contract": {
-            "required_sections": ["summary", "evidence"],
-            "required_evidence": ["runtime event ids", "artifact"],
+            "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution"],
+            "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution"],
             "artifact_reporting_format": "list",
             "include_failure_reason": True,
             "include_next_action_recommendation": True,
@@ -176,7 +192,7 @@ def event(kind: str, bridge_window_id: str, sub_session_id: str, **kwargs: objec
         "tool_name": kwargs.pop("tool_name", None),
         "tool_use_id": kwargs.pop("tool_use_id", None),
         "event_kind": kind,
-        "timestamp": _now(),
+        "timestamp": kwargs.pop("timestamp", _now()),
         "payload": payload,
     }
 
@@ -249,6 +265,125 @@ def run_orphan(control_root: Path, runs_root: Path) -> dict:
     dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_orphan", payload={"packet": p}))
     dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_orphan", payload={"packet": p}))
     return dispatch(control_root, runs_root, event("orphan_timeout_without_bridge_return", bw, ss, agent_type="runtime", agent_id="orphan_scanner", payload={"last_known_event_ref": "call_bridge_sdk_started"}))
+
+
+def run_stuck_dispatch_anomaly(control_root: Path, runs_root: Path) -> dict:
+    bw = "bw_stuck_dispatch"
+    ss = "sub_stuck_dispatch"
+    p = packet(bw, ss)
+    old_timestamp = "2020-01-01T00:00:00+00:00"
+    dispatch(control_root, runs_root, event("bridge_call_intended", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_stuck_dispatch", payload={"packet": p}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_stuck_dispatch", payload={"packet": p}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_stuck_dispatch", payload={"packet": p}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("bridge_window_opened", bw, ss, agent_type="bridge-leader", payload={"packet": p}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("bridge_packet_accepted", bw, ss, payload={"packet": p}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("team_create_started", bw, ss, team_id="team_stuck_dispatch", tool_name="team_create", timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("team_create_succeeded", bw, ss, team_id="team_stuck_dispatch", tool_name="team_create", payload={"team_name": "team_stuck_dispatch", "teammate_ids": ["mate_1"]}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("task_create_started", bw, ss, team_id="team_stuck_dispatch", task_id="task_stuck_dispatch", tool_name="task_create", timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("task_create_succeeded", bw, ss, team_id="team_stuck_dispatch", task_id="task_stuck_dispatch", tool_name="task_create", timestamp=old_timestamp))
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "taskcreated_hook_accepted",
+            bw,
+            ss,
+            team_id="team_stuck_dispatch",
+            task_id="task_stuck_dispatch",
+            agent_type="hook",
+            agent_id="hook.task_created",
+            payload={
+                "task_subject": "task_bw_stuck_dispatch",
+                "task_description": "smoke task created",
+                "task_spec": p["task_spec"],
+                "team_spec": p["team_spec"],
+                "task_team_mapping": p["task_team_mapping"],
+                "teammate_ids": ["mate_1"],
+            },
+            timestamp=old_timestamp,
+        ),
+    )
+    dispatch(control_root, runs_root, event("message_dispatch_started", bw, ss, team_id="team_stuck_dispatch", task_id="task_stuck_dispatch", tool_name="send_messages", timestamp=old_timestamp))
+    snapshot = dispatch(control_root, runs_root, event("message_dispatch_succeeded", bw, ss, team_id="team_stuck_dispatch", task_id="task_stuck_dispatch", tool_name="send_messages", timestamp=old_timestamp))
+    diagnostics = snapshot.get("runtime_diagnostics", {})
+    anomalies = diagnostics.get("orchestration_anomalies", [])
+    if not anomalies:
+        raise AssertionError(json.dumps(snapshot, ensure_ascii=False, indent=2))
+    anomaly = anomalies[0]
+    required_conditions = {"bridge_window_open_too_long", "status_stuck_at_message_dispatch_completed", "no_process_refs", "no_reports", "no_artifacts"}
+    if anomaly.get("classification") != "bridge_orchestration_hang" or not required_conditions.issubset(set(anomaly.get("conditions", []))):
+        raise AssertionError(json.dumps(anomaly, ensure_ascii=False, indent=2))
+    if not snapshot.get("integrity", {}).get("has_blocking_orchestration_anomaly"):
+        raise AssertionError(json.dumps(snapshot.get("integrity", {}), ensure_ascii=False, indent=2))
+    return snapshot
+
+
+def run_execute_watchdog_alert(control_root: Path, runs_root: Path) -> dict:
+    bw = "bw_execute_watchdog"
+    ss = "sub_execute_watchdog"
+    p = packet(bw, ss)
+    old_timestamp = "2020-01-01T00:00:00+00:00"
+    dispatch(control_root, runs_root, event("bridge_call_intended", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_execute_watchdog", payload={"packet": p}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_execute_watchdog", payload={"packet": p}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_execute_watchdog", payload={"packet": p}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("bridge_window_opened", bw, ss, agent_type="bridge-leader", payload={"packet": p}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("bridge_packet_accepted", bw, ss, payload={"packet": p}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("team_create_started", bw, ss, team_id="team_execute_watchdog", tool_name="team_create", timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("team_create_succeeded", bw, ss, team_id="team_execute_watchdog", tool_name="team_create", payload={"team_name": "team_execute_watchdog", "teammate_ids": ["mate_1"]}, timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("task_create_started", bw, ss, team_id="team_execute_watchdog", task_id="task_execute_watchdog", tool_name="task_create", timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("task_create_succeeded", bw, ss, team_id="team_execute_watchdog", task_id="task_execute_watchdog", tool_name="task_create", timestamp=old_timestamp))
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "taskcreated_hook_accepted",
+            bw,
+            ss,
+            team_id="team_execute_watchdog",
+            task_id="task_execute_watchdog",
+            agent_type="hook",
+            agent_id="hook.task_created",
+            payload={
+                "task_subject": "task_bw_execute_watchdog",
+                "task_description": "smoke task created",
+                "task_spec": p["task_spec"],
+                "team_spec": p["team_spec"],
+                "task_team_mapping": p["task_team_mapping"],
+                "teammate_ids": ["mate_1"],
+            },
+            timestamp=old_timestamp,
+        ),
+    )
+    dispatch(control_root, runs_root, event("message_dispatch_started", bw, ss, team_id="team_execute_watchdog", task_id="task_execute_watchdog", tool_name="send_messages", timestamp=old_timestamp))
+    dispatch(control_root, runs_root, event("message_dispatch_succeeded", bw, ss, team_id="team_execute_watchdog", task_id="task_execute_watchdog", tool_name="send_messages", timestamp=old_timestamp))
+    snapshot = dispatch(
+        control_root,
+        runs_root,
+        event(
+            "team_idle_waiting",
+            bw,
+            ss,
+            team_id="team_execute_watchdog",
+            task_id="task_execute_watchdog",
+            agent_type="hook",
+            agent_id="hook.team_idle",
+            payload={
+                "wait_reason": "process_running",
+                "owned_process_refs": [{"process_ref": "proc_demo", "pid": 1234, "status": "running", "log_path": "logs/train.log"}],
+                "last_heartbeat_at": old_timestamp,
+                "timeout_policy": {"heartbeat_interval_seconds": 60, "soft_timeout_seconds": 21600, "hard_timeout_seconds": 86400},
+            },
+            timestamp=old_timestamp,
+        ),
+    )
+    alerts = snapshot.get("runtime_diagnostics", {}).get("execute_watchdog_alerts", [])
+    if not alerts:
+        raise AssertionError(json.dumps(snapshot, ensure_ascii=False, indent=2))
+    if alerts[0].get("classification") != "execute_stale_heartbeat_with_owned_process_refs":
+        raise AssertionError(json.dumps(alerts[0], ensure_ascii=False, indent=2))
+    if not snapshot.get("integrity", {}).get("has_execute_watchdog_alert"):
+        raise AssertionError(json.dumps(snapshot.get("integrity", {}), ensure_ascii=False, indent=2))
+    return snapshot
 
 
 def run_user_clarification_resume(control_root: Path, runs_root: Path) -> dict:
@@ -548,6 +683,15 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         "bridge_packet_completion_contract_not_policy_owned",
     )
 
+    missing_semantic_contract = packet("bw_missing_semantic_contract", "sub_missing_semantic_contract")
+    missing_semantic_contract["task_spec"].pop("semantic_resolution_contract", None)
+    assert_denied(
+        control_root,
+        runs_root,
+        event("bridge_call_intended", "bw_missing_semantic_contract", "sub_missing_semantic_contract", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_missing_semantic_contract", payload={"packet": missing_semantic_contract}),
+        "bridge_packet_missing_semantic_resolution_contract",
+    )
+
     caller_approval = packet("bw_caller_approval", "sub_caller_approval")
     caller_approval["approval_requirements"] = [{"reason": "caller supplied approval policy"}]
     assert_denied(
@@ -597,6 +741,13 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
     if "instruction coverage disposition" not in set(hardened_l3["report_contract"].get("required_evidence", [])):
         raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
+    if "semantic_identity_resolution" not in set(hardened_l3["report_contract"].get("required_sections", [])):
+        raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
+    if "semantic identity resolution" not in set(hardened_l3["report_contract"].get("required_evidence", [])):
+        raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
+    semantic_fields = set(l3_task.get("semantic_resolution_contract", {}).get("required_identity_fields", []))
+    if not {"checkpoint_identity", "dataset_identity", "prompt_or_template_identity"}.issubset(semantic_fields):
+        raise AssertionError(json.dumps(l3_task.get("semantic_resolution_contract"), ensure_ascii=False, indent=2))
     l3_boundary = hardened_l3["team_spec"]["ownership_boundary"]
     if set(l3_boundary.get("writable_scopes", [])) != {"."}:
         raise AssertionError(json.dumps(l3_boundary, ensure_ascii=False, indent=2))
@@ -612,9 +763,15 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         "CLAUDE.md" not in l3_assignments
         or "smallest correct documentation update" not in l3_assignments
         or "Archive-first curation rule" not in l3_assignments
+        or "L3 no-run-tools rule" not in l3_assignments
         or "Active surface policy" not in l3_assignments
         or "active code, log, checkpoint, data, document, and script surfaces minimum viable" not in l3_assignments
         or "Instruction coverage checklist" not in l3_assignments
+        or "Semantic resolution contract" not in l3_assignments
+        or "checkpoint" not in l3_assignments
+        or "dataset" not in l3_assignments
+        or "prompt" not in l3_assignments
+        or "inherit the current active dataset/prompt/config basis" not in l3_assignments
         or "do not mark the task complete until every checklist item is completed" not in l3_assignments
         or "extra context must survive normalization" not in l3_assignments
     ):
@@ -625,6 +782,8 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         for tool in teammate.get("allowed_tools", [])
     }
     if "Write" not in set(hardened_l3.get("allowed_tools", [])) or "Write" not in l3_team_tools:
+        raise AssertionError(json.dumps(hardened_l3["team_spec"], ensure_ascii=False, indent=2))
+    if "Bash" in set(hardened_l3.get("allowed_tools", [])) or "Bash" in l3_team_tools:
         raise AssertionError(json.dumps(hardened_l3["team_spec"], ensure_ascii=False, indent=2))
     hardened_l3_bw = hardened_l3["binding"]["bridge_window_id"]
     hardened_l3_sub = hardened_l3["binding"]["sub_session_id"]
@@ -725,7 +884,7 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         for item in hardened_implement.get("task_team_mapping", {}).get("teammate_assignments", [])
         if isinstance(item, dict)
     )
-    if "Minimum-viable repository rule" not in implement_assignments or "Gate the repository surface" not in implement_assignments:
+    if "Minimum-viable repository rule" not in implement_assignments or "Gate the repository surface" not in implement_assignments or "do not silently swap checkpoint, dataset, prompt" not in implement_assignments:
         raise AssertionError(json.dumps(hardened_implement.get("task_team_mapping"), ensure_ascii=False, indent=2))
     hardened_bw = hardened_implement["binding"]["bridge_window_id"]
     hardened_sub = hardened_implement["binding"]["sub_session_id"]
@@ -779,10 +938,23 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         for item in execute_packet.get("task_team_mapping", {}).get("teammate_assignments", [])
         if isinstance(item, dict)
     )
-    if "estimate expected wall-clock runtime" not in execute_assignments or "Do not return a final or partial bridge report while an owned process is still running" not in execute_assignments:
+    if (
+        "estimate expected wall-clock runtime" not in execute_assignments
+        or "Do not return a final or partial bridge report while an owned process is still running" not in execute_assignments
+        or "Smoke-shape rule" not in execute_assignments
+        or "effective batch size" not in execute_assignments
+    ):
         raise AssertionError(json.dumps(execute_packet.get("task_team_mapping"), ensure_ascii=False, indent=2))
     execute_assignments = json.dumps(execute_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
-    if "near-ceiling accelerator memory utilization" not in execute_assignments or "resource utilization" not in execute_assignments:
+    if (
+        "conda environment named mjy" not in execute_assignments
+        or "Do not create or use venv" not in execute_assignments
+        or "exceed 90% of the selected GPU's total memory" not in execute_assignments
+        or "above 70GB" not in execute_assignments
+        or "GPU memory audit rule" not in execute_assignments
+        or "Environment audit rule" not in execute_assignments
+        or "Semantic audit rule" not in execute_assignments
+    ):
         raise AssertionError(execute_assignments)
 
     bad_implement = packet("bw_bad_implement", "sub_bad_implement")
@@ -995,6 +1167,10 @@ def main() -> None:
         orphan = run_orphan(control_root, runs_root)
         mcp_helper = run_mcp_lifecycle_helper(control_root, runs_root)
         sdk = run_sdk_roundtrip(control_root, runs_root)
+        anomaly_control_root, anomaly_runs_root = build_fixture(runtime_dir / "anomaly")
+        stuck_dispatch = run_stuck_dispatch_anomaly(anomaly_control_root, anomaly_runs_root)
+        watchdog_control_root, watchdog_runs_root = build_fixture(runtime_dir / "watchdog")
+        execute_watchdog = run_execute_watchdog_alert(watchdog_control_root, watchdog_runs_root)
         negative_control_root, negative_runs_root = build_fixture(runtime_dir / "negative")
         negative = run_negative_tests(negative_control_root, negative_runs_root)
         cli_executor = run_cli_executor_policy_tests(runtime_dir)
@@ -1007,6 +1183,8 @@ def main() -> None:
             "user_clarification_allowed_actions": user_clarification["allowed_actions"],
             "l3_allowed_routes": user_clarification["allowed_routes"],
             "mcp_helper_status": mcp_helper["lifecycle"]["status_index"]["bw_mcp_helper"],
+            "stuck_dispatch_anomaly": stuck_dispatch["runtime_diagnostics"]["orchestration_anomalies"][0]["classification"],
+            "execute_watchdog_alert": execute_watchdog["runtime_diagnostics"]["execute_watchdog_alerts"][0]["classification"],
             "sdk_status": sdk["bridge_result_status"],
             "sdk_replay_status": sdk["replay_status"],
             "sdk_failed_status": sdk["failed_status"],
@@ -1027,6 +1205,8 @@ def main() -> None:
         assert "call_bridge_sdk" in summary["user_clarification_allowed_actions"]
         assert "l3_bridge" in summary["l3_allowed_routes"] and "leader_freeze" in summary["l3_allowed_routes"]
         assert summary["mcp_helper_status"] == "bridge_window_orphaned"
+        assert summary["stuck_dispatch_anomaly"] == "bridge_orchestration_hang"
+        assert summary["execute_watchdog_alert"] == "execute_stale_heartbeat_with_owned_process_refs"
         assert summary["sdk_status"] == "succeeded"
         assert summary["sdk_replay_status"] == "bridge_window_returned"
         assert summary["sdk_failed_status"] == "bridge_window_failed"

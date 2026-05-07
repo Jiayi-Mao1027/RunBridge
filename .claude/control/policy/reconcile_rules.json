@@ -20,6 +20,9 @@
     "main_leader_inbox.jsonl"
   ],
   "snapshot_fields": [
+    "snapshot_detail_level",
+    "snapshot_policy",
+    "snapshot_refs",
     "semantic",
     "scope",
     "route",
@@ -28,6 +31,7 @@
     "allowed_actions",
     "allowed_routes",
     "integrity",
+    "runtime_diagnostics",
     "last_bridge_result",
     "phase_exit_readiness"
   ],
@@ -55,6 +59,18 @@
     {
       "rule_id": "derive_notify_items",
       "description": "Notify items are emitted from check denials, update rejections, integrity state, bridge result status, timeout, partial, and orphan events."
+    },
+    {
+      "rule_id": "derive_compact_snapshot_refs",
+      "description": "RuntimeSnapshot is a compact control view. Large reports, evidence, tool details, and historical bindings stay in ledgers or observer JSONL and are exposed through snapshot refs and counts."
+    },
+    {
+      "rule_id": "derive_orchestration_anomaly_diagnostics",
+      "description": "Open bridge windows stuck too long in early lifecycle states with no process refs, reports, artifacts, or completion checks are surfaced as workflow_instability / bridge_orchestration_hang diagnostics."
+    },
+    {
+      "rule_id": "derive_execute_watchdog_diagnostics",
+      "description": "Open execute bridge windows in team_waiting with owned process refs and stale heartbeat are surfaced as execute_stale_heartbeat_with_owned_process_refs watchdog diagnostics so leaders inspect process/log/artifact state before hard-timeout conclusions."
     }
   ],
   "invariants": [

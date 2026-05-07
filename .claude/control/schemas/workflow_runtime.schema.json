@@ -120,6 +120,9 @@
       "properties": {
         "run_id": {"type": "string"},
         "main_session_id": {"type": "string"},
+        "snapshot_detail_level": {"type": "string"},
+        "snapshot_policy": {"type": "object"},
+        "snapshot_refs": {"type": "object"},
         "current_phase": {"type": "string"},
         "semantic": {"type": "object"},
         "scope": {"type": "object"},
@@ -129,6 +132,7 @@
         "allowed_actions": {"type": "array", "items": {"type": "string"}},
         "allowed_routes": {"type": "array", "items": {"type": "string"}},
         "integrity": {"type": "object"},
+        "runtime_diagnostics": {"type": "object"},
         "last_bridge_result": {"type": ["object", "null"]},
         "phase_exit_readiness": {"type": "object"}
       }

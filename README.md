@@ -89,9 +89,15 @@ L3 packets have a documentation responsibility. When the work touches docs, Mark
 
 L3 packets also carry a minimum-active-surface responsibility. Curator should first understand the current step, what prior work has already completed, and what the next phase actually needs; then it should archive stale, duplicate, ambiguous, or non-current logs, datasets, checkpoints, generated outputs, stale code copies, scratch scripts, and misleading inactive documents out of active reach. Archive is the default for material with possible audit value. Physical deletion is reserved for clearly disposable material or explicit approval.
 
+L3 packets carry a semantic-resolution responsibility as well. When model/method names, checkpoints, datasets, prompts, configs, metrics, or comparisons are involved, L3 must resolve the concrete identities or explicitly mark them blocked/escalated. If the user did not request changing dataset, prompt, split, metric, or config, the packet should preserve the current active basis and name where that basis came from, so L4 does not guess.
+
 L4 implement inherits that hygiene requirement. Implementors should modify existing files when practical, use temporary scripts for one-off work, create long-lived files only for durable need, and avoid handing rungater/executor an active surface cluttered with exploratory logs, scratch scripts, stale checkpoints, duplicate code copies, or stale data.
 
 L4 execute is intentionally different from short implementation or review windows. It may own long-running training or evaluation jobs. For L4 execute, `TeamIdle` means the team is waiting or polling; it is not completion and is not a reason to delete the team. If executor launches an owned long-running process, the bridge window should remain open until the process reaches a terminal state and postrun has audited terminal logs/artifacts.
+
+L4 execute also treats smoke parameters as evidence, not as the final run shape. Executor should run bounded smoke checks to choose formal per-device batch size, microbatch, gradient accumulation, precision, sequence length, and effective batch size, and postrun should audit that formal settings follow that evidence.
+
+L4 execute has strict environment and GPU rules. Formal execution uses conda env `mjy`; use `conda run -n mjy ...` or record an equivalent `conda activate mjy` context, and do not use venv/virtualenv for formal execute. Unless the user explicitly requests smoke/dry-run/conservative execution, formal GPU runs must exceed 90% of selected GPU total memory after warmup. For typical 80GB GPUs, that usually means observed usage above 70GB; lower usage is a deviation or blocker unless backed by explicit approval or hard resource evidence.
 
 The phase is not just a final label. It is a runtime trace of important action intent, action start, action end, denial, failure, partial completion, and orphaning. This allows later audit to distinguish "never attempted" from "attempted and failed" from "started but never returned".
 
@@ -116,6 +122,8 @@ The bridge leader must stay inside the packet. The packet defines what can be re
 
 Task specs preserve compound user intent instead of reducing it to one short description. The packet includes the original instruction, an `instruction_coverage_checklist`, and preserved context fields. Teammate assignments must report whether each checklist item was completed, deferred with a concrete reason, blocked, or escalated. This prevents a multi-part user request from being half-executed and then treated as complete.
 
+Task specs also include `semantic_resolution_contract`. Runtime packet validation requires the report contract to include semantic identity resolution evidence, so downstream packets cannot silently drop checkpoint/dataset/prompt/config identity work.
+
 ## Runtime And Ledgers
 
 Runtime state is stored under the parent `.claude` tree:
@@ -129,12 +137,32 @@ The repo key is derived from the target repo path, so multiple sibling repos can
 Per run, the runtime writes:
 
 - `run_ledger.json`: authoritative mutable run state
-- `runtime_snapshot.json`: current truth for leaders and tools
+- `runtime_snapshot.json`: compact routing and recovery truth for leaders and tools
 - `event_log.jsonl`: raw workflow events
 - `check_ledger.jsonl`: check decisions and reasons
 - `update_ledger.jsonl`: persisted update results
 - `transitions.jsonl`: lifecycle transition facts
 - `main_leader_inbox.jsonl`: notifications for the main leader
+
+`runtime_snapshot.json` is intentionally compact. It is a routing and recovery view for the main leader, not a place for full reports, tool logs, full evidence, or complete historical bindings. Large details remain in ledgers and observer streams, and the snapshot carries `snapshot_refs`, counts, and short previews so the leader can open details only when needed.
+
+The snapshot also carries compact runtime diagnostics. A bridge window that is open too long, stuck after message dispatch, and has no process refs, reports, artifacts, or completion checks is classified as `workflow instability / bridge orchestration hang`. The correct leader behavior is to stop ordinary waiting, inspect the diagnostic refs, state the orchestration hang to the user, then mark orphaned, reroute, or retry from evidence.
+
+Diagnostics also include execute watchdog warnings. A bridge window in `team_waiting` with owned process refs and a stale heartbeat is classified as `execute_stale_heartbeat_with_owned_process_refs`; this means the leader should inspect process refs, process events, active operations, logs, artifact refs, and output dirs instead of waiting for the hard timeout blindly.
+
+### Runtime Snapshot Size Discipline
+
+The snapshot is read frequently and can enter model context. Treat it as a control-plane index, not as an evidence warehouse. It should answer only the next routing questions: what run/window is active, what phase is legal, what lifecycle facts matter, what approval or hard stop exists, what teammate/session bindings are current enough to route, and where the full details live.
+
+Keep large or historical material out of `runtime_snapshot.json`:
+
+- Do not store full bridge reports, complete teammate transcripts, complete tool outputs, full diffs, large stdout/stderr, full prompts, full artifact manifests, or all historical session bindings.
+- Store counts, latest/open items, stable IDs, short safe previews, and `snapshot_refs` pointing to authoritative files.
+- Keep `last_bridge_result` as a compact result index: report/artifact counts, status/checklist summaries, bounded previews, and refs to the full bridge result or observer streams.
+- Keep `bindings` as current attribution, not history: active/open bridge windows, recent session bindings, recent tool-use IDs, and omitted-count metadata.
+- Preserve `semantic` and `scope` carefully because packet validation depends on frozen equality. If those fields become too large, change validation to hash/ref semantics first; do not ad hoc truncate them.
+
+Main leader behavior should follow the same rule: read the snapshot first, then follow `snapshot_refs` only for the specific evidence needed to make the next decision.
 
 The runtime also writes read-only Bridge Companion observer streams. These are not authoritative workflow state; they are structured side-channel facts for UI/debug display:
 

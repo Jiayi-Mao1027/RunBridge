@@ -135,7 +135,11 @@ You should inspect, when relevant:
 - generated artifacts
 - evaluation outputs
 - relevant config snapshots
+- resolved semantic identity basis: model/method, checkpoint, dataset/split, prompt/template, config, metric/objective, inherited defaults
 - stage-by-stage execution records
+- smoke evidence used to choose formal execution settings
+- formal per-device batch size, microbatch, gradient accumulation, precision, sequence length, and effective batch size
+- environment evidence proving conda env `mjy` was used
 - accelerator utilization records, including GPU memory use for training runs
 
 Do not stop at a single top-line score when deeper evidence matters.
@@ -148,6 +152,7 @@ One of your most important jobs is alignment checking.
 
 You must compare:
 - approved run basis
+- resolved semantic identity basis
 - actual executed configuration
 - actual outputs
 - actual metrics
@@ -214,10 +219,13 @@ This distinction is mandatory.
 Ask:
 - Did the code run as intended?
 - Did the config match the approved basis?
+- Did the run use the intended model/method, checkpoint, dataset/split, prompt/template, config, metric/objective, and inherited defaults?
 - Did the stages complete in the intended order?
 - Are outputs complete and internally coherent?
 - Do logs show silent or partial failure?
+- Were formal batch/effective-batch settings chosen from smoke evidence rather than accidentally inheriting toy smoke settings?
 - Did formal training use the intended accelerator and a credible amount of available memory?
+- Did formal execution use conda env `mjy` rather than venv/virtualenv?
 - Is the result weak because the method is weak, or because execution was faulty?
 
 Do not call everything “underperformance.”
@@ -229,7 +237,9 @@ If formal execution ran with unexpectedly low GPU memory utilization, classify w
 - a nonblocking resource-utilization deviation
 - an execution defect that makes the run not comparable to the intended baseline
 
-Do not hide low utilization as a harmless detail when it changes throughput, effective batch, training dynamics, or comparability.
+For formal GPU execution, expected utilization is above 90% of selected GPU total memory after warmup unless the run was explicitly approved as smoke/dry-run/conservative. On typical 80GB GPUs, observed usage should usually exceed 70GB. Do not hide lower utilization as a harmless detail when it changes throughput, effective batch, training dynamics, or comparability.
+
+If execution did not use conda env `mjy`, or if the evidence points to `venv`, `.venv`, `virtualenv`, system Python, or an unrecorded environment, classify it as an execution deviation or execution defect depending on whether it invalidates the run.
 
 ---
 

@@ -418,9 +418,22 @@ function cleanCommand(command) {
   return text.length > 110 ? `${text.slice(0, 107)}…` : text;
 }
 
+function normalizedToolName(record = {}) {
+  const raw = String(record.tool_name || record.action || record.name || record.label || record.rawLabel || "tool");
+  return raw.split(" · ")[0].trim() || "tool";
+}
+
+function normalizedStatus(record = {}) {
+  const raw = String(record.status || record.label || record.rawLabel || "started").toLowerCase();
+  if (raw.includes("completed") || raw.includes("done") || raw.includes("success")) return "completed";
+  if (raw.includes("failed") || raw.includes("error")) return "failed";
+  if (raw.includes("started") || raw.includes("running")) return "started";
+  return record.status || "started";
+}
+
 function humanizeToolActivity(record = {}) {
-  const toolName = record.tool_name || record.action || "tool";
-  const status = record.status || "started";
+  const toolName = normalizedToolName(record);
+  const status = normalizedStatus(record);
   const file = concisePath(record.target || firstFileRef(record) || record.file_path || record.path || "");
   const command = cleanCommand(record.command_preview || record.normalized_input?.command || record.safe_input_preview || "");
   const prefix = humanStatus(status);
@@ -604,31 +617,37 @@ function displayRoleName(cardOrSeed = {}) {
   const lower = raw.toLowerCase();
   if (lower.includes("main-leader")) return "主控";
   if (lower.includes("bridge-leader")) return "桥接负责人";
+  if (lower.includes("formal_execute")) return "执行队员";
+  if (lower.includes("postrun_audit")) return "复核队员";
+  if (lower.includes("implementation_gate")) return "验收队员";
   if (lower.includes("implement")) return "实现队员";
   if (lower.includes("execution") || lower.includes("executor")) return "执行队员";
   if (lower.includes("rungate") || lower.includes("gate")) return "验收队员";
   if (lower.includes("postrun")) return "复核队员";
   if (lower.includes("hook")) return "运行记录器";
+  if (/^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(raw)) return "主控会话";
   if (lower === "direct_session") return "直接会话";
   if (lower === "unknown") return "执行会话";
-  return raw;
+  return raw.replace(/_/g, " ");
 }
 
 function statusTextForCard(card) {
   if (card.activeTool?.text) return card.activeTool.text;
-  if (card.lastCompletedTool?.text) return `当前没有新的工具动作；${card.lastCompletedTool.text}`;
+  if (card.lastCompletedTool?.text) return `暂时没有新的动作；上一项是：${card.lastCompletedTool.text}`;
+  const role = displayRoleName(card);
   const value = String(card.status || "").toLowerCase();
-  if (value === "declared") return "已登记为本轮任务成员，但还没记录到具体工具操作。";
-  if (value === "idle" || value === "done") return "当前没有活动工具，等待下一条报告或操作记录。";
-  if (value === "running") return "正在执行，但当前工具细节还没有写入观察记录。";
-  if (value === "bound_to_run" || value === "inferred") return "会话已绑定到本轮 run，等待记录具体动作。";
+  if (value === "declared") return `${role}已经加入本轮任务，正在等待任务说明或下一条操作记录。`;
+  if (value === "idle" || value === "done") return `${role}当前没有正在运行的工具。`;
+  if (value === "running") return `${role}正在执行，但这条记录还没有包含具体工具名或文件名。`;
+  if (value === "bound_to_run" || value === "inferred") return `${role}已绑定到本轮 run，等待具体动作写入观察记录。`;
+  if (value === "unknown") return `${role}还没有可读的动作记录。`;
   return progressLabelFor(card.status || "unknown");
 }
 
 function nextTextForCard(card) {
-  if (card.activeTool) return "下一步等待这项操作完成，并由 hook 写入结果或文件证据。";
-  if (card.lastCompletedTool) return "下一步等待新的工具调用、队员报告或完成检查记录。";
-  return "下一步等待 runtime 记录这个会话的具体操作。";
+  if (card.activeTool) return "接下来会显示这项操作的完成结果、输出摘要或涉及文件。";
+  if (card.lastCompletedTool) return "接下来等待新的文件读取、代码修改、命令执行、报告或完成检查。";
+  return "接下来等待 runtime 写入第一条具体动作。";
 }
 
 function mergeTeammateCard(map, seed = {}) {
