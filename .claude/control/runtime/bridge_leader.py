@@ -92,8 +92,6 @@ class BridgeLeaderRuntime:
             if execution.get("waiting"):
                 self._team_waiting(execution)
             if execution.get("status") in {"partial", "partial_or_failed"}:
-                if not execution.get("waiting"):
-                    self._team_waiting(execution)
                 if self._l4_execute_owned_process_still_running(execution):
                     execution = deepcopy(execution)
                     execution["error_or_null"] = {
@@ -111,7 +109,8 @@ class BridgeLeaderRuntime:
                     bridge_result = self._bridge_result("failed", "team_wait", execution)
                     self._return_bridge_result("bridge_result_returned_with_failure", bridge_result)
                     return bridge_result
-                self._wait_timeout(execution)
+                if execution.get("waiting"):
+                    self._wait_timeout(execution)
                 self._event("partial_evidence_collected", team_id=self.team_id, task_id=self.task_id, payload={"evidence": execution.get("evidence"), "reports": execution.get("reports", []), "artifact_refs": execution.get("artifact_refs", [])})
                 self._team_delete()
                 bridge_result = self._bridge_result("partial_or_failed", "team_wait", execution)
@@ -435,15 +434,63 @@ def _completion_checks(contract: dict[str, Any], execution: dict[str, Any]) -> d
     validation_requirements = contract.get("validation_requirements", [])
     reports = execution.get("reports", [])
     artifact_refs = execution.get("artifact_refs", [])
+    missing_artifacts = _missing_required_artifacts(required_artifacts, artifact_refs)
+    failed_validations = _failed_validation_requirements(validation_requirements, execution)
     return {
         "required_outputs_present": not required_outputs or bool(reports),
-        "required_artifacts_present": not required_artifacts or bool(artifact_refs),
-        "validation_passed": not validation_requirements or execution.get("validation_passed", True),
+        "required_artifacts_present": not missing_artifacts,
+        "validation_passed": not failed_validations,
         "missing_outputs": [] if (not required_outputs or reports) else list(required_outputs),
-        "missing_artifacts": [] if (not required_artifacts or artifact_refs) else list(required_artifacts),
-        "failed_validations": [] if (not validation_requirements or execution.get("validation_passed", True)) else list(validation_requirements),
+        "missing_artifacts": missing_artifacts,
+        "failed_validations": failed_validations,
         "notes": [],
     }
+
+
+def _missing_required_artifacts(required_artifacts: Any, artifact_refs: Any) -> list[str]:
+    required = [str(item) for item in required_artifacts] if isinstance(required_artifacts, list) else []
+    refs = [str(item) for item in artifact_refs] if isinstance(artifact_refs, list) else []
+    if not required:
+        return []
+    if not refs:
+        return required
+    missing = []
+    for item in required:
+        if not _artifact_requirement_satisfied(item, refs):
+            missing.append(item)
+    return missing
+
+
+def _artifact_requirement_satisfied(required: str, refs: list[str]) -> bool:
+    key = required.strip().casefold()
+    if not key:
+        return True
+    if key == "log_manifest":
+        return any(_looks_like_log_manifest(ref) for ref in refs)
+    return any(key in ref.casefold() for ref in refs)
+
+
+def _looks_like_log_manifest(ref: str) -> bool:
+    lowered = ref.casefold().replace("\\", "/")
+    name = lowered.rsplit("/", 1)[-1]
+    return "manifest" in name and ("log" in name or "artifact" in name or "run" in name)
+
+
+def _failed_validation_requirements(validation_requirements: Any, execution: dict[str, Any]) -> list[str]:
+    required = [str(item) for item in validation_requirements] if isinstance(validation_requirements, list) else []
+    if not required:
+        return []
+    if execution.get("validation_passed") is False:
+        return required
+    return [item for item in required if not _validation_requirement_satisfied(item, execution)]
+
+
+def _validation_requirement_satisfied(requirement: str, execution: dict[str, Any]) -> bool:
+    lowered = requirement.casefold()
+    if "manifest" in lowered:
+        refs = execution.get("artifact_refs") if isinstance(execution.get("artifact_refs"), list) else []
+        return any(_looks_like_log_manifest(str(ref)) for ref in refs)
+    return bool(execution.get("validation_passed", True))
 
 
 def _checks_satisfied(checks: dict[str, Any]) -> bool:

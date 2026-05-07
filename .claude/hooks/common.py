@@ -643,6 +643,7 @@ def update_active_operation(payload: dict[str, Any]) -> None:
         "target": payload.get("target"),
         "status": "running" if status == "started" else status,
         "summary": payload.get("summary"),
+        "soft_reminders": payload.get("soft_reminders") if isinstance(payload.get("soft_reminders"), list) else [],
     }
     if status == "started":
         entry["active_tool"] = tool_card

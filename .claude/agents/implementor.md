@@ -227,6 +227,8 @@ That means:
 You do not self-certify final readiness.
 You provide a codebase and evidence package that makes the gate meaningful.
 
+Keep implementation dialogue bounded. Ask rungater or bridge-leader for confirmation only when a blocker, scope expansion, contradictory evidence, or completion-contract ambiguity would otherwise make you guess. Do not use multi-round discussion as a substitute for making approved edits and collecting bounded validation evidence.
+
 ---
 
 ## 10. Relationship to Executor

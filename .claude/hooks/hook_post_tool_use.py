@@ -5,6 +5,7 @@ from common import (
     compact_tool_target,
     control_binding_value,
     control_main_session_id,
+    bash_execution_soft_reminders,
     detect_run_id,
     emit_observer_record,
     invoke_runtime_event,
@@ -128,6 +129,7 @@ def _emit_tool_event(payload: dict, tool_input: dict, tool_response: dict, tool_
     completed_at = now_iso()
     started = observer_tool_start_record(run_id, str(tool_use_id) if tool_use_id else None)
     started_at = started.get("started_at") or started.get("timestamp")
+    soft_reminders = bash_execution_soft_reminders(tool_name, tool_input, binding, after=True, tool_response=tool_response)
     record = {
         "timestamp": completed_at,
         **binding,
@@ -148,6 +150,7 @@ def _emit_tool_event(payload: dict, tool_input: dict, tool_response: dict, tool_
         "stdout_tail": _tail(tool_response.get("stdout") or tool_response.get("output")),
         "stderr_tail": _tail(tool_response.get("stderr")),
         "error_or_null": error,
+        "soft_reminders": soft_reminders,
         **tool_detail_fields(tool_name, tool_input, tool_response, failed=failed, after=True),
     }
     emit_observer_record("tool_events", record)
@@ -165,6 +168,22 @@ def _emit_tool_event(payload: dict, tool_input: dict, tool_response: dict, tool_
             "parent_message_id": payload.get("parent_message_id"),
         },
     )
+    for reminder in soft_reminders:
+        emit_observer_record(
+            "session_events",
+            {
+                "timestamp": completed_at,
+                **binding,
+                "event_type": "soft_tool_reminder",
+                "tool_name": tool_name,
+                "tool_use_id": tool_use_id,
+                "message_preview": reminder.get("message"),
+                "reminder": reminder,
+                "cwd": payload.get("cwd") or tool_input.get("cwd"),
+                "project_root": payload.get("project_root") or tool_input.get("project_root"),
+                "parent_message_id": payload.get("parent_message_id"),
+            },
+        )
 
 
 def _action_for_tool(tool_name: str) -> str:

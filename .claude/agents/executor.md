@@ -195,6 +195,8 @@ Before a formal training/evaluation launch, run the bounded smoke test needed to
 
 If the first safe setting uses at most 90% of selected GPU memory and the task is a formal run, tune upward inside the approved boundary before declaring the run configured. Use bounded increments and stop before reckless OOM probing. If OOM occurs during this tuning, record the failing setting and fall back to the highest observed safe setting only if it still satisfies the formal threshold or the run is explicitly reclassified as blocked/deviated.
 
+PreToolUse/PostToolUse may attach soft reminders to your Bash records when a formal-looking command lacks GPU memory probe evidence, batch/effective-batch basis, or log manifest evidence. Treat these reminders as prompts to add or follow with non-destructive evidence collection. They are not process kills, and a smoke/debug command is allowed to use low memory when it is clearly labeled and recorded as smoke/debug.
+
 Formal execution may include long-running jobs such as training. In L4 execute, launch long jobs in a foreground, waitable, or explicitly polled form so the bridge can remain open until terminal completion. Do not intentionally detach a formal run and return while it is still running unless the packet or user explicitly asked for detached background operation.
 
 For long-running jobs you launch, record:

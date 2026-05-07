@@ -591,6 +591,14 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
     )
     if partial_result.get("status") != "partial_or_failed":
         raise AssertionError(json.dumps(partial_result, ensure_ascii=False, indent=2))
+    partial_events = [
+        item
+        for item in _read_jsonl(runs_root / "run_demo" / "event_log.jsonl")
+        if item.get("bridge_window_id") == partial_packet["binding"]["bridge_window_id"]
+    ]
+    partial_event_kinds = [item.get("event_kind") for item in partial_events]
+    if "partial_evidence_collected" not in partial_event_kinds or "wait_timeout_or_process_lost" in partial_event_kinds:
+        raise AssertionError(json.dumps(partial_event_kinds, ensure_ascii=False, indent=2))
 
     running_partial_packet = decide_next_bridge_packet(
         str(control_root),
@@ -651,12 +659,39 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
     if reject_result.get("status") != "failed":
         raise AssertionError(json.dumps(reject_result, ensure_ascii=False, indent=2))
 
+    manifest_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="run l4 execute manifest contract smoke task",
+        task_spec={"task_subject": "sdk bridge manifest smoke", "task_kind": "bridge_window_smoke"},
+        target_phase="l4_execute",
+    )
+    manifest_result = call_bridge_sdk(
+        str(control_root),
+        manifest_packet,
+        runtime_runs_root=str(runs_root),
+        persist=True,
+        team_executor=lambda _: {
+            "status": "succeeded",
+            "reports": [{"summary": "manifest present"}],
+            "artifact_refs": ["logs/runs/demo/artifact_manifest.json"],
+            "evidence": {"classification": "manifest present"},
+            "error_or_null": None,
+            "cleanup_required": False,
+        },
+    )
+    if manifest_result.get("status") != "succeeded":
+        raise AssertionError(json.dumps(manifest_result, ensure_ascii=False, indent=2))
+
     replay = reconcile_workflow_from_ledger(str(control_root), "run_demo", runtime_runs_root=str(runs_root), persist=True)
     failed_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][failed_packet["binding"]["bridge_window_id"]]
     exception_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][exception_packet["binding"]["bridge_window_id"]]
     partial_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][partial_packet["binding"]["bridge_window_id"]]
     running_partial_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][running_partial_packet["binding"]["bridge_window_id"]]
     reject_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][reject_packet["binding"]["bridge_window_id"]]
+    manifest_status = replay["runtime_snapshot"]["lifecycle"]["status_index"][manifest_packet["binding"]["bridge_window_id"]]
     return {
         "bridge_window_id": packet["binding"]["bridge_window_id"],
         "bridge_result_status": bridge_result["status"],
@@ -666,6 +701,7 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         "partial_status": partial_status,
         "running_partial_status": running_partial_status,
         "reject_status": reject_status,
+        "manifest_status": manifest_status,
         "replayed_events": replay["source_summary"]["event_count"],
     }
 
@@ -1235,6 +1271,48 @@ def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
         run_tool_events = _read_jsonl(runs_root / "run_demo" / "tool_events.jsonl")
         if not any(item.get("tool_name") == "Read" and item.get("teammate_id") == "executor" for item in run_tool_events):
             raise AssertionError(json.dumps(run_tool_events[-5:], ensure_ascii=False, indent=2))
+        formal_command = "conda run -n mjy torchrun train.py --per_device_train_batch_size 1"
+        formal_reminders = module.bash_execution_soft_reminders(
+            "Bash",
+            {"command": formal_command, "cwd": "."},
+            binding,
+            after=False,
+        )
+        reminder_codes = {item.get("code") for item in formal_reminders}
+        if not {"executor_formal_gpu_probe_missing", "executor_log_manifest_reminder"}.issubset(reminder_codes):
+            raise AssertionError(json.dumps(formal_reminders, ensure_ascii=False, indent=2))
+        smoke_reminders = module.bash_execution_soft_reminders(
+            "Bash",
+            {"command": "conda run -n mjy python train.py --smoke --max_steps=1", "cwd": "."},
+            binding,
+            after=False,
+        )
+        smoke_codes = {item.get("code") for item in smoke_reminders}
+        if "executor_formal_gpu_probe_missing" in smoke_codes or "executor_smoke_gpu_probe_recommended" not in smoke_codes:
+            raise AssertionError(json.dumps(smoke_reminders, ensure_ascii=False, indent=2))
+        bash_record = {
+            "timestamp": _now(),
+            **binding,
+            "tool_name": "Bash",
+            "tool_use_id": "tool_executor_train",
+            "action": "run_command",
+            "target": formal_command,
+            "summary": "Bash formal train",
+            "status": "started",
+            "started_at": _now(),
+            "completed_at": None,
+            "duration_ms": None,
+            "normalized_input": {"command": formal_command, "cwd": "."},
+            "safe_input_preview": {"command": formal_command},
+            "file_refs": [{"path": ".", "role": "cwd"}],
+            "output_summary": None,
+            "soft_reminders": formal_reminders,
+        }
+        module.emit_observer_record("tool_events", bash_record)
+        run_tool_events = _read_jsonl(runs_root / "run_demo" / "tool_events.jsonl")
+        bash_events = [item for item in run_tool_events if item.get("tool_use_id") == "tool_executor_train"]
+        if not bash_events or "executor_formal_gpu_probe_missing" not in {item.get("code") for item in bash_events[-1].get("soft_reminders", [])}:
+            raise AssertionError(json.dumps(run_tool_events[-5:], ensure_ascii=False, indent=2))
     finally:
         if old_runs_root is None:
             os.environ.pop("BRIDGE_RUNTIME_RUNS_ROOT", None)
@@ -1294,6 +1372,7 @@ def main() -> None:
             "sdk_partial_status": sdk["partial_status"],
             "sdk_running_partial_status": sdk["running_partial_status"],
             "sdk_reject_status": sdk["reject_status"],
+            "sdk_manifest_status": sdk["manifest_status"],
             "negative_tests": negative["negative_tests"],
             "cli_executor_policy": cli_executor["cli_executor_policy"],
             "hook_observer_rebind": hook_observer["hook_observer_rebind"],
@@ -1317,6 +1396,7 @@ def main() -> None:
         assert summary["sdk_partial_status"] == "bridge_window_partial_returned"
         assert summary["sdk_running_partial_status"] == "bridge_window_failed"
         assert summary["sdk_reject_status"] == "bridge_window_failed"
+        assert summary["sdk_manifest_status"] == "bridge_window_returned"
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     finally:
         shutil.rmtree(runtime_dir, ignore_errors=True)

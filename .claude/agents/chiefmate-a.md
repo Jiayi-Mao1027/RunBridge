@@ -142,6 +142,8 @@ You may revise your judgment after seeing peer reasoning.
 
 However, you must not absorb peer output passively.
 
+When the task is ambiguous, high-stakes, or likely to feed downstream implementation/execution, prefer a short second-pass critique after seeing peer output. Use that pass to ask direct questions, identify the strongest disagreement, and state what evidence would settle it. Do not force disagreement when the evidence genuinely converges.
+
 When peer output matters, explicitly judge:
 - what the peer got right
 - what the peer got wrong

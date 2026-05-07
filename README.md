@@ -101,6 +101,8 @@ Every generated formal log folder must contain an internal manifest, analogous t
 
 L4 execute has strict environment and GPU rules. Formal execution uses conda env `mjy`; use `conda run -n mjy ...` or record an equivalent `conda activate mjy` context, and do not use venv/virtualenv for formal execute. Unless the user explicitly requests smoke/dry-run/conservative execution, formal GPU runs must exceed 90% of selected GPU total memory after warmup. For typical 80GB GPUs, that usually means observed usage above 70GB; lower usage is a deviation or blocker unless backed by explicit approval or hard resource evidence.
 
+Executor Bash hooks add soft reminders rather than hard process control. Formal-looking executor Bash commands may be annotated in `tool_events.jsonl` with missing GPU probe, batch/effective-batch basis, or log-manifest reminders. Smoke/dry-run/debug commands are not killed for low memory and receive only smoke-appropriate reminders.
+
 The phase is not just a final label. It is a runtime trace of important action intent, action start, action end, denial, failure, partial completion, and orphaning. This allows later audit to distinguish "never attempted" from "attempted and failed" from "started but never returned".
 
 ## BridgePacket
@@ -182,6 +184,8 @@ The runtime also writes read-only Bridge Companion observer streams. These are n
 Tool observer records are emitted for all Claude Code sessions, not only bridge child sessions. Records include `session_kind`, `run_binding_state`, `session_id`, run/window/team/task IDs when available, `teammate_id`, `agent_type`, `tool_name`, `tool_use_id`, and `status`. If a hook cannot bind a tool event to a run, it writes the safe preview to `.claude/runtime_state/session_observer/` so Companion can still show direct or unbound session activity.
 
 UI must not synthesize low-level actions from reports or artifact refs. It should show `Read` / `Edit` / `Write` / `MultiEdit` / `Bash` / `Grep` / `Glob` / `LS` only when those real hook records exist in `tool_events.jsonl`. The hooks rebind child-session tool events through `session_bindings.jsonl` when a tool payload lacks direct run fields, so subagent tool calls can still land in the run-scoped observer stream.
+
+For executor Bash events, UI may surface `soft_reminders` as nonblocking evidence prompts. They are not failures and do not imply the process was stopped.
 
 For UI-style "what is happening now" display, hooks maintain `active_operations.json` beside the run observer files, and a global `.claude/runtime_state/session_observer/active_operations.json` for unbound sessions. This snapshot is derived from tool started/completed pairs and contains the active tool and last completed tool per session/teammate.
 

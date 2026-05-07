@@ -19,6 +19,7 @@ const SESSION_OBSERVER_ROOT = process.env.BRIDGE_SESSION_OBSERVER_ROOT || path.r
 const DEFAULT_BRIEF_BASE_URL = "https://api.deepseek.com";
 const DEFAULT_BRIEF_MODEL = "deepseek-v4-pro";
 const BRIEF_SECRET_PATH = process.env.BRIDGE_BRIEF_SECRET_PATH || path.join(os.homedir(), ".bridge-companion", "brief-secret.json");
+const STREAM_INTERVAL_MS = Number(process.env.BRIDGE_COMPANION_REFRESH_MS || 5000);
 
 const readOnlyMethods = new Set(["GET", "HEAD", "OPTIONS"]);
 const allowedMethods = new Set(["GET", "HEAD", "OPTIONS", "POST"]);
@@ -1081,7 +1082,8 @@ const server = http.createServer(async (req, res) => {
         runtimeRootConfigured: Boolean(configuredRuntimeRoot),
         runtimeRoot: RUNTIME_ROOT,
         runtimeRootSource: configuredRuntimeRoot ? "env" : "default-safe-opd",
-        runtimeRootExists: RUNTIME_ROOT ? await exists(RUNTIME_ROOT) : false
+        runtimeRootExists: RUNTIME_ROOT ? await exists(RUNTIME_ROOT) : false,
+        refreshIntervalMs: STREAM_INTERVAL_MS
       });
       return;
     }
@@ -1125,7 +1127,7 @@ const server = http.createServer(async (req, res) => {
           res.write(`data: ${JSON.stringify(status)}\n\n`);
         };
         await writeStatus();
-        const timer = setInterval(writeStatus, 1000);
+        const timer = setInterval(writeStatus, STREAM_INTERVAL_MS);
         req.on("close", () => clearInterval(timer));
       }
       return;
