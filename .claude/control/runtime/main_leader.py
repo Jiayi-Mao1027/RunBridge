@@ -37,7 +37,8 @@ PHASE_ACTIVE_SURFACE_POLICIES = {
     "l3_bridge": [
         "Before curation, identify the current step, the prior completed work, and the artifacts that are actually needed for the next downstream phase.",
         "Keep the active code, log, checkpoint, data, document, and script surfaces minimum viable: anything not needed for current understanding or next execution should leave the active surface.",
-        "Prefer aggressive archive/move-out over retention-with-labeling. Archive is the default for ambiguous or stale project artifacts; active retention requires a concrete next-phase reason.",
+        "Prefer archive/move-out over retention-with-labeling for material that is clearly unused. Archive is the default for ambiguous or stale project artifacts; active retention requires a concrete next-phase reason.",
+        "Logs are cleanup targets but may be reusable evidence or expensive generated output. Retain logs with a concrete current-step, audit, comparison, or reuse reason; archive only logs that are clearly obsolete, duplicate, superseded, or unrelated.",
         "Physical deletion is exceptional and must be limited to clearly regenerable trash, empty duplicates, or explicitly approved removals.",
         "L3 may archive or organize files, but must not implement code behavior changes; code/config content changes belong to L4 implement.",
     ],
@@ -169,7 +170,7 @@ def build_bridge_instruction_packet_for_this_invoke(
     resolved_target_phase = _resolve_target_phase(snapshot, target_phase)
     resolved_route = _resolve_phase_route(snapshot, resolved_target_phase)
     resolved_completion = _default_completion_contract(resolved_target_phase)
-    resolved_report = _default_report_contract()
+    resolved_report = _default_report_contract(resolved_target_phase)
     bridge_allowed_tools = _default_bridge_tools(resolved_target_phase)
     resolved_team = _normalize_team_spec(target_phase=resolved_target_phase)
     resolved_task = _normalize_task_spec(
@@ -383,6 +384,7 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
             "L3 semantic identity rule: actively identify which model/method/checkpoint/dataset/prompt/config the user means. For comparisons such as DPO vs OPD, report the concrete ckpts or say exactly what is ambiguous.",
             "L3 inheritance rule: when the user does not request a dataset, prompt, split, metric, or config change, inspect the active repo/docs enough to identify the current basis and explicitly recommend inheriting it.",
             "L3 packet handoff rule: report the resolved semantic basis in a form L4 implement/execute can copy directly: model/method identity, ckpt paths/IDs, dataset/split, prompt/template, config files, and any unresolved field.",
+            "L3 log curation rule: keep the log surface minimum viable, but do not archive logs merely because they are old or bulky. Retain logs that may be reused for comparison, audit, avoiding expensive regeneration, or downstream interpretation; archive only logs that are clearly unused, duplicate, superseded, or unrelated, and report the reason.",
             "L3 minimum-active-surface rule: first identify what this step is trying to do, what prior work is already done, and what files/artifacts are genuinely required for the next phase.",
             "Archive-first curation rule: keep the active code, log, checkpoint, data, document, and script surfaces minimum viable. Archive or move out stale, duplicate, ambiguous, or non-current material instead of leaving it active with only a label.",
             "Active-retention burden: every retained log/dataset/checkpoint/output/scratch script/document/code copy needs a concrete current-step or next-phase reason. If the reason is weak, archive it.",
@@ -412,6 +414,7 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
             "Execution environment rule: all formal execute commands must use the conda environment named mjy. Prefer `conda run -n mjy ...` for auditable commands, or explicitly record an equivalent `conda activate mjy` shell context. Do not create or use venv.",
             "Long-task ETA rule: before launching any long-running command, estimate expected wall-clock runtime as a range, state the basis for the estimate, and include that estimate in the execution report.",
             "Smoke-shape rule: before formal execution, use bounded smoke evidence to choose formal parameters such as per-device batch size, microbatch size, gradient accumulation, sequence length, precision, and effective batch size. Record why formal settings differ from smoke settings.",
+            "Log manifest rule: every generated formal log folder must contain a manifest file inside that folder, analogous to checkpoint manifests. Do not rely on folder/file names alone. The manifest must record run/window/task IDs, command, cwd, environment, semantic basis, smoke evidence refs, formal parameters/effective batch size, process refs, log files, expected outputs/checkpoints, status, timestamps, and reuse/dependency notes.",
             "If runtime cannot be estimated, state that explicitly with the missing information and still record command, start time, owned process refs, logs, and expected outputs.",
             "L4 execute terminality rule: run formal long jobs in a way the bridge can wait on or poll until terminal completion. Do not return a final or partial bridge report while an owned process is still running; emit progress evidence and keep waiting.",
             "Formal GPU memory rule: unless the task is explicitly smoke/dry-run/conservative, configure formal GPU execution to exceed 90% of the selected GPU's total memory after warmup. On a typical 80GB GPU this usually means observed usage above 70GB.",
@@ -420,6 +423,7 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
     if target_phase == "l4_execute" and teammate_name == "postrun":
         return [
             "Semantic audit rule: verify the actual run used the resolved model/method, checkpoint, dataset, prompt/template, config, and metric basis; classify mismatches as execution deviations or defects.",
+            "Log manifest audit rule: verify each generated formal log folder has an internal manifest and that the manifest matches the command, environment, semantic basis, formal parameters/effective batch size, process refs, log files, artifact refs, and terminal status. Missing or stale manifests are execution deviations.",
             "Audit ETA rule: compare actual runtime against the executor's estimate when available, and flag material deviation as execution evidence rather than treating it as chat context.",
             "Postrun must run after the formal execution process has reached a terminal state or produced terminal failure evidence; do not audit a still-running process as complete.",
             "Environment audit rule: verify formal execution used conda env mjy and did not use venv. Missing or contradictory environment evidence is an execution deviation.",
@@ -440,7 +444,7 @@ def _json_dict(value: Any) -> str:
 
 def _default_completion_contract(target_phase: str | None = None) -> dict[str, Any]:
     timeout_policy = deepcopy(PHASE_TIMEOUT_POLICY.get(str(target_phase or ""), DEFAULT_TIMEOUT_POLICY))
-    return {
+    contract = {
         "required_outputs": ["report"],
         "required_artifacts": [],
         "validation_requirements": [],
@@ -451,16 +455,25 @@ def _default_completion_contract(target_phase: str | None = None) -> dict[str, A
         "allowed_partial_result": True,
         "timeout_policy": timeout_policy,
     }
+    if str(target_phase or "") == "l4_execute":
+        contract["required_artifacts"] = ["log_manifest"]
+        contract["validation_requirements"] = ["generated formal log folders include internal manifests"]
+        contract["success_criteria"].append("formal execution log folders are not identified by filename alone; each generated log folder has an internal manifest")
+    return contract
 
 
-def _default_report_contract() -> dict[str, Any]:
-    return {
+def _default_report_contract(target_phase: str | None = None) -> dict[str, Any]:
+    contract = {
         "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution"],
         "required_evidence": ["runtime event ids", "instruction coverage disposition", "semantic identity resolution"],
         "artifact_reporting_format": "list",
         "include_failure_reason": True,
         "include_next_action_recommendation": True,
     }
+    if str(target_phase or "") == "l4_execute":
+        contract["required_sections"].append("artifact_manifests")
+        contract["required_evidence"].extend(["log manifest path", "formal execution parameter manifest"])
+    return contract
 
 
 def _derive_subject(original_instruction: str) -> str:

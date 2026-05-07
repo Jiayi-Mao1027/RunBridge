@@ -419,12 +419,20 @@ function cleanCommand(command) {
 }
 
 function normalizedToolName(record = {}) {
-  const raw = String(record.tool_name || record.action || record.name || record.label || record.rawLabel || "tool");
-  return raw.split(" · ")[0].trim() || "tool";
+  const preview = String(record.message_preview || record.safe_input_preview || record.summary || "");
+  const raw = String(record.tool_name || record.action || record.name || record.label || record.rawLabel || preview || "tool");
+  const direct = raw.split(" · ")[0].trim();
+  const mcp = raw.match(/mcp__[a-zA-Z0-9_]+__[a-zA-Z0-9_]+/);
+  if (mcp) return mcp[0];
+  const common = raw.match(/\b(Read|Edit|Write|MultiEdit|Bash|Grep|Glob)\b/);
+  if (common) return common[1];
+  const bridge = raw.match(/\b(team_create|task_create|team_delete|send_messages?)\b/i);
+  if (bridge) return bridge[1];
+  return direct || "tool";
 }
 
 function normalizedStatus(record = {}) {
-  const raw = String(record.status || record.label || record.rawLabel || "started").toLowerCase();
+  const raw = String(record.status || record.label || record.rawLabel || record.event_type || "started").toLowerCase();
   if (raw.includes("completed") || raw.includes("done") || raw.includes("success")) return "completed";
   if (raw.includes("failed") || raw.includes("error")) return "failed";
   if (raw.includes("started") || raw.includes("running")) return "started";
@@ -503,11 +511,16 @@ function classifyKind(type, source = "") {
 
 function titleForCompanionRecord(record, source) {
   if (source === "tool_events") return humanizeToolActivity(record).text;
-  if (source === "agent_messages") return "任务消息已记录";
+  if (source === "agent_messages") {
+    const target = displayRoleName({ role: record.to || record.teammate_id || record.agent_type || "队员" });
+    return `任务说明已发给${target}`;
+  }
   if (source === "teammate_reports") return "队员返回了进度报告";
   if (source === "process_events") return `长运行进程${record.state ? `：${record.state}` : "有新状态"}`;
   if (source === "bridge_packets") return "本轮桥接任务包已记录";
-  if (source === "artifacts") return "产物引用已记录";
+  if (source === "session_events") return record.event_type === "user_prompt" ? "会话收到任务提示" : record.event_type === "session_started" ? "会话已启动" : record.event_type === "tool_call_started" || record.event_type === "tool_call_completed" ? humanizeToolActivity(record).text : progressLabelFor(eventTypeOf(record));
+  if (source === "session_tool_events") return humanizeToolActivity(record).text;
+  if (source === "artifacts") return `证据文件已记录${record.artifact_ref ? `：${concisePath(record.artifact_ref)}` : ""}`;
   if (source === "completion_checks") return `完成检查${record.status ? `：${record.status}` : "已记录"}`;
   return progressLabelFor(eventTypeOf(record));
 }
@@ -526,7 +539,11 @@ function plainSummary(value, fallback = "已记录一条 runtime 事实。") {
 }
 
 function summaryForCompanionRecord(record) {
-  if (record.tool_name || record.command_preview || record.edit_summary || record.read_options || record.search_summary) {
+  if (record.to || record.direction || record.body_preview || record.message_preview) {
+    const assignment = assignmentActionText(record);
+    return assignment.text;
+  }
+  if (record.tool_name || record.command_preview || record.edit_summary || record.read_options || record.search_summary || record.event_type === "tool_call_started" || record.event_type === "tool_call_completed") {
     const display = humanizeToolActivity(record);
     return display.evidenceText || (record.status === "started" ? "操作已经开始，等待完成事件返回更多证据。" : "操作已经记录，原始输入/输出保留在详情卷宗中。");
   }
@@ -562,7 +579,9 @@ function buildActivityFeed(events, inbox, companion = {}) {
     ...inbox.slice(-20).map(item => toActivityItem(item, "main_leader_inbox")),
     ...(companion.bridgePackets || []).slice(-10).map(item => toActivityItem(item, "bridge_packets")),
     ...(companion.agentMessages || []).slice(-30).map(item => toActivityItem(item, "agent_messages")),
-    ...(companion.toolEvents || []).slice(-80).map(item => toActivityItem(item, "tool_events")),
+    ...(companion.sessionEvents || []).slice(-80).map(item => toActivityItem(item, "session_events")),
+    ...(companion.sessionToolEvents || []).slice(-120).map(item => toActivityItem(item, "session_tool_events")),
+    ...(companion.toolEvents || []).slice(-120).map(item => toActivityItem(item, "tool_events")),
     ...(companion.teammateReports || []).slice(-30).map(item => toActivityItem(item, "teammate_reports")),
     ...(companion.processEvents || []).slice(-30).map(item => toActivityItem(item, "process_events")),
     ...(companion.artifactEvents || []).slice(-20).map(item => toActivityItem(item, "artifacts")),
@@ -570,7 +589,18 @@ function buildActivityFeed(events, inbox, companion = {}) {
   ];
   return items
     .sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")) || Number(a.sequence || 0) - Number(b.sequence || 0))
-    .slice(-120);
+    .slice(-180);
+}
+
+function assignmentActionText(message = {}) {
+  const target = displayRoleName({ role: message.to || message.teammate_id || message.agent_type || "队员" });
+  const body = String(message.summary || message.body_preview || message.message_preview || "");
+  const firstLine = body.split(/\r?\n/).map(x => x.trim()).find(Boolean) || "任务说明已下发";
+  return {
+    role: target,
+    text: `正在阅读任务说明：${firstLine.replace(/^.*?:\s*/, "").slice(0, 140)}`,
+    nextText: "接下来应该开始读取项目文件、核对证据，或返回报告；如果没有工具事件，就说明观察层还没拿到子会话工具流。"
+  };
 }
 
 function buildCommunicationFeed(events, inbox, companion = {}) {
@@ -609,14 +639,22 @@ function extractPacketSummary(snapshot, companion = {}) {
 }
 
 function actorKey(record) {
-  return String(record.teammate_id || record.agent_id || record.session_id || record.agent_type || record.display_name || "unknown");
+  const teammate = record.teammate_id || record.to;
+  if (teammate) return String(teammate);
+  const agentType = String(record.agent_type || record.role || record.display_name || "");
+  if (agentType === "leader-orchestrator" || agentType === "main-leader") return "main-leader";
+  if (agentType === "bridge-leader") return "bridge-leader";
+  return String(record.agent_id || record.session_id || record.agent_type || record.display_name || "unknown");
 }
 
 function displayRoleName(cardOrSeed = {}) {
   const raw = String(cardOrSeed.agent_type || cardOrSeed.role || cardOrSeed.teammate_role || cardOrSeed.display_name || cardOrSeed.id || "执行会话");
   const lower = raw.toLowerCase();
-  if (lower.includes("main-leader")) return "主控";
+  if (lower.includes("main-leader") || lower.includes("leader-orchestrator")) return "主控";
   if (lower.includes("bridge-leader")) return "桥接负责人";
+  if (lower.includes("curator") || lower.includes("artifact curation")) return "产物整理队员";
+  if (lower.includes("preflight") || lower.includes("audit")) return "预检队员";
+  if (lower.includes("refresher") || lower.includes("documentation")) return "文档刷新队员";
   if (lower.includes("formal_execute")) return "执行队员";
   if (lower.includes("postrun_audit")) return "复核队员";
   if (lower.includes("implementation_gate")) return "验收队员";
@@ -712,28 +750,67 @@ function extractTeammates(snapshot, events, companion = {}) {
     card.status = event.status === "started" ? "running" : (event.status || card.status);
     card.latest = display.detail || event.summary || card.latest;
     card.recentTools.push(display);
+    if (event.status === "started" || event.status === "completed" || event.status === "failed") {
+      card.assignmentText = null;
+      card.nextTextOverride = null;
+    }
     for (const ref of event.file_refs || []) {
-      const file = typeof ref === "string" ? ref : ref.path;
+      const file = typeof ref === "string" ? ref : (ref.path || ref.artifact_ref || ref.file_path);
       if (file && !card.fileRefs.includes(file)) card.fileRefs.push(file);
     }
   }
 
-  for (const event of [...events, ...(companion.teammateReports || []), ...(companion.agentMessages || []), ...(companion.processEvents || [])]) {
+  for (const artifact of companion.artifactEvents || []) {
+    const file = artifact.artifact_ref || artifact.path || artifact.file_path;
+    const role = artifact.teammate_id || artifact.agent_type || artifact.agent_id;
+    if (!file || !role) continue;
+    const card = mergeTeammateCard(cards, artifact);
+    if (!card.fileRefs.includes(file)) card.fileRefs.push(file);
+    card.evidenceOverride = `已记录产物：${concisePath(file)}`;
+  }
+
+  for (const message of companion.agentMessages || []) {
+    if (!message.to && !message.teammate_id) continue;
+    const assignment = assignmentActionText(message);
+    const card = mergeTeammateCard(cards, {
+      teammate_id: message.to || message.teammate_id,
+      role: message.to || message.teammate_id,
+      agent_type: message.to || message.teammate_id,
+      session_id: message.session_id,
+      run_binding_state: message.run_binding_state
+    });
+    if (!card.activeTool && !card.lastCompletedTool) {
+      card.status = "assigned";
+      card.latest = assignment.text;
+      card.assignmentText = assignment.text;
+      card.nextTextOverride = assignment.nextText;
+    }
+  }
+
+  for (const event of [...events, ...(companion.teammateReports || []), ...(companion.processEvents || [])]) {
     const payload = event.payload || event.data || event;
     const role = payload.teammate_role || payload.teammate_id || payload.agent_type || payload.agent_id || payload.session_id;
     if (!role) continue;
     const card = mergeTeammateCard(cards, payload);
     card.status = payload.progress_state || progressLabelFor(eventTypeOf(event));
     card.latest = payload.summary || summarizeEvent(event);
+    const refs = [...(payload.file_refs || []), ...(payload.artifacts || []), ...(payload.evidence_refs || [])];
+    for (const ref of refs) {
+      const file = typeof ref === "string" ? ref : (ref.path || ref.artifact_ref || ref.file_path);
+      if (file && !card.fileRefs.includes(file)) card.fileRefs.push(file);
+    }
+    if (!card.activeTool && !card.lastCompletedTool && card.fileRefs.length) {
+      card.evidenceOverride = `报告提到了 ${card.fileRefs.length} 个文件/产物引用。`;
+    }
   }
 
   return [...cards.values()].map(card => ({
     ...card,
     displayRole: displayRoleName(card),
-    currentText: statusTextForCard(card),
-    lastText: card.lastCompletedTool?.text || (card.latest ? plainSummary(card.latest, "最近有一条记录，详情保留在卷宗中。") : ""),
-    nextText: nextTextForCard(card),
-    evidenceText: card.activeTool?.evidenceText || card.lastCompletedTool?.evidenceText || "",
+    currentText: card.assignmentText || statusTextForCard(card),
+    lastText: card.lastCompletedTool?.text || (!card.assignmentText && card.latest ? plainSummary(card.latest, "最近有一条记录，详情保留在卷宗中。") : ""),
+    nextText: card.nextTextOverride || nextTextForCard(card),
+    evidenceText: card.activeTool?.evidenceText || card.lastCompletedTool?.evidenceText || card.evidenceOverride || "",
     recentTools: card.recentTools.slice(-5),
     fileRefs: card.fileRefs.slice(-6)
   })).slice(0, 12);

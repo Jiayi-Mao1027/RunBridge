@@ -210,6 +210,8 @@ For long-running jobs you launch, record:
 - expected checkpoint/output path
 - terminal status of the process at report time
 
+Every generated formal log folder must contain a manifest file inside that folder. Treat it like a checkpoint manifest: the manifest, not the folder name, is the durable identity record. Include run ID, bridge window ID, task ID, command, cwd, conda/env evidence, semantic basis, dataset/prompt/config basis, smoke evidence refs, formal per-device batch size, microbatch, gradient accumulation, precision, sequence length, effective batch size, process refs, log file list, expected output/checkpoint paths, timestamps, terminal status, and any reused-log or upstream dependency notes. Report the manifest path as an artifact ref.
+
 Do not launch a long-running formal job without first stating the expected runtime range in your execution record. If no credible estimate is possible, state "estimate unavailable" with the missing evidence, then record the process and polling evidence especially carefully.
 
 If the process is still running, emit progress evidence for bridge-leader to keep waiting or polling; do not ask bridge-leader to close the L4 execute window as partial. Do not state or imply that training stopped unless you have process/log evidence.

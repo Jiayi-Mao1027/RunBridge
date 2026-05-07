@@ -209,6 +209,8 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
 def simulated_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     packet = execution_input["packet"]
     task_spec = packet.get("task_spec", {})
+    required_artifacts = packet.get("completion_contract", {}).get("required_artifacts")
+    artifact_refs = [str(item) for item in required_artifacts] if isinstance(required_artifacts, list) else []
     return {
         "status": "succeeded",
         "reports": [
@@ -217,12 +219,13 @@ def simulated_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
                 "task_description": task_spec.get("task_description"),
             }
         ],
-        "artifact_refs": [],
+        "artifact_refs": artifact_refs,
         "evidence": {
             "simulated": True,
             "bridge_window_id": execution_input["bridge_window_id"],
             "team_id": execution_input["team_id"],
             "task_id": execution_input["task_id"],
+            "artifact_refs": artifact_refs,
         },
         "error_or_null": None,
         "cleanup_required": False,

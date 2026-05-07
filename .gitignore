@@ -1,4 +1,5 @@
 .claude/runtime_state/
+.claude/settings.json
 
 # Bridge Companion local secrets
 bridge-companion/key.json

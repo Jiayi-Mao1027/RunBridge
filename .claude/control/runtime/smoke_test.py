@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import importlib.util
@@ -126,8 +127,8 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
             },
             "completion_contract": {
                 "required_outputs": ["report"],
-                "required_artifacts": ["artifact"],
-                "validation_requirements": ["validated"],
+                "required_artifacts": ["artifact", "log_manifest"],
+                "validation_requirements": ["validated", "generated formal log folders include internal manifests"],
                 "success_criteria": ["done"],
                 "allowed_partial_result": False,
                 "timeout_policy": {
@@ -138,8 +139,8 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
                 },
             },
             "report_contract": {
-                "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution"],
-                "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution"],
+                "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution", "artifact_manifests"],
+                "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution", "log manifest path", "formal execution parameter manifest"],
                 "artifact_reporting_format": "list",
                 "include_failure_reason": True,
                 "include_next_action_recommendation": True,
@@ -152,8 +153,8 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
         },
         "completion_contract": {
             "required_outputs": ["report"],
-            "required_artifacts": ["artifact"],
-            "validation_requirements": ["validated"],
+            "required_artifacts": ["artifact", "log_manifest"],
+            "validation_requirements": ["validated", "generated formal log folders include internal manifests"],
             "success_criteria": ["done"],
             "allowed_partial_result": False,
             "timeout_policy": {
@@ -164,8 +165,8 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
             },
         },
         "report_contract": {
-            "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution"],
-            "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution"],
+            "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution", "artifact_manifests"],
+            "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution", "log manifest path", "formal execution parameter manifest"],
             "artifact_reporting_format": "list",
             "include_failure_reason": True,
             "include_next_action_recommendation": True,
@@ -631,9 +632,22 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         user_instruction="run rejected completion sdk bridge smoke task",
         task_spec={"task_subject": "sdk bridge reject smoke", "task_kind": "bridge_window_smoke"},
     )
-    reject_packet["completion_contract"]["required_artifacts"] = ["artifact"]
+    reject_packet["completion_contract"]["required_artifacts"] = ["artifact", "log_manifest"]
     reject_packet["completion_contract"]["success_criteria"] = ["artifact required"]
-    reject_result = call_bridge_sdk(str(control_root), reject_packet, runtime_runs_root=str(runs_root), persist=True, team_executor=simulated_team_executor)
+    reject_result = call_bridge_sdk(
+        str(control_root),
+        reject_packet,
+        runtime_runs_root=str(runs_root),
+        persist=True,
+        team_executor=lambda _: {
+            "status": "succeeded",
+            "reports": [{"summary": "missing required artifact"}],
+            "artifact_refs": [],
+            "evidence": {"classification": "intentional missing artifact"},
+            "error_or_null": None,
+            "cleanup_required": False,
+        },
+    )
     if reject_result.get("status") != "failed":
         raise AssertionError(json.dumps(reject_result, ensure_ascii=False, indent=2))
 
@@ -933,6 +947,12 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         raise AssertionError(json.dumps(execute_timeout, ensure_ascii=False, indent=2))
     if execute_packet["task_spec"]["completion_contract"]["timeout_policy"] != execute_timeout:
         raise AssertionError(json.dumps(execute_packet["task_spec"]["completion_contract"], ensure_ascii=False, indent=2))
+    if "log_manifest" not in set(execute_packet["completion_contract"].get("required_artifacts", [])):
+        raise AssertionError(json.dumps(execute_packet["completion_contract"], ensure_ascii=False, indent=2))
+    if "artifact_manifests" not in set(execute_packet["report_contract"].get("required_sections", [])):
+        raise AssertionError(json.dumps(execute_packet["report_contract"], ensure_ascii=False, indent=2))
+    if "log manifest path" not in set(execute_packet["report_contract"].get("required_evidence", [])):
+        raise AssertionError(json.dumps(execute_packet["report_contract"], ensure_ascii=False, indent=2))
     execute_assignments = "\n".join(
         str(item.get("assignment") or "")
         for item in execute_packet.get("task_team_mapping", {}).get("teammate_assignments", [])
@@ -943,6 +963,8 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         or "Do not return a final or partial bridge report while an owned process is still running" not in execute_assignments
         or "Smoke-shape rule" not in execute_assignments
         or "effective batch size" not in execute_assignments
+        or "Log manifest rule" not in execute_assignments
+        or "generated formal log folder must contain a manifest file inside that folder" not in execute_assignments
     ):
         raise AssertionError(json.dumps(execute_packet.get("task_team_mapping"), ensure_ascii=False, indent=2))
     execute_assignments = json.dumps(execute_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
@@ -954,6 +976,7 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         or "GPU memory audit rule" not in execute_assignments
         or "Environment audit rule" not in execute_assignments
         or "Semantic audit rule" not in execute_assignments
+        or "Log manifest audit rule" not in execute_assignments
     ):
         raise AssertionError(execute_assignments)
 
@@ -1152,6 +1175,84 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     return {"cli_executor_policy": "passed"}
 
 
+def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
+    hooks_common = Path(__file__).resolve().parents[2] / "hooks" / "common.py"
+    spec = importlib.util.spec_from_file_location("hooks_common_smoke", hooks_common)
+    if spec is None or spec.loader is None:
+        raise AssertionError(str(hooks_common))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    observer_root = root / "session_observer_rebind"
+    observer_root.mkdir(parents=True, exist_ok=True)
+    old_runs_root = os.environ.get("BRIDGE_RUNTIME_RUNS_ROOT")
+    old_observer_root = os.environ.get("BRIDGE_SESSION_OBSERVER_ROOT")
+    old_run_id = os.environ.pop("BRIDGE_RUN_ID", None)
+    old_control_run_id = os.environ.pop("CLAUDE_CONTROL_RUN_ID", None)
+    old_child = os.environ.pop("BRIDGE_CHILD_CLAUDE_SESSION", None)
+    try:
+        os.environ["BRIDGE_RUNTIME_RUNS_ROOT"] = str(runs_root)
+        os.environ["BRIDGE_SESSION_OBSERVER_ROOT"] = str(observer_root)
+        session_binding = {
+            "timestamp": _now(),
+            "session_id": "subagent_session_demo",
+            "run_id": "run_demo",
+            "main_session_id": "main_demo",
+            "sub_session_id": "sub_demo",
+            "bridge_window_id": "bw_demo",
+            "team_id": "team_demo",
+            "task_id": "task_demo",
+            "teammate_id": "executor",
+            "agent_id": "executor",
+            "agent_type": "teammate",
+            "display_name": "executor",
+            "session_kind": "bridge_child",
+            "run_binding_state": "bound_to_run",
+            "binding_source": "session_start",
+        }
+        module.append_jsonl(observer_root / "session_bindings.jsonl", session_binding)
+        binding = module.observer_binding({"session_id": "subagent_session_demo"}, {"file_path": "README.md"})
+        if binding.get("run_id") != "run_demo" or binding.get("bridge_window_id") != "bw_demo" or binding.get("teammate_id") != "executor":
+            raise AssertionError(json.dumps(binding, ensure_ascii=False, indent=2))
+        record = {
+            "timestamp": _now(),
+            **binding,
+            "tool_name": "Read",
+            "tool_use_id": "tool_subagent_read",
+            "action": "read_file",
+            "target": "README.md",
+            "summary": "Read README.md",
+            "status": "started",
+            "started_at": _now(),
+            "completed_at": None,
+            "duration_ms": None,
+            "normalized_input": {"file_path": "README.md"},
+            "safe_input_preview": {"file_path": "README.md"},
+            "file_refs": [{"path": "README.md", "role": "read"}],
+            "output_summary": None,
+        }
+        module.emit_observer_record("tool_events", record)
+        run_tool_events = _read_jsonl(runs_root / "run_demo" / "tool_events.jsonl")
+        if not any(item.get("tool_name") == "Read" and item.get("teammate_id") == "executor" for item in run_tool_events):
+            raise AssertionError(json.dumps(run_tool_events[-5:], ensure_ascii=False, indent=2))
+    finally:
+        if old_runs_root is None:
+            os.environ.pop("BRIDGE_RUNTIME_RUNS_ROOT", None)
+        else:
+            os.environ["BRIDGE_RUNTIME_RUNS_ROOT"] = old_runs_root
+        if old_observer_root is None:
+            os.environ.pop("BRIDGE_SESSION_OBSERVER_ROOT", None)
+        else:
+            os.environ["BRIDGE_SESSION_OBSERVER_ROOT"] = old_observer_root
+        if old_run_id is not None:
+            os.environ["BRIDGE_RUN_ID"] = old_run_id
+        if old_control_run_id is not None:
+            os.environ["CLAUDE_CONTROL_RUN_ID"] = old_control_run_id
+        if old_child is not None:
+            os.environ["BRIDGE_CHILD_CLAUDE_SESSION"] = old_child
+    return {"hook_observer_rebind": "passed"}
+
+
 def main() -> None:
     workspace_tmp = Path.cwd() / ".runtime_smoke_tmp"
     workspace_tmp.mkdir(parents=True, exist_ok=True)
@@ -1174,6 +1275,7 @@ def main() -> None:
         negative_control_root, negative_runs_root = build_fixture(runtime_dir / "negative")
         negative = run_negative_tests(negative_control_root, negative_runs_root)
         cli_executor = run_cli_executor_policy_tests(runtime_dir)
+        hook_observer = run_hook_observer_rebind_tests(runtime_dir, runs_root)
         summary = {
             "success_status": success["lifecycle"]["status_index"]["bw_success"],
             "success_phase": success["current_phase"],
@@ -1194,6 +1296,7 @@ def main() -> None:
             "sdk_reject_status": sdk["reject_status"],
             "negative_tests": negative["negative_tests"],
             "cli_executor_policy": cli_executor["cli_executor_policy"],
+            "hook_observer_rebind": hook_observer["hook_observer_rebind"],
             "open_bridge_window_ids": orphan["lifecycle"]["open_bridge_window_ids"],
             "inbox_exists": (runs_root / "run_demo" / "main_leader_inbox.jsonl").exists(),
             "runtime_dir": str(runtime_dir),

@@ -167,7 +167,10 @@ def observer_binding(
     binding = packet.get("binding") if isinstance(packet.get("binding"), dict) else {}
     active = read_active_run(payload)
     session_id = session_id_from_payload(payload, tool_input)
+    session_binding = read_latest_session_binding(session_id) if session_id else {}
     run_id = detect_run_id({**payload, "tool_input": tool_input, "packet": packet}) or ""
+    if not run_id and isinstance(session_binding.get("run_id"), str):
+        run_id = str(session_binding.get("run_id") or "")
     if run_id:
         run_binding_state = "bound_to_run"
     elif active.get("run_id"):
@@ -178,6 +181,9 @@ def observer_binding(
     if is_bridge_child_session():
         session_kind = "bridge_child"
         binding_source = "env"
+    elif session_binding.get("run_id"):
+        session_kind = str(session_binding.get("session_kind") or "bridge_child")
+        binding_source = "session_binding"
     elif run_binding_state in {"bound_to_run", "inferred"}:
         session_kind = "main_leader"
         binding_source = "active_run" if run_binding_state == "inferred" else "payload"
@@ -188,26 +194,72 @@ def observer_binding(
         payload.get("agent_type")
         or tool_input.get("agent_type")
         or os.environ.get("BRIDGE_AGENT_TYPE")
+        or session_binding.get("agent_type")
         or ("bridge-leader" if is_bridge_child_session() else "main-leader")
     )
-    agent_id = payload.get("agent_id") or tool_input.get("agent_id") or os.environ.get("BRIDGE_AGENT_ID") or agent_type
-    teammate_id = payload.get("teammate_id") or tool_input.get("teammate_id") or payload.get("agent_id") or tool_input.get("agent_id")
+    agent_id = payload.get("agent_id") or tool_input.get("agent_id") or os.environ.get("BRIDGE_AGENT_ID") or session_binding.get("agent_id") or agent_type
+    teammate_id = (
+        payload.get("teammate_id")
+        or tool_input.get("teammate_id")
+        or session_binding.get("teammate_id")
+        or payload.get("agent_id")
+        or tool_input.get("agent_id")
+    )
     return {
         "session_kind": session_kind,
         "run_binding_state": run_binding_state,
         "session_id": session_id,
         "run_id": run_id or None,
-        "main_session_id": control_main_session_id(payload, tool_input, packet) or active.get("main_session_id"),
-        "sub_session_id": control_binding_value("sub_session_id", payload, tool_input, packet, binding),
-        "bridge_window_id": control_binding_value("bridge_window_id", payload, tool_input, packet, binding),
-        "team_id": control_binding_value("team_id", payload, tool_input, packet, binding),
-        "task_id": control_binding_value("task_id", payload, tool_input, packet, binding),
-        "teammate_id": teammate_id,
+        "main_session_id": control_main_session_id(payload, tool_input, packet) or active.get("main_session_id") or session_binding.get("main_session_id"),
+        "sub_session_id": control_binding_value("sub_session_id", payload, tool_input, packet, binding) or session_binding.get("sub_session_id"),
+        "bridge_window_id": control_binding_value("bridge_window_id", payload, tool_input, packet, binding) or session_binding.get("bridge_window_id"),
+        "team_id": control_binding_value("team_id", payload, tool_input, packet, binding) or session_binding.get("team_id"),
+        "task_id": control_binding_value("task_id", payload, tool_input, packet, binding) or session_binding.get("task_id"),
+        "teammate_id": teammate_id or session_binding.get("teammate_id"),
         "agent_id": agent_id,
         "agent_type": agent_type,
-        "display_name": payload.get("display_name") or tool_input.get("display_name") or teammate_id or agent_type,
+        "display_name": payload.get("display_name") or tool_input.get("display_name") or teammate_id or session_binding.get("display_name") or agent_type,
         "binding_source": binding_source,
     }
+
+
+def read_latest_session_binding(session_id: str | None) -> dict[str, Any]:
+    if not session_id:
+        return {}
+    target = str(session_id).strip()
+    if not target:
+        return {}
+    candidates = [session_observer_root() / "session_bindings.jsonl"]
+    try:
+        run_root = runtime_runs_root()
+        if run_root.exists():
+            candidates.extend(run_root.glob("*/session_bindings.jsonl"))
+    except Exception:
+        pass
+    for path in candidates:
+        binding = _latest_session_binding_from_file(path, target)
+        if binding:
+            return binding
+    return {}
+
+
+def _latest_session_binding_from_file(path: Path, session_id: str) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return {}
+    for line in reversed(lines[-500:]):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(record, dict) and str(record.get("session_id") or "").strip() == session_id:
+            return record
+    return {}
 
 
 def control_main_session_id(
@@ -651,6 +703,77 @@ def normalized_tool_input(tool_name: str, tool_input: dict[str, Any]) -> dict[st
     if tool_name == "Bash" and "cwd" in tool_input:
         preview["cwd"] = str(tool_input.get("cwd"))[:500]
     return preview
+
+
+def bash_execution_soft_reminders(tool_name: str, tool_input: dict[str, Any], binding: dict[str, Any], *, after: bool = False, tool_response: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    if tool_name != "Bash":
+        return []
+    actor = " ".join(
+        str(binding.get(key) or "")
+        for key in ("teammate_id", "agent_id", "agent_type", "display_name")
+    ).casefold()
+    if "executor" not in actor:
+        return []
+    command = str(tool_input.get("command") or "").strip()
+    if not command:
+        return []
+    lowered = command.casefold()
+    training_like = any(token in lowered for token in ("train", "finetune", "fine-tune", "accelerate", "torchrun", "deepspeed", "trl", "sft", "dpo", "opd", "evaluate", "eval"))
+    gpu_related = any(token in lowered for token in ("cuda", "gpu", "nvidia", "torchrun", "deepspeed", "accelerate"))
+    if not training_like and not gpu_related:
+        return []
+    smoke_like = any(token in lowered for token in ("smoke", "dry-run", "dry_run", "sanity", "quick", "debug", "--max_steps 1", "--max_steps=1", "--max-steps 1", "--max-steps=1"))
+    has_gpu_probe = any(token in lowered for token in ("nvidia-smi", "gpustat", "torch.cuda.mem", "memory_allocated", "memory_reserved"))
+    has_batch_hint = any(token in lowered for token in ("batch", "micro", "gradient_accumulation", "gradient-accumulation", "per_device", "per-device", "accumulation_steps"))
+    has_manifest_hint = any(token in lowered for token in ("manifest", "run_manifest", "log_manifest"))
+    reminders: list[dict[str, Any]] = []
+    if smoke_like:
+        if not has_gpu_probe:
+            reminders.append(
+                {
+                    "level": "info",
+                    "code": "executor_smoke_gpu_probe_recommended",
+                    "message": "This looks like a smoke/debug execution. Do not kill it for low memory, but record a quick GPU/memory probe if accelerator shape matters.",
+                }
+            )
+        return reminders
+    if not has_gpu_probe:
+        reminders.append(
+            {
+                "level": "warn",
+                "code": "executor_formal_gpu_probe_missing",
+                "message": "Formal-looking executor Bash should include or be paired with GPU memory monitoring evidence such as nvidia-smi/gpustat or framework memory stats.",
+            }
+        )
+    if not has_batch_hint:
+        reminders.append(
+            {
+                "level": "warn",
+                "code": "executor_formal_batch_basis_missing",
+                "message": "Formal-looking executor Bash should make batch/microbatch/gradient accumulation/effective batch basis explicit or reference the smoke-derived config.",
+            }
+        )
+    if not has_manifest_hint:
+        reminders.append(
+            {
+                "level": "warn",
+                "code": "executor_log_manifest_reminder",
+                "message": "Formal-looking executor Bash should create/update the log-folder manifest and report its path; filenames alone are not sufficient.",
+            }
+        )
+    if after and isinstance(tool_response, dict):
+        stdout = str(tool_response.get("stdout") or tool_response.get("output") or "")
+        stderr = str(tool_response.get("stderr") or "")
+        combined = f"{stdout}\n{stderr}".casefold()
+        if "nvidia-smi" not in combined and "memory" not in combined and "cuda" not in combined:
+            reminders.append(
+                {
+                    "level": "info",
+                    "code": "executor_formal_output_lacks_memory_evidence",
+                    "message": "Bash output does not show GPU memory evidence. If this was formal execution, follow with a non-destructive memory/log probe rather than treating the run as complete.",
+                }
+            )
+    return reminders
 
 
 def tool_file_refs(tool_name: str, tool_input: dict[str, Any], *, after: bool = False) -> list[dict[str, Any]]:

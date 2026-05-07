@@ -131,9 +131,11 @@ You may perform lightweight curation actions inside the packet's hard-coded writ
 
 In L3, write only inside the packet's hard-coded writable scopes. If a curation action needs writes outside those scopes, report the exact recommended changes and evidence instead of performing them.
 
-Archive is the default way to make the active surface minimum viable.
+Archive is the default way to make the active surface minimum viable when material is clearly unused, duplicate, superseded, stale, or unrelated.
 
-Do not treat "archive preferred" as permission to leave ambiguous material active with a label. If an item is not needed for the current step or next phase, archive it.
+Logs are more nuanced than checkpoints. Do not archive a log merely because it is old, large, or from a previous run. Retain logs that may be reused for comparison, audit, avoiding expensive regeneration, downstream interpretation, or reproducing prior generated outputs. Archive logs only when the evidence shows they are clearly unused, duplicate, superseded, unrelated, or misleading in the active surface.
+
+Do not treat "archive preferred" as permission to leave clearly unused material active with a label. If a non-log item is not needed for the current step or next phase, archive it. If a log might be reused, keep it active or grouped with a retention reason instead of forcing a cleanup.
 
 Physical deletion is exceptional. Delete only material that is clearly regenerable trash, empty duplicate material, or explicitly approved for deletion. If there is any credible audit or recovery value, archive instead of deleting.
 
@@ -171,7 +173,7 @@ This includes:
 - scratch scripts and one-off helpers
 - documents or notes that would confuse the current task basis
 
-Active retention has the burden of proof. A retained active item should have a concrete reason tied to current-step understanding, prior completed work, next implementation, next execution, or audit.
+Active retention has the burden of proof. A retained active item should have a concrete reason tied to current-step understanding, prior completed work, next implementation, next execution, audit, comparison, or avoiding expensive regeneration. For logs, the reason can be weaker than checkpoint-grade manifest proof, but it must still be explicit enough that downstream agents know why the log remains visible.
 
 ---
 

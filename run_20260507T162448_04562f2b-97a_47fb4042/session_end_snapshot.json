@@ -1,9 +1,0 @@
-{
-  "schema_version": "0.1.0",
-  "run_id": "run_20260507T162448_04562f2b-97a_47fb4042",
-  "ended_at": "2026-05-07T16:31:18.866600+00:00",
-  "reason": "other",
-  "session_id": "62af9d2e-d7a6-4905-bb8b-a27a1be996e8",
-  "cwd": "/data03/liang/mjy/safe_opd",
-  "hook_event_name": "SessionEnd"
-}

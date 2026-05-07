@@ -5,6 +5,7 @@ from common import (
     compact_tool_target,
     control_binding_value,
     control_main_session_id,
+    bash_execution_soft_reminders,
     detect_run_id,
     emit_observer_record,
     invoke_runtime_event,
@@ -157,6 +158,7 @@ def _emit_tool_event(payload: dict, tool_input: dict, tool_name: str, *, status:
     timestamp = now_iso()
     binding = observer_binding(payload, tool_input)
     tool_use_id = payload.get("tool_use_id") or tool_input.get("tool_use_id")
+    soft_reminders = bash_execution_soft_reminders(tool_name, tool_input, binding, after=False)
     record = {
         "timestamp": timestamp,
         **binding,
@@ -173,6 +175,7 @@ def _emit_tool_event(payload: dict, tool_input: dict, tool_name: str, *, status:
         "safe_input_preview": safe_input_preview(tool_input),
         "file_refs": tool_file_refs(tool_name, tool_input, after=False),
         "output_summary": None,
+        "soft_reminders": soft_reminders,
         **tool_detail_fields(tool_name, tool_input, after=False),
     }
     emit_observer_record("tool_events", record)
@@ -189,6 +192,21 @@ def _emit_tool_event(payload: dict, tool_input: dict, tool_name: str, *, status:
             "project_root": payload.get("project_root") or tool_input.get("project_root"),
         },
     )
+    for reminder in soft_reminders:
+        emit_observer_record(
+            "session_events",
+            {
+                "timestamp": timestamp,
+                **binding,
+                "event_type": "soft_tool_reminder",
+                "tool_name": tool_name,
+                "tool_use_id": tool_use_id,
+                "message_preview": reminder.get("message"),
+                "reminder": reminder,
+                "cwd": payload.get("cwd") or tool_input.get("cwd"),
+                "project_root": payload.get("project_root") or tool_input.get("project_root"),
+            },
+        )
 
 
 def _action_for_tool(tool_name: str) -> str:

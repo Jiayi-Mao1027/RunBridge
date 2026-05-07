@@ -87,7 +87,7 @@ From `l3_bridge`, the graph intentionally allows `l3_bridge -> l3_bridge` and `l
 
 L3 packets have a documentation responsibility. When the work touches docs, Markdown, `CLAUDE.md`, README, setup/usage guidance, workflow rules, or agent behavior, L3 must explicitly decide whether repo-facing documentation needs a bounded update. `CLAUDE.md` is a first-class L3 target for workflow and agent-behavior changes.
 
-L3 packets also carry a minimum-active-surface responsibility. Curator should first understand the current step, what prior work has already completed, and what the next phase actually needs; then it should archive stale, duplicate, ambiguous, or non-current logs, datasets, checkpoints, generated outputs, stale code copies, scratch scripts, and misleading inactive documents out of active reach. Archive is the default for material with possible audit value. Physical deletion is reserved for clearly disposable material or explicit approval.
+L3 packets also carry a minimum-active-surface responsibility. Curator should first understand the current step, what prior work has already completed, and what the next phase actually needs; then it should archive stale, duplicate, ambiguous, or non-current datasets, checkpoints, generated outputs, stale code copies, scratch scripts, and misleading inactive documents out of active reach. Logs are cleaned more conservatively: retain logs that may be reused for comparison, audit, avoiding expensive regeneration, or downstream interpretation; archive only logs that are clearly unused, duplicate, superseded, unrelated, or misleading. Archive is the default for material with possible audit value. Physical deletion is reserved for clearly disposable material or explicit approval.
 
 L3 packets carry a semantic-resolution responsibility as well. When model/method names, checkpoints, datasets, prompts, configs, metrics, or comparisons are involved, L3 must resolve the concrete identities or explicitly mark them blocked/escalated. If the user did not request changing dataset, prompt, split, metric, or config, the packet should preserve the current active basis and name where that basis came from, so L4 does not guess.
 
@@ -96,6 +96,8 @@ L4 implement inherits that hygiene requirement. Implementors should modify exist
 L4 execute is intentionally different from short implementation or review windows. It may own long-running training or evaluation jobs. For L4 execute, `TeamIdle` means the team is waiting or polling; it is not completion and is not a reason to delete the team. If executor launches an owned long-running process, the bridge window should remain open until the process reaches a terminal state and postrun has audited terminal logs/artifacts.
 
 L4 execute also treats smoke parameters as evidence, not as the final run shape. Executor should run bounded smoke checks to choose formal per-device batch size, microbatch, gradient accumulation, precision, sequence length, and effective batch size, and postrun should audit that formal settings follow that evidence.
+
+Every generated formal log folder must contain an internal manifest, analogous to checkpoint manifests. The manifest is the durable identity record and should include run/window/task IDs, command, cwd, environment, semantic basis, smoke evidence refs, formal parameters/effective batch size, process refs, log files, expected outputs/checkpoints, timestamps, terminal status, and reuse/dependency notes. File names alone are not sufficient.
 
 L4 execute has strict environment and GPU rules. Formal execution uses conda env `mjy`; use `conda run -n mjy ...` or record an equivalent `conda activate mjy` context, and do not use venv/virtualenv for formal execute. Unless the user explicitly requests smoke/dry-run/conservative execution, formal GPU runs must exceed 90% of selected GPU total memory after warmup. For typical 80GB GPUs, that usually means observed usage above 70GB; lower usage is a deviation or blocker unless backed by explicit approval or hard resource evidence.
 
@@ -122,7 +124,7 @@ The bridge leader must stay inside the packet. The packet defines what can be re
 
 Task specs preserve compound user intent instead of reducing it to one short description. The packet includes the original instruction, an `instruction_coverage_checklist`, and preserved context fields. Teammate assignments must report whether each checklist item was completed, deferred with a concrete reason, blocked, or escalated. This prevents a multi-part user request from being half-executed and then treated as complete.
 
-Task specs also include `semantic_resolution_contract`. Runtime packet validation requires the report contract to include semantic identity resolution evidence, so downstream packets cannot silently drop checkpoint/dataset/prompt/config identity work.
+Task specs also include `semantic_resolution_contract`. Runtime packet validation requires the report contract to include semantic identity resolution evidence, so downstream packets cannot silently drop checkpoint/dataset/prompt/config identity work. L4 execute packets additionally require log manifest artifact evidence.
 
 ## Runtime And Ledgers
 
@@ -168,7 +170,7 @@ The runtime also writes read-only Bridge Companion observer streams. These are n
 
 - `bridge_packets.jsonl`: packet summary, user instruction, scope, team, completion/report contract
 - `agent_messages.jsonl`: bridge-leader to teammate assignment messages and checklist coverage refs
-- `tool_events.jsonl`: tool starts/completions, safe input previews, file refs, output summary, duration when available
+- `tool_events.jsonl`: real tool starts/completions, safe input previews, file refs, output summary, duration when available
 - `session_bindings.jsonl`: session-to-run/team/task/teammate binding facts for UI attribution
 - `session_events.jsonl`: safe session-level previews for prompts, tool starts/completions, stops, and session end
 - `teammate_reports.jsonl`: structured progress, completed/open/blocked items, evidence refs, file refs
@@ -178,6 +180,8 @@ The runtime also writes read-only Bridge Companion observer streams. These are n
 - `companion_events.jsonl`: merged observer stream with source backrefs
 
 Tool observer records are emitted for all Claude Code sessions, not only bridge child sessions. Records include `session_kind`, `run_binding_state`, `session_id`, run/window/team/task IDs when available, `teammate_id`, `agent_type`, `tool_name`, `tool_use_id`, and `status`. If a hook cannot bind a tool event to a run, it writes the safe preview to `.claude/runtime_state/session_observer/` so Companion can still show direct or unbound session activity.
+
+UI must not synthesize low-level actions from reports or artifact refs. It should show `Read` / `Edit` / `Write` / `MultiEdit` / `Bash` / `Grep` / `Glob` / `LS` only when those real hook records exist in `tool_events.jsonl`. The hooks rebind child-session tool events through `session_bindings.jsonl` when a tool payload lacks direct run fields, so subagent tool calls can still land in the run-scoped observer stream.
 
 For UI-style "what is happening now" display, hooks maintain `active_operations.json` beside the run observer files, and a global `.claude/runtime_state/session_observer/active_operations.json` for unbound sessions. This snapshot is derived from tool started/completed pairs and contains the active tool and last completed tool per session/teammate.
 

@@ -1775,6 +1775,13 @@ def _validate_packet_policy_fields(packet: dict[str, Any], snapshot: dict[str, A
     semantic_contract = task_spec.get("semantic_resolution_contract")
     if not isinstance(semantic_contract, dict) or not semantic_contract.get("required_identity_fields"):
         reasons.append("bridge_packet_missing_semantic_resolution_contract")
+    if str(packet.get("target_phase")) == "l4_execute":
+        if "log_manifest" not in set(completion.get("required_artifacts", [])):
+            reasons.append("bridge_packet_execute_log_manifest_contract_missing")
+        if "log manifest path" not in set(report.get("required_evidence", [])):
+            reasons.append("bridge_packet_execute_log_manifest_contract_missing")
+        if "artifact_manifests" not in set(report.get("required_sections", [])):
+            reasons.append("bridge_packet_execute_log_manifest_contract_missing")
     if packet.get("approval_requirements") not in (None, []):
         reasons.append("bridge_packet_approval_requirements_not_runtime_owned")
     if packet.get("expires_at") is not None:

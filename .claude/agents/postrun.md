@@ -139,6 +139,7 @@ You should inspect, when relevant:
 - stage-by-stage execution records
 - smoke evidence used to choose formal execution settings
 - formal per-device batch size, microbatch, gradient accumulation, precision, sequence length, and effective batch size
+- log folder manifests stored inside generated formal log folders
 - environment evidence proving conda env `mjy` was used
 - accelerator utilization records, including GPU memory use for training runs
 
@@ -223,6 +224,7 @@ Ask:
 - Did the stages complete in the intended order?
 - Are outputs complete and internally coherent?
 - Do logs show silent or partial failure?
+- Does each generated formal log folder contain an internal manifest, and does that manifest match the actual command, semantic basis, process refs, parameters, log files, outputs, and terminal status?
 - Were formal batch/effective-batch settings chosen from smoke evidence rather than accidentally inheriting toy smoke settings?
 - Did formal training use the intended accelerator and a credible amount of available memory?
 - Did formal execution use conda env `mjy` rather than venv/virtualenv?
