@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,13 @@ def runtime_runs_root() -> Path:
         return Path(configured).expanduser().resolve()
     project_root = Path(os.environ.get("BRIDGE_PROJECT_ROOT") or os.getcwd()).resolve()
     return claude_root() / "runtime_state" / "projects" / project_state_key(project_root) / "runs"
+
+
+def session_observer_root() -> Path:
+    configured = os.environ.get("BRIDGE_SESSION_OBSERVER_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return claude_root() / "runtime_state" / "session_observer"
 
 
 def active_run_path() -> Path:
@@ -125,6 +133,81 @@ def detect_run_id(payload: dict[str, Any]) -> str | None:
     if isinstance(active_run_id, str) and active_run_id.strip():
         return active_run_id.strip()
     return None
+
+
+def session_id_from_payload(payload: dict[str, Any] | None = None, tool_input: dict[str, Any] | None = None) -> str | None:
+    for source in (payload or {}, tool_input or {}):
+        if not isinstance(source, dict):
+            continue
+        for key in ("session_id", "sessionId", "main_session_id"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for key in ("session", "context", "transcript"):
+            nested = source.get(key)
+            if isinstance(nested, dict):
+                found = session_id_from_payload(nested, None)
+                if found:
+                    return found
+    for key in ("CLAUDE_SESSION_ID", "SESSION_ID"):
+        value = os.environ.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def observer_binding(
+    payload: dict[str, Any] | None = None,
+    tool_input: dict[str, Any] | None = None,
+    packet: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = payload or {}
+    tool_input = tool_input or {}
+    packet = packet if isinstance(packet, dict) else {}
+    binding = packet.get("binding") if isinstance(packet.get("binding"), dict) else {}
+    active = read_active_run(payload)
+    session_id = session_id_from_payload(payload, tool_input)
+    run_id = detect_run_id({**payload, "tool_input": tool_input, "packet": packet}) or ""
+    if run_id:
+        run_binding_state = "bound_to_run"
+    elif active.get("run_id"):
+        run_id = str(active.get("run_id") or "")
+        run_binding_state = "inferred"
+    else:
+        run_binding_state = "unbound"
+    if is_bridge_child_session():
+        session_kind = "bridge_child"
+        binding_source = "env"
+    elif run_binding_state in {"bound_to_run", "inferred"}:
+        session_kind = "main_leader"
+        binding_source = "active_run" if run_binding_state == "inferred" else "payload"
+    else:
+        session_kind = "direct_session"
+        binding_source = "unbound"
+    agent_type = (
+        payload.get("agent_type")
+        or tool_input.get("agent_type")
+        or os.environ.get("BRIDGE_AGENT_TYPE")
+        or ("bridge-leader" if is_bridge_child_session() else "main-leader")
+    )
+    agent_id = payload.get("agent_id") or tool_input.get("agent_id") or os.environ.get("BRIDGE_AGENT_ID") or agent_type
+    teammate_id = payload.get("teammate_id") or tool_input.get("teammate_id") or payload.get("agent_id") or tool_input.get("agent_id")
+    return {
+        "session_kind": session_kind,
+        "run_binding_state": run_binding_state,
+        "session_id": session_id,
+        "run_id": run_id or None,
+        "main_session_id": control_main_session_id(payload, tool_input, packet) or active.get("main_session_id"),
+        "sub_session_id": control_binding_value("sub_session_id", payload, tool_input, packet, binding),
+        "bridge_window_id": control_binding_value("bridge_window_id", payload, tool_input, packet, binding),
+        "team_id": control_binding_value("team_id", payload, tool_input, packet, binding),
+        "task_id": control_binding_value("task_id", payload, tool_input, packet, binding),
+        "teammate_id": teammate_id,
+        "agent_id": agent_id,
+        "agent_type": agent_type,
+        "display_name": payload.get("display_name") or tool_input.get("display_name") or teammate_id or agent_type,
+        "binding_source": binding_source,
+    }
 
 
 def control_main_session_id(
@@ -206,6 +289,75 @@ def _find_nested_run_id(value: Any) -> str | None:
         if parsed:
             return _find_nested_run_id(parsed)
     return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _file_hash(path_text: str) -> str | None:
+    if not path_text:
+        return None
+    try:
+        path = Path(path_text).expanduser()
+        if not path.exists() or not path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()[:16]
+    except Exception:
+        return None
+
+
+def _line_delta(old_text: str, new_text: str, edits: list[Any]) -> tuple[int | None, int | None]:
+    if edits:
+        added = 0
+        removed = 0
+        for edit in edits:
+            if not isinstance(edit, dict):
+                continue
+            old = str(edit.get("old_string") or "")
+            new = str(edit.get("new_string") or "")
+            removed += len(old.splitlines()) if old else 0
+            added += len(new.splitlines()) if new else 0
+        return added, removed
+    if old_text or new_text:
+        return len(new_text.splitlines()) if new_text else 0, len(old_text.splitlines()) if old_text else 0
+    return None, None
+
+
+def _safe_diff_preview(tool_name: str, tool_input: dict[str, Any], limit: int = 1200) -> str:
+    if tool_name == "Write":
+        text = str(tool_input.get("content") or "")
+        return redact_observer_text(text[:limit])
+    if tool_name == "Edit":
+        old = str(tool_input.get("old_string") or "")
+        new = str(tool_input.get("new_string") or "")
+        preview = f"- {old[:400]}\n+ {new[:400]}"
+        return redact_observer_text(preview[:limit])
+    edits = tool_input.get("edits") if isinstance(tool_input.get("edits"), list) else []
+    parts = []
+    for edit in edits[:5]:
+        if not isinstance(edit, dict):
+            continue
+        parts.append(f"- {str(edit.get('old_string') or '')[:160]}\n+ {str(edit.get('new_string') or '')[:160]}")
+    return redact_observer_text("\n".join(parts)[:limit])
+
+
+def _count_probable_files(output: str) -> int | None:
+    if not output:
+        return None
+    seen = set()
+    for line in output.splitlines():
+        candidate = line.split(":", 1)[0].strip()
+        if candidate:
+            seen.add(candidate)
+    return len(seen) if seen else None
 
 
 def parse_embedded_json(text: Any) -> dict[str, Any]:
@@ -334,6 +486,123 @@ def emit_companion_event(kind: str, payload: dict[str, Any]) -> None:
     )
 
 
+def emit_session_observer_event(kind: str, payload: dict[str, Any]) -> None:
+    root = session_observer_root()
+    event_path = root / f"{kind}.jsonl"
+    sequence = next_jsonl_sequence(event_path)
+    record = {
+        "timestamp": payload.get("timestamp") or now_iso(),
+        "event_type": kind,
+        **payload,
+        "sequence": payload.get("sequence") or sequence,
+        "monotonic_index": payload.get("monotonic_index") or sequence,
+    }
+    append_jsonl(event_path, record)
+    if kind != "session_events":
+        session_event_path = root / "session_events.jsonl"
+        session_sequence = next_jsonl_sequence(session_event_path)
+        append_jsonl(
+            session_event_path,
+            {
+                **record,
+                "session_sequence": session_sequence,
+                "source_kind": kind,
+                "source_file": f"{kind}.jsonl",
+                "source_sequence": record["sequence"],
+                "source_offset": record["sequence"],
+            },
+        )
+
+
+def emit_observer_record(kind: str, payload: dict[str, Any]) -> None:
+    run_id = payload.get("run_id")
+    if isinstance(run_id, str) and run_id.strip():
+        emit_companion_event(kind, payload)
+    emit_session_observer_event(kind, payload)
+    if kind == "tool_events":
+        update_active_operation(payload)
+        maybe_emit_session_binding(payload)
+
+
+def maybe_emit_session_binding(payload: dict[str, Any]) -> None:
+    session_id = payload.get("session_id")
+    if not session_id:
+        return
+    record = {
+        "timestamp": payload.get("timestamp") or now_iso(),
+        "session_id": session_id,
+        "run_id": payload.get("run_id"),
+        "bridge_window_id": payload.get("bridge_window_id"),
+        "team_id": payload.get("team_id"),
+        "task_id": payload.get("task_id"),
+        "teammate_id": payload.get("teammate_id"),
+        "agent_type": payload.get("agent_type"),
+        "display_name": payload.get("display_name") or payload.get("teammate_id") or payload.get("agent_type"),
+        "binding_source": payload.get("binding_source") or "unknown",
+        "session_kind": payload.get("session_kind") or "unknown",
+        "run_binding_state": payload.get("run_binding_state") or "unknown",
+    }
+    if record["run_id"]:
+        emit_companion_event("session_bindings", record)
+    emit_session_observer_event("session_bindings", record)
+
+
+def update_active_operation(payload: dict[str, Any]) -> None:
+    status = str(payload.get("status") or "").strip().lower()
+    if status not in {"started", "completed", "failed"}:
+        return
+    run_id = payload.get("run_id")
+    if isinstance(run_id, str) and run_id.strip():
+        path = runtime_runs_root() / run_id.strip() / "active_operations.json"
+    else:
+        path = session_observer_root() / "active_operations.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    teammates = state.get("teammates") if isinstance(state.get("teammates"), list) else []
+    key = str(payload.get("teammate_id") or payload.get("agent_id") or payload.get("session_id") or "unknown")
+    entry = None
+    for item in teammates:
+        if isinstance(item, dict) and str(item.get("teammate_id") or item.get("agent_id") or item.get("session_id")) == key:
+            entry = item
+            break
+    if entry is None:
+        entry = {"teammate_id": payload.get("teammate_id"), "agent_id": payload.get("agent_id"), "session_id": payload.get("session_id")}
+        teammates.append(entry)
+    entry.update(
+        {
+            "teammate_id": payload.get("teammate_id"),
+            "agent_type": payload.get("agent_type"),
+            "display_name": payload.get("display_name") or payload.get("agent_type"),
+            "session_id": payload.get("session_id"),
+            "bridge_window_id": payload.get("bridge_window_id"),
+            "team_id": payload.get("team_id"),
+            "task_id": payload.get("task_id"),
+        }
+    )
+    tool_card = {
+        "tool_use_id": payload.get("tool_use_id"),
+        "tool_name": payload.get("tool_name"),
+        "started_at": payload.get("started_at") or payload.get("timestamp"),
+        "completed_at": payload.get("completed_at"),
+        "target": payload.get("target"),
+        "status": "running" if status == "started" else status,
+        "summary": payload.get("summary"),
+    }
+    if status == "started":
+        entry["active_tool"] = tool_card
+    else:
+        active = entry.get("active_tool") if isinstance(entry.get("active_tool"), dict) else {}
+        if not active or active.get("tool_use_id") == payload.get("tool_use_id"):
+            entry["active_tool"] = None
+        entry["last_completed_tool"] = tool_card
+    state.update({"run_id": run_id, "updated_at": payload.get("timestamp") or now_iso(), "teammates": teammates})
+    write_json(path, state)
+
+
 def compact_tool_target(tool_name: str, tool_input: dict[str, Any]) -> str | None:
     keys = {
         "Read": ("file_path", "path"),
@@ -441,6 +710,66 @@ def output_summary(tool_response: dict[str, Any], *, failed: bool) -> dict[str, 
     }
 
 
+def tool_detail_fields(tool_name: str, tool_input: dict[str, Any], tool_response: dict[str, Any] | None = None, *, failed: bool = False, after: bool = False) -> dict[str, Any]:
+    tool_response = tool_response if isinstance(tool_response, dict) else {}
+    if tool_name == "Read":
+        output = str(tool_response.get("output") or tool_response.get("stdout") or "")
+        details = {
+            "read_options": {
+                "offset": _int_or_none(tool_input.get("offset")),
+                "limit": _int_or_none(tool_input.get("limit")),
+            }
+        }
+        if after:
+            details["output_summary"] = {
+                "lines_returned": len(output.splitlines()) if output else None,
+                "truncated": len(output) > 1200,
+            }
+        return details
+    if tool_name in {"Edit", "Write", "MultiEdit"}:
+        file_path = str(tool_input.get("file_path") or tool_input.get("path") or "").strip()
+        operation = "multi_edit" if tool_name == "MultiEdit" else ("write" if tool_name == "Write" else "replace")
+        edits = tool_input.get("edits") if isinstance(tool_input.get("edits"), list) else []
+        old_text = str(tool_input.get("old_string") or "")
+        new_text = str(tool_input.get("new_string") or tool_input.get("content") or "")
+        added, removed = _line_delta(old_text, new_text, edits)
+        return {
+            "edit_summary": {
+                "operation": operation,
+                "hunks": len(edits) if edits else (1 if tool_name in {"Edit", "Write"} else 0),
+                "lines_added": added,
+                "lines_removed": removed,
+                "before_hash": _file_hash(file_path) if not after else None,
+                "after_hash": _file_hash(file_path) if after else None,
+                "safe_diff_preview": _safe_diff_preview(tool_name, tool_input),
+            }
+        }
+    if tool_name in {"Grep", "Glob"}:
+        output = str(tool_response.get("output") or tool_response.get("stdout") or "")
+        return {
+            "search_summary": {
+                "pattern_preview": redact_observer_text(str(tool_input.get("pattern") or tool_input.get("glob") or ""))[:300],
+                "path": tool_input.get("path"),
+                "files_matched": _count_probable_files(output),
+                "matches_returned": len(output.splitlines()) if output else None,
+            }
+        }
+    if tool_name == "Bash":
+        stdout = str(tool_response.get("stdout") or tool_response.get("output") or "")
+        stderr = str(tool_response.get("stderr") or "")
+        return {
+            "command_preview": redact_observer_text(str(tool_input.get("command") or ""))[:500],
+            "cwd": tool_input.get("cwd") or tool_input.get("workdir") or os.getcwd(),
+            "exit_code": tool_response.get("exit_code"),
+            "stdout_tail": stdout[-1200:] if stdout else None,
+            "stderr_tail": stderr[-1200:] if stderr else None,
+            "spawned_processes": tool_response.get("spawned_processes") if isinstance(tool_response.get("spawned_processes"), list) else [],
+            "long_running": bool(tool_response.get("long_running")),
+            "failed": failed,
+        }
+    return {}
+
+
 def tool_start_record(run_id: str, tool_use_id: str | None) -> dict[str, Any]:
     if not run_id or not tool_use_id:
         return {}
@@ -448,6 +777,20 @@ def tool_start_record(run_id: str, tool_use_id: str | None) -> dict[str, Any]:
     for record in reversed(read_jsonl(path)):
         if record.get("tool_use_id") == tool_use_id and record.get("status") == "started":
             return record
+    return {}
+
+
+def observer_tool_start_record(run_id: str | None, tool_use_id: str | None) -> dict[str, Any]:
+    if not tool_use_id:
+        return {}
+    paths = []
+    if isinstance(run_id, str) and run_id.strip():
+        paths.append(runtime_runs_root() / run_id.strip() / "tool_events.jsonl")
+    paths.append(session_observer_root() / "tool_events.jsonl")
+    for path in paths:
+        for record in reversed(read_jsonl(path)):
+            if record.get("tool_use_id") == tool_use_id and record.get("status") == "started":
+                return record
     return {}
 
 

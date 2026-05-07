@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from common import detect_run_id, is_bridge_child_session, read_hook_input, runtime_runs_root, stop_block
+from common import detect_run_id, emit_observer_record, is_bridge_child_session, now_iso, observer_binding, read_hook_input, runtime_runs_root, stop_block
 
 
 def load_run_ledger(run_id: str) -> dict:
@@ -17,10 +17,22 @@ def load_run_ledger(run_id: str) -> dict:
 
 
 def main() -> int:
+    payload = read_hook_input()
+    binding = observer_binding(payload)
+    emit_observer_record(
+        "session_events",
+        {
+            "timestamp": now_iso(),
+            **binding,
+            "event_type": "stop",
+            "message_preview": "stop requested",
+            "cwd": payload.get("cwd"),
+            "project_root": payload.get("project_root"),
+        },
+    )
+
     if is_bridge_child_session():
         return 0
-
-    payload = read_hook_input()
 
     if payload.get("stop_hook_active") is True:
         return 0

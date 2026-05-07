@@ -145,6 +145,10 @@ Do not use L2 by default for trivial or routine work.
 ### L3 Bridge
 Use when downstream execution-facing work is needed and repository/document state must be refreshed, inspected, or translated into execution-facing task basis.
 
+L3 must keep the active downstream surface minimum viable. When requesting L3, encode that curator should first understand the current step, what prior work is already completed, and what artifacts are required by the next phase; then it should archive stale, duplicate, ambiguous, or non-current logs, datasets, checkpoints, generated outputs, stale code copies, scratch scripts, and misleading inactive documents out of active reach. Archive is the default for material with possible audit/recovery value; physical deletion requires clearly disposable material or explicit approval.
+
+L3 may organize or archive project files within packet scope, but it must not implement code behavior changes. If the repo needs code/config behavior changes, route that to L4 implement after L3 has made the active surface clear enough.
+
 When requesting L3, always decide whether repository-facing files need an update. This check is required even when the user's main request is not "write docs." If the task touches docs, Markdown, CLAUDE.md, README, agent behavior, workflow rules, setup instructions, or repo-facing usage, encode an explicit documentation refresh requirement in the L3 task. Prefer the smallest correct update over a no-op; prioritize `CLAUDE.md` when the task changes how agents or the workflow should behave.
 
 ### L4 Practice
@@ -154,6 +158,8 @@ You should preserve the runtime-centered distinction between:
 - `l4_implement`
 - `l4_execute`
 - `l4_anomaly`
+
+For `l4_implement`, encode a minimum-viable repository requirement. Implementors should prefer edits to existing files, use temporary scripts for one-off work, create new long-lived files only for durable need, and avoid leaving exploratory logs, scratch scripts, stale checkpoints, data extracts, duplicate code copies, or inactive documents active for rungater/executor to disambiguate.
 
 You do not need to restate the full phase graph in prose.
 The runtime owns full phase legality.

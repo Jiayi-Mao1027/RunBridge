@@ -6,15 +6,16 @@ from common import (
     control_binding_value,
     control_main_session_id,
     detect_run_id,
-    emit_companion_event,
+    emit_observer_record,
     invoke_runtime_event,
-    is_bridge_child_session,
     load_last_bridge_packet,
     now_iso,
     normalized_tool_input,
+    observer_binding,
     pretool_deny,
     read_hook_input,
     safe_input_preview,
+    tool_detail_fields,
     tool_file_refs,
 )
 
@@ -34,8 +35,8 @@ def main() -> int:
     payload = read_hook_input()
     tool_name = str(payload.get("tool_name") or "").strip()
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-    if is_bridge_child_session() and tool_name:
-        _emit_child_tool_event(payload, tool_input, tool_name, status="started")
+    if tool_name:
+        _emit_tool_event(payload, tool_input, tool_name, status="started")
     if tool_name not in BRIDGE_TOOL_NAMES and tool_name not in START_BY_TOOL:
         return 0
 
@@ -152,34 +153,40 @@ def main() -> int:
     return 0
 
 
-def _emit_child_tool_event(payload: dict, tool_input: dict, tool_name: str, *, status: str) -> None:
+def _emit_tool_event(payload: dict, tool_input: dict, tool_name: str, *, status: str) -> None:
     timestamp = now_iso()
-    emit_companion_event(
-        "tool_events",
+    binding = observer_binding(payload, tool_input)
+    tool_use_id = payload.get("tool_use_id") or tool_input.get("tool_use_id")
+    record = {
+        "timestamp": timestamp,
+        **binding,
+        "tool_name": tool_name,
+        "tool_use_id": tool_use_id,
+        "action": _action_for_tool(tool_name),
+        "target": compact_tool_target(tool_name, tool_input),
+        "summary": compact_tool_summary(tool_name, tool_input),
+        "status": status,
+        "started_at": timestamp,
+        "completed_at": None,
+        "duration_ms": None,
+        "normalized_input": normalized_tool_input(tool_name, tool_input),
+        "safe_input_preview": safe_input_preview(tool_input),
+        "file_refs": tool_file_refs(tool_name, tool_input, after=False),
+        "output_summary": None,
+        **tool_detail_fields(tool_name, tool_input, after=False),
+    }
+    emit_observer_record("tool_events", record)
+    emit_observer_record(
+        "session_events",
         {
             "timestamp": timestamp,
-            "run_id": detect_run_id(payload) or "",
-            "main_session_id": control_main_session_id(payload, tool_input),
-            "sub_session_id": control_binding_value("sub_session_id", payload, tool_input),
-            "bridge_window_id": control_binding_value("bridge_window_id", payload, tool_input),
-            "team_id": control_binding_value("team_id", payload, tool_input),
-            "task_id": control_binding_value("task_id", payload, tool_input),
-            "teammate_id": payload.get("agent_id") or tool_input.get("agent_id"),
-            "agent_id": payload.get("agent_id") or tool_input.get("agent_id"),
-            "agent_type": payload.get("agent_type") or tool_input.get("agent_type"),
+            **binding,
+            "event_type": "tool_call_started",
             "tool_name": tool_name,
-            "tool_use_id": payload.get("tool_use_id") or tool_input.get("tool_use_id"),
-            "action": _action_for_tool(tool_name),
-            "target": compact_tool_target(tool_name, tool_input),
-            "summary": compact_tool_summary(tool_name, tool_input),
-            "status": status,
-            "started_at": timestamp,
-            "completed_at": None,
-            "duration_ms": None,
-            "normalized_input": normalized_tool_input(tool_name, tool_input),
-            "safe_input_preview": safe_input_preview(tool_input),
-            "file_refs": tool_file_refs(tool_name, tool_input, after=False),
-            "output_summary": None,
+            "tool_use_id": tool_use_id,
+            "message_preview": compact_tool_summary(tool_name, tool_input),
+            "cwd": payload.get("cwd") or tool_input.get("cwd"),
+            "project_root": payload.get("project_root") or tool_input.get("project_root"),
         },
     )
 

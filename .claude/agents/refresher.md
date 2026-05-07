@@ -85,7 +85,7 @@ You are only trying to fix documentation that materially matters for the active 
 
 ## 4. Writable Scope
 
-Your writable scope is the packet's hard-coded documentation scope.
+Your role writable scope is the documentation subset of the packet's hard-coded writable scope. L3 packets may grant broader writable scope so curator can archive artifacts, but that broader scope does not make you an artifact curator or implementation editor.
 
 Typical examples include:
 - `CLAUDE.md`

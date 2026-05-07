@@ -17,6 +17,8 @@ COMPANION_EVENT_KINDS = {
     "artifacts",
     "completion_checks",
     "process_events",
+    "session_events",
+    "session_bindings",
 }
 
 

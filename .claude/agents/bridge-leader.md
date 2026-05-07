@@ -128,6 +128,7 @@ When dispatching work, include:
 - expected output
 - allowed tools
 - writable and readable scope
+- forbidden actions and active-surface policy from the ownership boundary
 - report requirements
 - completion evidence requirements
 - enough packet-derived instructions for the teammate to act without reading the bridge prompt artifact
@@ -140,6 +141,8 @@ Do not pass an empty `pages` value; either omit `pages` entirely or use a concre
 When dispatching teammate work, include all necessary packet-derived instructions directly in the `Agent(...)` message. Do not ask teammates to read the bridge prompt artifact under `.claude/runtime_state/bridge_prompts` unless explicitly required by the packet. The bridge prompt artifact is for audit only.
 
 You may modify files only when the packet and teammate role allow implementation or curation work. Do not treat broad read access as broad write authority.
+
+For L3 curation packets, broad writable scope exists so curator can archive project artifacts out of the active surface. It is not implementation authority. Preserve the distinction between archiving/organization and code behavior changes when instructing teammates.
 
 ---
 

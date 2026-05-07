@@ -29,10 +29,27 @@ DEFAULT_FORBIDDEN_ACTIONS = [
     "destructive filesystem operations outside writable scopes",
     "external network calls unless explicitly approved",
     "dependency installation unless explicitly approved",
+    "implementation content edits during L3 artifact curation unless the file is human-facing documentation already in L3 doc scope",
+    "physical deletion of user/project artifacts unless the item is clearly regenerable trash, an empty duplicate, or explicitly approved",
 ]
+PHASE_ACTIVE_SURFACE_POLICIES = {
+    "l3_bridge": [
+        "Before curation, identify the current step, the prior completed work, and the artifacts that are actually needed for the next downstream phase.",
+        "Keep the active code, log, checkpoint, data, document, and script surfaces minimum viable: anything not needed for current understanding or next execution should leave the active surface.",
+        "Prefer aggressive archive/move-out over retention-with-labeling. Archive is the default for ambiguous or stale project artifacts; active retention requires a concrete next-phase reason.",
+        "Physical deletion is exceptional and must be limited to clearly regenerable trash, empty duplicates, or explicitly approved removals.",
+        "L3 may archive or organize files, but must not implement code behavior changes; code/config content changes belong to L4 implement.",
+    ],
+    "l4_implement": [
+        "Preserve the minimum viable repository surface while implementing: edit existing files when practical, use temporary scripts for one-off work, and create long-lived files only when there is a durable need.",
+        "Do not leave exploratory logs, checkpoints, data extracts, scratch code, or one-off scripts active unless they are required for the next phase.",
+        "Archive or remove from active reach any implementation byproducts that would confuse rungater, executor, or later readers.",
+        "Report every new long-lived file with its reason to remain active.",
+    ],
+}
 PHASE_OWNERSHIP_DEFAULTS = {
     "l2_advisory": {"readable_scopes": ["."], "writable_scopes": []},
-    "l3_bridge": {"readable_scopes": ["."], "writable_scopes": ["CLAUDE.md", "README.md", "docs/", "*.md"]},
+    "l3_bridge": {"readable_scopes": ["."], "writable_scopes": ["."]},
     "l4_implement": {"readable_scopes": ["."], "writable_scopes": ["."]},
     "l4_execute": {"readable_scopes": ["."], "writable_scopes": ["."]},
     "l4_anomaly": {"readable_scopes": ["."], "writable_scopes": []},
@@ -250,6 +267,7 @@ def _default_ownership_boundary(target_phase: str) -> dict[str, Any]:
         "writable_scopes": list(scopes["writable_scopes"]),
         "process_ownership_rules": ["only manage processes launched inside this bridge window"],
         "forbidden_actions": list(DEFAULT_FORBIDDEN_ACTIONS),
+        "active_surface_policy": list(PHASE_ACTIVE_SURFACE_POLICIES.get(target_phase, [])),
     }
 
 
@@ -334,6 +352,8 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
                         f"Allowed tools: {_json_list(teammate.get('allowed_tools'))}",
                         f"Readable scopes: {_json_list(ownership.get('readable_scopes'))}",
                         f"Writable scopes: {_json_list(ownership.get('writable_scopes'))}",
+                        f"Forbidden actions: {_json_list(ownership.get('forbidden_actions'))}",
+                        f"Active surface policy: {_json_list(ownership.get('active_surface_policy'))}",
                         f"Completion contract: {_json_dict(task_spec.get('completion_contract'))}",
                         f"Report contract: {_json_dict(task_spec.get('report_contract'))}",
                         *_phase_assignment_instructions(str(task_spec.get("target_phase") or ""), name),
@@ -354,10 +374,28 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
 def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> list[str]:
     if target_phase == "l3_bridge":
         return [
+            "L3 minimum-active-surface rule: first identify what this step is trying to do, what prior work is already done, and what files/artifacts are genuinely required for the next phase.",
+            "Archive-first curation rule: keep the active code, log, checkpoint, data, document, and script surfaces minimum viable. Archive or move out stale, duplicate, ambiguous, or non-current material instead of leaving it active with only a label.",
+            "Active-retention burden: every retained log/dataset/checkpoint/output/scratch script/document/code copy needs a concrete current-step or next-phase reason. If the reason is weak, archive it.",
+            "Deletion boundary: prefer archive over physical deletion. Delete only clearly regenerable trash, empty duplicates, or items explicitly approved for deletion; otherwise archive and report the archive path/reason.",
+            "L3 must not implement behavior changes in source/config code. If code or scripts are not active but may be historically useful, archive them; if code behavior must change, report it for L4 implement.",
             "L3 documentation rule: explicitly decide whether CLAUDE.md, README.md, docs/, or other Markdown files need updates for this task.",
             "If the task touches documentation, Markdown, repo-facing instructions, workflow rules, or agent behavior, make the smallest correct documentation update within writable scope; prioritize CLAUDE.md when it is relevant.",
             "If no documentation update is made, report the inspected documentation files and the concrete reason no update was needed.",
         ]
+    if target_phase == "l4_implement":
+        base = [
+            "Minimum-viable repository rule: keep the active project surface as small as practical while implementing.",
+            "Prefer modifying existing code/config over creating new long-lived files. For one-off analysis or migration, use temporary scripts and cleanly archive/remove them from the active surface before handoff.",
+            "New long-lived code, script, data, checkpoint, or document files need a concrete durable reason and must be reported explicitly.",
+            "Do not leave exploratory logs, debug outputs, scratch checkpoints, duplicate code copies, or stale data active for rungater to disambiguate.",
+        ]
+        if teammate_name == "rungater":
+            return [
+                *base,
+                "Gate the repository surface as part of readiness: flag active ambiguous logs, checkpoints, data, scripts, documents, or code copies that should have been archived before execution.",
+            ]
+        return base
     if target_phase == "l4_execute" and teammate_name == "executor":
         return [
             "Long-task ETA rule: before launching any long-running command, estimate expected wall-clock runtime as a range, state the basis for the estimate, and include that estimate in the execution report.",

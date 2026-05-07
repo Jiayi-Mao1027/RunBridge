@@ -134,6 +134,10 @@ The task spec must preserve the full user-facing intent, not only a shortened de
 
 L3 bridge packets must make repository-facing documentation freshness explicit. When a task touches docs, Markdown, `CLAUDE.md`, README, setup/usage instructions, agent behavior, or workflow rules, the L3 task should require the team to inspect whether docs need updating and to make the smallest correct update inside writable scope. `CLAUDE.md` is a first-class L3 documentation target when workflow or agent behavior changes.
 
+L3 also owns minimum-viable active-surface curation. Before preflight or implementation proceeds, curator should establish what the current step is, what prior work is already completed, and which files/artifacts are genuinely required by the next phase. Stale, duplicate, ambiguous, or non-current logs, datasets, checkpoints, generated outputs, stale code copies, scratch scripts, and misleading inactive documents should be archived out of active reach by default. Physical deletion is exceptional and should be limited to clearly regenerable trash, empty duplicates, or explicitly approved removals. L3 may archive or organize project files, but code/config behavior changes belong to L4 implement.
+
+L4 implement must preserve the same minimum-viable project surface while changing code. Implementors should prefer modifying existing files, use temporary scripts for one-off work, create new long-lived files only when there is a durable need, and clear or archive implementation byproducts before rungater/executor inherit the repo.
+
 ## 6. Lifecycle
 
 The authoritative lifecycle is the bridge-window state machine in:
@@ -209,6 +213,8 @@ The runtime writes side-channel JSONL observability files under each run directo
 - `bridge_packets.jsonl`
 - `agent_messages.jsonl`
 - `tool_events.jsonl`
+- `session_bindings.jsonl`
+- `session_events.jsonl`
 - `teammate_reports.jsonl`
 - `artifacts.jsonl`
 - `completion_checks.jsonl`
@@ -217,7 +223,11 @@ The runtime writes side-channel JSONL observability files under each run directo
 
 Observer records include a run-local `sequence` / `monotonic_index` for stable UI ordering. `companion_events.jsonl` is a merged stream and includes `source_kind`, `source_file`, `source_sequence`, and `source_offset` so UI drawers can trace every merged item back to its typed JSONL source.
 
-`tool_events.jsonl` should expose UI-safe fields only: `started_at`, `completed_at`, `duration_ms`, `normalized_input`, `safe_input_preview`, `file_refs`, and `output_summary`. It must not include secrets, full prompts, or complete large file contents. `agent_messages.jsonl` should include `message_id`, `direction`, `coverage_refs`, and whether a response is required. `teammate_reports.jsonl` should include structured progress fields such as `progress_state`, `completed_items`, `open_items`, `blocked_items`, `evidence_refs`, and `file_refs`. `completion_checks.jsonl` should include checklist-level `items` with per-item status and evidence/reason fields. `process_events.jsonl` is the read-only place for long-running process state such as PID, command preview, heartbeat, terminal state, log tail ref, and artifact probe.
+`tool_events.jsonl` should expose UI-safe fields only: `session_kind`, `run_binding_state`, `session_id`, run/window/team/task IDs when available, `teammate_id`, `agent_type`, `tool_name`, `tool_use_id`, `status`, `started_at`, `completed_at`, `duration_ms`, `normalized_input`, `safe_input_preview`, `file_refs`, and bounded summaries such as `read_options`, `edit_summary`, `search_summary`, `command_preview`, `stdout_tail`, and `stderr_tail`. It must not include secrets, full prompts, or complete large file contents. Tool events are observed for all Claude Code sessions, not only bridge child sessions. If no run binding is available, hooks write safe records under `.claude/runtime_state/session_observer/` instead of dropping them.
+
+`session_bindings.jsonl` maps `session_id` to run/window/team/task/teammate identity when known. `session_events.jsonl` records safe session-level previews such as user prompt, tool call started/completed, stop, and session end. Hooks also maintain `active_operations.json` for run-bound sessions and `.claude/runtime_state/session_observer/active_operations.json` for unbound sessions so UI can render the current active tool without replaying the whole stream.
+
+`agent_messages.jsonl` should include `message_id`, `direction`, `coverage_refs`, and whether a response is required. `teammate_reports.jsonl` should include structured progress fields such as `progress_state`, `completed_items`, `open_items`, `blocked_items`, `evidence_refs`, and `file_refs`. `completion_checks.jsonl` should include checklist-level `items` with per-item status and evidence/reason fields. `process_events.jsonl` is the read-only place for long-running process state such as PID, command preview, heartbeat, terminal state, log tail ref, and artifact probe.
 
 These files are derived from runtime events and Claude Code hooks. They are for UI/debug inspection only; authoritative workflow truth remains `run_ledger.json`, `event_log.jsonl`, task ledgers, transitions, and `runtime_snapshot.json`.
 

@@ -258,7 +258,7 @@ def run_user_clarification_resume(control_root: Path, runs_root: Path) -> dict:
     p["target_phase"] = "l3_bridge"
     p["phase_route"] = ["l3_bridge"]
     p["task_spec"]["target_phase"] = "l3_bridge"
-    p["team_spec"]["ownership_boundary"]["writable_scopes"] = ["CLAUDE.md", "README.md", "docs/", "*.md"]
+    p["team_spec"]["ownership_boundary"]["writable_scopes"] = ["."]
     dispatch(control_root, runs_root, event("bridge_call_intended", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_user_clarification", payload={"packet": p}))
     dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_user_clarification", payload={"packet": p}))
     dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_user_clarification", payload={"packet": p}))
@@ -560,7 +560,7 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     bad_l3_scope = packet("bw_bad_l3_scope", "sub_bad_l3_scope")
     bad_l3_scope["target_phase"] = "l3_bridge"
     bad_l3_scope["phase_route"] = ["l3_bridge"]
-    bad_l3_scope["team_spec"]["ownership_boundary"]["writable_scopes"] = ["."]
+    bad_l3_scope["team_spec"]["ownership_boundary"]["writable_scopes"] = ["CLAUDE.md", "README.md", "docs/", "*.md"]
     assert_denied(
         control_root,
         runs_root,
@@ -598,7 +598,10 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     if "instruction coverage disposition" not in set(hardened_l3["report_contract"].get("required_evidence", [])):
         raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
     l3_boundary = hardened_l3["team_spec"]["ownership_boundary"]
-    if set(l3_boundary.get("writable_scopes", [])) != {"CLAUDE.md", "README.md", "docs/", "*.md"}:
+    if set(l3_boundary.get("writable_scopes", [])) != {"."}:
+        raise AssertionError(json.dumps(l3_boundary, ensure_ascii=False, indent=2))
+    l3_surface_policy = "\n".join(str(item) for item in l3_boundary.get("active_surface_policy", []))
+    if "minimum viable" not in l3_surface_policy or "Archive is the default" not in l3_surface_policy:
         raise AssertionError(json.dumps(l3_boundary, ensure_ascii=False, indent=2))
     l3_assignments = "\n".join(
         str(item.get("assignment") or "")
@@ -608,6 +611,9 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     if (
         "CLAUDE.md" not in l3_assignments
         or "smallest correct documentation update" not in l3_assignments
+        or "Archive-first curation rule" not in l3_assignments
+        or "Active surface policy" not in l3_assignments
+        or "active code, log, checkpoint, data, document, and script surfaces minimum viable" not in l3_assignments
         or "Instruction coverage checklist" not in l3_assignments
         or "do not mark the task complete until every checklist item is completed" not in l3_assignments
         or "extra context must survive normalization" not in l3_assignments
@@ -711,6 +717,16 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         raise AssertionError(json.dumps(hardened_implement, ensure_ascii=False, indent=2))
     if not hardened_team["ownership_boundary"].get("writable_scopes"):
         raise AssertionError(json.dumps(hardened_team["ownership_boundary"], ensure_ascii=False, indent=2))
+    implement_surface_policy = "\n".join(str(item) for item in hardened_team["ownership_boundary"].get("active_surface_policy", []))
+    if "minimum viable repository surface" not in implement_surface_policy:
+        raise AssertionError(json.dumps(hardened_team["ownership_boundary"], ensure_ascii=False, indent=2))
+    implement_assignments = "\n".join(
+        str(item.get("assignment") or "")
+        for item in hardened_implement.get("task_team_mapping", {}).get("teammate_assignments", [])
+        if isinstance(item, dict)
+    )
+    if "Minimum-viable repository rule" not in implement_assignments or "Gate the repository surface" not in implement_assignments:
+        raise AssertionError(json.dumps(hardened_implement.get("task_team_mapping"), ensure_ascii=False, indent=2))
     hardened_bw = hardened_implement["binding"]["bridge_window_id"]
     hardened_sub = hardened_implement["binding"]["sub_session_id"]
     hardened_tool = hardened_implement["binding"]["parent_tool_use_id"]

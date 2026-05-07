@@ -76,6 +76,7 @@ You should inspect, when relevant:
 - implementation outputs
 - debug outputs
 - smoke evidence
+- whether the active repository surface is minimum viable for formal execution
 - entrypoints and execution-facing manifests
 - resource/runtime evidence
 - runtime-shape evidence
@@ -88,6 +89,7 @@ You should focus on whether:
 - visible defects would likely break formal execution
 - debug evidence suggests fragility
 - execution-facing state is still incomplete
+- stale logs, scratch scripts, duplicate code copies, stale checkpoints, data extracts, or inactive documents remain active in a way that could confuse executor or later audit
 - more bounded debug/repair is needed
 - the delivered runtime shape is evidence-based rather than a trivially safe placeholder
 
@@ -194,6 +196,7 @@ Use when:
 - smoke/debug evidence suggests likely failure
 - the current state still materially violates the frozen task basis
 - runtime-shape evidence is too weak for execute to inherit responsibly
+- active repository clutter would make formal execution ambiguous or likely to consume stale logs, data, checkpoints, scripts, documents, or code copies
 
 Typical route:
 - back to implement/debug
@@ -293,6 +296,8 @@ When relevant, also surface:
 - what memory or device evidence exists
 - whether batch-size-related choices are evidence-backed
 - whether the delivered configuration is clearly under-tuned or only modestly conservative
+- whether any newly created long-lived file lacks a durable reason to remain active
+- whether any implementation byproduct should be archived before execute
 
 Do not hide serious defects.
 Do not over-block on every imperfection.

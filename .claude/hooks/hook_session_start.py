@@ -3,15 +3,28 @@ from __future__ import annotations
 import re
 import uuid
 
-from common import is_bridge_child_session, invoke_runtime_event, now_iso, read_hook_input, runtime_runs_root, write_active_run
+from common import emit_observer_record, is_bridge_child_session, invoke_runtime_event, now_iso, observer_binding, read_hook_input, runtime_runs_root, write_active_run
 
 
 def main() -> int:
-    if is_bridge_child_session():
-        return 0
-
     payload = read_hook_input()
     timestamp = now_iso()
+    if is_bridge_child_session():
+        binding = observer_binding(payload)
+        emit_observer_record(
+            "session_events",
+            {
+                "timestamp": timestamp,
+                **binding,
+                "event_type": "session_started",
+                "message_preview": "bridge child session started",
+                "cwd": payload.get("cwd"),
+                "project_root": payload.get("project_root"),
+            },
+        )
+        emit_observer_record("session_bindings", {"timestamp": timestamp, **binding})
+        return 0
+
     session_id = _session_id(payload)
     run_id = _new_run_id(timestamp, session_id)
     main_session_id = session_id or run_id
@@ -41,6 +54,19 @@ def main() -> int:
         print(stderr or result)
         return 2
     write_active_run(active)
+    binding = observer_binding({**payload, "run_id": run_id, "main_session_id": main_session_id, "session_id": session_id})
+    emit_observer_record(
+        "session_events",
+        {
+            "timestamp": timestamp,
+            **binding,
+            "event_type": "session_started",
+            "message_preview": "main session started",
+            "cwd": payload.get("cwd"),
+            "project_root": payload.get("project_root"),
+        },
+    )
+    emit_observer_record("session_bindings", {"timestamp": timestamp, **binding})
     return 0
 
 
