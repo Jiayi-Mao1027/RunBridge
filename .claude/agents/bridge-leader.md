@@ -142,7 +142,7 @@ When dispatching teammate work, include all necessary packet-derived instruction
 
 You may modify files only when the packet and teammate role allow implementation or curation work. Do not treat broad read access as broad write authority.
 
-For L3 curation packets, broad writable scope exists so curator can archive project artifacts out of the active surface. It is not implementation authority. Preserve the distinction between archiving/organization and code behavior changes when instructing teammates.
+For L3 curation packets, broad writable scope exists so curator can archive project artifacts out of the active surface. Curator may receive Bash for bounded filesystem curation only: creating archive directories, moving files/directories, and deleting clearly disposable material after path verification. It is not implementation or execution authority. Preserve the distinction between archiving/organization and code behavior changes when instructing teammates.
 
 ---
 

@@ -847,7 +847,9 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         "CLAUDE.md" not in l3_assignments
         or "smallest correct documentation update" not in l3_assignments
         or "Archive-first curation rule" not in l3_assignments
+        or "L3 curator Bash curation rule" not in l3_assignments
         or "L3 no-run-tools rule" not in l3_assignments
+        or "PowerShell New-Item/Move-Item/Remove-Item" not in l3_assignments
         or "Active surface policy" not in l3_assignments
         or "active code, log, checkpoint, data, document, and script surfaces minimum viable" not in l3_assignments
         or "Instruction coverage checklist" not in l3_assignments
@@ -867,8 +869,17 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     }
     if "Write" not in set(hardened_l3.get("allowed_tools", [])) or "Write" not in l3_team_tools:
         raise AssertionError(json.dumps(hardened_l3["team_spec"], ensure_ascii=False, indent=2))
-    if "Bash" in set(hardened_l3.get("allowed_tools", [])) or "Bash" in l3_team_tools:
+    if "Bash" not in set(hardened_l3.get("allowed_tools", [])):
         raise AssertionError(json.dumps(hardened_l3["team_spec"], ensure_ascii=False, indent=2))
+    l3_tools_by_name = {
+        teammate.get("teammate_name"): set(teammate.get("allowed_tools", []))
+        for teammate in hardened_l3["team_spec"]["teammate_specs"]
+    }
+    if "Bash" not in l3_tools_by_name.get("curator", set()):
+        raise AssertionError(json.dumps(hardened_l3["team_spec"], ensure_ascii=False, indent=2))
+    for no_shell_teammate in ["preflight-initial", "refresher"]:
+        if "Bash" in l3_tools_by_name.get(no_shell_teammate, set()):
+            raise AssertionError(json.dumps(hardened_l3["team_spec"], ensure_ascii=False, indent=2))
     hardened_l3_bw = hardened_l3["binding"]["bridge_window_id"]
     hardened_l3_sub = hardened_l3["binding"]["sub_session_id"]
     hardened_l3_tool = hardened_l3["binding"]["parent_tool_use_id"]

@@ -18,11 +18,12 @@ RESEARCH_TOOLS = [*READ_ONLY_TOOLS, "WebSearch", "WebFetch"]
 READ_CHECK_TOOLS = [*READ_ONLY_TOOLS, "Bash"]
 ANOMALY_TOOLS = [*READ_CHECK_TOOLS, "WebSearch", "WebFetch"]
 L3_WRITE_TOOLS = [*READ_ONLY_TOOLS, "Edit", "Write"]
+L3_CURATOR_TOOLS = [*READ_ONLY_TOOLS, "Bash", "Edit", "Write"]
 WRITE_TOOLS = [*READ_ONLY_TOOLS, "Bash", "Edit", "Write"]
 DEFAULT_BRIDGE_LEADER_TOOLS = ["Agent", *WRITE_TOOLS]
 PHASE_BRIDGE_TOOLS = {
     "l2_advisory": ["Agent", *RESEARCH_TOOLS],
-    "l3_bridge": ["Agent", *L3_WRITE_TOOLS],
+    "l3_bridge": ["Agent", *L3_CURATOR_TOOLS],
     "l4_implement": DEFAULT_BRIDGE_LEADER_TOOLS,
     "l4_execute": ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "Write"],
     "l4_anomaly": ["Agent", *ANOMALY_TOOLS],
@@ -83,7 +84,7 @@ PHASE_TEAM_DEFAULTS = {
         ("chiefmate-c", "advisory", RESEARCH_TOOLS, "produce additional GPT-main peer critique, challenge chiefmate-a/chiefmate-b, and run confidence-loop validation"),
     ],
     "l3_bridge": [
-        ("curator", "artifact_curation", L3_WRITE_TOOLS, "clarify active logs, datasets, checkpoints, outputs, archive boundaries, and traceability without running commands"),
+        ("curator", "artifact_curation", L3_CURATOR_TOOLS, "clarify active logs, datasets, checkpoints, outputs, archive boundaries, and traceability; use Bash only for bounded filesystem curation"),
         ("preflight-initial", "preflight_audit", READ_ONLY_TOOLS, "inspect implementation-facing repo/config state and surface required changes before implementation without running commands"),
         ("refresher", "documentation_refresh", ["Read", "Grep", "Glob", "LS", "Edit", "Write"], "refresh CLAUDE.md and bounded human-facing repository documentation when needed"),
     ],
@@ -389,8 +390,17 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
             "L2 convergence rule: agreement across peers is not enough. State what would falsify the strategy, what peer claim you would reject or downgrade, and what evidence would change your recommendation.",
         ]
     if target_phase == "l3_bridge":
+        if teammate_name == "curator":
+            tool_rule = (
+                "L3 curator Bash curation rule: Bash is allowed only for non-executing filesystem curation inside packet writable scopes, such as PowerShell New-Item/Move-Item/Remove-Item for archive, move, or clearly disposable delete actions. "
+                "Do not run project code, tests, package managers, training, evaluation, network calls, or arbitrary shell exploration. "
+                "Prefer native PowerShell cmdlets with -LiteralPath; before recursive move/delete, resolve absolute paths and verify each source/target remains inside writable scope. "
+                "Archive by default; physical deletion requires clearly regenerable trash, empty duplicate material, or explicit approval, and every move/delete must be reported with source, destination or deletion basis, and reason."
+            )
+        else:
+            tool_rule = "L3 no-run-tools rule: do not run shell commands or other execution tools in L3. Use Read/Grep/Glob/LS for inspection and Edit/Write only for explicitly permitted documentation updates."
         return [
-            "L3 no-run-tools rule: do not run shell commands or other execution tools in L3. Use Read/Grep/Glob/LS for inspection and Edit/Write only for explicitly permitted curation or documentation updates.",
+            tool_rule,
             "L3 semantic identity rule: actively identify which model/method/checkpoint/dataset/prompt/config the user means. For comparisons such as DPO vs OPD, report the concrete ckpts or say exactly what is ambiguous.",
             "L3 inheritance rule: when the user does not request a dataset, prompt, split, metric, or config change, inspect the active repo/docs enough to identify the current basis and explicitly recommend inheriting it.",
             "L3 packet handoff rule: report the resolved semantic basis in a form L4 implement/execute can copy directly: model/method identity, ckpt paths/IDs, dataset/split, prompt/template, config files, and any unresolved field.",
