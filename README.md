@@ -83,7 +83,7 @@ Typical phases:
 - `l4_execute`: validation, execution, and post-run checks.
 - `l4_anomaly`: recovery path for failed, partial, blocked, or orphaned windows.
 
-From `l3_bridge`, the graph intentionally allows `l3_bridge -> l3_bridge` and `l3_bridge -> leader_freeze`. This covers the common loop where L3 inspects repo/document state, asks for user confirmation, then resumes the same L3 documentation or preflight task before moving to L4.
+From `l3_bridge`, the graph intentionally allows routing to every phase: another L3 pass, `leader_freeze`, `l2_advisory`, `l4_implement`, `l4_execute`, or `l4_anomaly`. This makes L3 the bridge hub: it can perform a minimal repo sanity check after L2, resume after user confirmation, send ambiguous strategy back to L2, or send execution/result questions to L4 anomaly before implementation or execution proceeds.
 
 L3 packets have a documentation responsibility. When the work touches docs, Markdown, `CLAUDE.md`, README, setup/usage guidance, workflow rules, or agent behavior, L3 must explicitly decide whether repo-facing documentation needs a bounded update. `CLAUDE.md` is a first-class L3 target for workflow and agent-behavior changes.
 
@@ -92,6 +92,8 @@ L3 packets also carry a minimum-active-surface responsibility. Curator should fi
 Within L3, only `curator` may receive `Bash`, and that authority is limited to non-executing filesystem curation inside packet writable scopes: creating archive directories, moving files/directories, or deleting clearly disposable trash/empty duplicates. Curator should prefer native PowerShell filesystem cmdlets such as `New-Item`, `Move-Item`, and `Remove-Item -LiteralPath`, verify absolute paths before recursive move/delete, and report every move/delete with source, destination or deletion basis, and reason. `preflight-initial` and `refresher` remain no-shell roles; they inspect or edit documentation with their bounded read/write tools.
 
 L3 packets carry a semantic-resolution responsibility as well. When model/method names, checkpoints, datasets, prompts, configs, metrics, or comparisons are involved, L3 must resolve the concrete identities or explicitly mark them blocked/escalated. If the user did not request changing dataset, prompt, split, metric, or config, the packet should preserve the current active basis and name where that basis came from, so L4 does not guess.
+
+L3 packets also carry current user intent context. The main leader should preserve the nearest active direction, relevant L2 report refs or summary, proposed future directions, and open questions in the task spec. L3 must confirm, refine, supersede, block, or escalate that intent from repo/docs/artifact evidence and report the disposition so the next phase does not guess. For example, an OPD early-stop improvement proposed after L2 remains active context until L3 evidence or a later user instruction changes it.
 
 L4 implement inherits that hygiene requirement. Implementors should modify existing files when practical, use temporary scripts for one-off work, create long-lived files only for durable need, and avoid handing rungater/executor an active surface cluttered with exploratory logs, scratch scripts, stale checkpoints, duplicate code copies, or stale data.
 
@@ -126,7 +128,7 @@ It carries:
 
 The bridge leader must stay inside the packet. The packet defines what can be read, written, delegated, reported, retried, or stopped.
 
-Task specs preserve compound user intent instead of reducing it to one short description. The packet includes the original instruction, an `instruction_coverage_checklist`, and preserved context fields. Teammate assignments must report whether each checklist item was completed, deferred with a concrete reason, blocked, or escalated. This prevents a multi-part user request from being half-executed and then treated as complete.
+Task specs preserve compound user intent instead of reducing it to one short description. The packet includes the original instruction, an `instruction_coverage_checklist`, `current_user_intent_context`, and preserved context fields. Teammate assignments must report whether each checklist item was completed, deferred with a concrete reason, blocked, or escalated. This prevents a multi-part user request from being half-executed and then treated as complete.
 
 Task specs also include `semantic_resolution_contract`. Runtime packet validation requires the report contract to include semantic identity resolution evidence, so downstream packets cannot silently drop checkpoint/dataset/prompt/config identity work. L4 execute packets additionally require log manifest artifact evidence.
 
@@ -185,7 +187,7 @@ The runtime also writes read-only Bridge Companion observer streams. These are n
 
 Tool observer records are emitted for all Claude Code sessions, not only bridge child sessions. Records include `session_kind`, `run_binding_state`, `session_id`, run/window/team/task IDs when available, `teammate_id`, `agent_type`, `tool_name`, `tool_use_id`, and `status`. If a hook cannot bind a tool event to a run, it writes the safe preview to `.claude/runtime_state/session_observer/` so Companion can still show direct or unbound session activity.
 
-UI must not synthesize low-level actions from reports or artifact refs. It should show `Read` / `Edit` / `Write` / `MultiEdit` / `Bash` / `Grep` / `Glob` / `LS` only when those real hook records exist in `tool_events.jsonl`. The hooks rebind child-session tool events through `session_bindings.jsonl` when a tool payload lacks direct run fields, so subagent tool calls can still land in the run-scoped observer stream.
+UI must not synthesize low-level actions from reports or artifact refs. It should show `Read` / `Edit` / `Write` / `MultiEdit` / `Bash` / `Grep` / `Glob` / `LS` only when those real hook records exist in `tool_events.jsonl`. The hooks bind teammate child sessions from `SubagentStart` payloads such as `agent_name` / `subagent_name` when present, write that binding to `session_bindings.jsonl`, and rebind later child-session tool events by `session_id` when a tool payload lacks direct run fields. This is what lets real subagent tool calls land in the run-scoped observer stream with run/window/team/task/teammate attribution.
 
 For executor Bash events, UI may surface `soft_reminders` as nonblocking evidence prompts. They are not failures and do not imply the process was stopped.
 
@@ -205,7 +207,7 @@ The lifecycle includes normal bridge execution states as well as explicit clarif
 - `resume_same_l3_task`
 - `continuation_of_previous_l3`
 
-If L3 needs user confirmation, the main leader should ask the user, record the answer, and continue the same L3 task through the legal `l3_bridge -> l3_bridge` or `l3_bridge -> leader_freeze` path. The user should not need to manually say "reroute"; bridge-denial notifications include a recommended legal next route when one exists.
+If L3 needs user confirmation, the main leader should ask the user, record the answer, and continue the same L3 task through the legal L3 hub route. The user should not need to manually say "reroute"; bridge-denial notifications include a recommended legal next route when one exists.
 
 For L4 execute, premature partial returns are treated as a protocol failure when owned process refs still show a running process. In that case the runtime records `L4ExecutePrematurePartialReturn` instead of accepting the result as a normal partial bridge completion.
 

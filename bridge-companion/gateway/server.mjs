@@ -326,23 +326,6 @@ function progressLabelFor(eventType) {
   return eventType;
 }
 
-function collectTextMatches(value, predicate, pathParts = [], out = []) {
-  if (out.length > 80 || value == null) return out;
-  if (typeof value === "string") {
-    if (predicate(value, pathParts)) out.push({ path: pathParts.join("."), value });
-    return out;
-  }
-  if (typeof value !== "object") return out;
-  if (Array.isArray(value)) {
-    value.slice(0, 20).forEach((item, index) => collectTextMatches(item, predicate, [...pathParts, String(index)], out));
-    return out;
-  }
-  for (const [key, nested] of Object.entries(value).slice(0, 80)) {
-    collectTextMatches(nested, predicate, [...pathParts, key], out);
-  }
-  return out;
-}
-
 function eventActor(event) {
   const payload = event.payload || event.data || event;
   return payload.teammate_id || payload.teammate_role || payload.agent_id || payload.agent_type || payload.role || payload.sender || payload.from || "runtime";
@@ -353,14 +336,37 @@ function eventTool(event) {
   return payload.tool_name || payload.tool || payload.name || null;
 }
 
-function eventFileRefs(event) {
-  const payload = event.payload || event.data || event;
-  const refs = new Set();
-  collectTextMatches(payload, (text, pathParts) => {
-    const key = pathParts.at(-1) || "";
-    return /path|file|artifact|target|source/i.test(key) && /[\\/]|\.[a-zA-Z0-9]{1,8}$/.test(text);
-  }).forEach(match => refs.add(match.value));
-  return [...refs].slice(0, 8);
+function pushPathLike(refs, value) {
+  if (!value) return;
+  if (typeof value === "string") {
+    if (/[\\/]|\.[a-zA-Z0-9]{1,8}$/.test(value)) refs.push(value);
+    return;
+  }
+  if (typeof value !== "object") return;
+  const direct = value.path || value.file_path || value.artifact_ref || value.target || value.source_path || value.output_path || value.log_path || value.dir || value.directory;
+  if (direct) pushPathLike(refs, direct);
+}
+
+function structuredFileRefs(record = {}) {
+  const refs = [];
+  if (!record || typeof record !== "object") return refs;
+  if (Array.isArray(record.file_refs)) record.file_refs.forEach(ref => pushPathLike(refs, ref));
+  if (Array.isArray(record.artifacts)) record.artifacts.forEach(ref => pushPathLike(refs, ref));
+  if (Array.isArray(record.artifact_refs)) record.artifact_refs.forEach(ref => pushPathLike(refs, ref));
+  if (Array.isArray(record.evidence_refs)) {
+    record.evidence_refs.forEach(ref => {
+      if (typeof ref !== "string" || /[\\/]|\.[a-zA-Z0-9]{1,8}$/.test(ref)) pushPathLike(refs, ref);
+    });
+  }
+  pushPathLike(refs, record.artifact_ref);
+  pushPathLike(refs, record.target);
+  pushPathLike(refs, record.file_path);
+  pushPathLike(refs, record.path);
+  pushPathLike(refs, record.normalized_input?.file_path);
+  pushPathLike(refs, record.normalized_input?.path);
+  pushPathLike(refs, record.normalized_input?.notebook_path);
+  pushPathLike(refs, record.normalized_input?.output_path);
+  return [...new Set(refs.filter(Boolean))].slice(0, 8);
 }
 
 function concisePath(value) {
@@ -396,10 +402,7 @@ function toolDetailSummary(record) {
 }
 
 function firstFileRef(record) {
-  const refs = Array.isArray(record.file_refs) ? record.file_refs : [];
-  const first = refs.find(Boolean);
-  if (!first) return "";
-  return typeof first === "string" ? first : (first.path || first.file_path || first.target || "");
+  return structuredFileRefs(record)[0] || "";
 }
 
 function humanStatus(status) {
@@ -537,15 +540,7 @@ function titleForCompanionRecord(record, source) {
 }
 
 function fileRefsFromRecord(record) {
-  const refs = [];
-  if (Array.isArray(record.file_refs)) refs.push(...record.file_refs.map(ref => typeof ref === "string" ? ref : (ref.path || ref.file_path || ref.target)).filter(Boolean));
-  if (record.target) refs.push(record.target);
-  if (record.file_path) refs.push(record.file_path);
-  if (record.path) refs.push(record.path);
-  if (record.normalized_input?.file_path) refs.push(record.normalized_input.file_path);
-  if (record.normalized_input?.path) refs.push(record.normalized_input.path);
-  if (!refs.length) refs.push(...eventFileRefs(record));
-  return [...new Set(refs.filter(Boolean))].slice(0, 8);
+  return structuredFileRefs(record);
 }
 
 function plainSummary(value, fallback = "已记录一条 runtime 事实。") {
@@ -656,6 +651,19 @@ function extractPacketSummary(snapshot, companion = {}) {
   };
 }
 
+function teammateIdentity(record = {}, fallback = "unknown") {
+  return String(record.teammate_id || record.to || record.agent_type || record.agent_id || record.name || record.id || record.display_name || fallback);
+}
+
+function cardDisplayName(card = {}) {
+  return displayRoleName({ ...card, agent_type: card.role, role: card.role, id: card.role, display_name: card.role });
+}
+
+function isRuntimeObserverRecord(record = {}) {
+  const values = [record.teammate_id, record.agent_type, record.agent_id, record.display_name, record.session_kind].map(value => String(value || "").toLowerCase());
+  return values.some(value => value === "hook" || value.startsWith("hook.") || value === "main-leader" || value === "leader-orchestrator" || value === "main_leader" || value === "main leader");
+}
+
 function actorKey(record) {
   const teammate = record.teammate_id || record.to;
   if (teammate) return String(teammate);
@@ -690,7 +698,7 @@ function displayRoleName(cardOrSeed = {}) {
 function statusTextForCard(card) {
   if (card.activeTool?.text) return card.activeTool.text;
   if (card.lastCompletedTool?.text) return `暂时没有新的动作；上一项是：${card.lastCompletedTool.text}`;
-  const role = displayRoleName(card);
+  const role = cardDisplayName(card);
   const value = String(card.status || "").toLowerCase();
   if (value === "declared") return `${role}已经加入本轮任务，正在等待任务说明或下一条操作记录。`;
   if (value === "idle" || value === "done") return `${role}当前没有正在运行的工具。`;
@@ -707,12 +715,14 @@ function nextTextForCard(card) {
 }
 
 function mergeTeammateCard(map, seed = {}) {
-  const key = actorKey(seed);
+  const key = seed.card_key || actorKey(seed);
+  const identity = teammateIdentity(seed, key);
   if (!map.has(key)) {
     map.set(key, {
       id: key,
-      role: seed.agent_type || seed.role || seed.teammate_role || seed.display_name || key,
-      displayRole: displayRoleName(seed),
+      role: identity,
+      teammateRole: seed.role || seed.teammate_role || null,
+      displayRole: cardDisplayName({ ...seed, role: identity }),
       status: seed.status || seed.lifecycle_state || "declared",
       latest: seed.latest_report || seed.summary || null,
       sessionId: seed.session_id || null,
@@ -725,8 +735,10 @@ function mergeTeammateCard(map, seed = {}) {
     });
   }
   const card = map.get(key);
-  card.role = seed.agent_type || seed.role || seed.teammate_role || card.role;
-  card.displayRole = displayRoleName(card);
+  const nextIdentity = teammateIdentity(seed, card.role);
+  card.role = nextIdentity || card.role;
+  card.teammateRole = seed.role || seed.teammate_role || card.teammateRole;
+  card.displayRole = cardDisplayName(card);
   card.sessionId = seed.session_id || card.sessionId;
   card.sessionKind = seed.session_kind || card.sessionKind;
   card.runBindingState = seed.run_binding_state || card.runBindingState;
@@ -738,21 +750,29 @@ function extractTeammates(snapshot, events, companion = {}) {
   const fromSnapshot = snapshot?.teammates || snapshot?.team?.teammates || snapshot?.team_spec?.teammates || snapshot?.team_spec?.members || latestPacketRecord.team_spec || [];
   const cards = new Map();
   if (Array.isArray(fromSnapshot)) {
-    fromSnapshot.forEach((item, index) => mergeTeammateCard(cards, {
-      id: item.id || item.teammate_id || item.name || `teammate_${index + 1}`,
-      teammate_id: item.id || item.teammate_id || item.name || `teammate_${index + 1}`,
-      role: item.role || item.agent_type || item.type || item.name || "teammate",
-      status: item.status || item.lifecycle_state || "declared",
-      latest_report: item.latest_report || item.summary || null
-    }));
+    fromSnapshot.forEach((item, index) => {
+      const identity = item.teammate_id || item.agent_type || item.name || item.id || `teammate_${index + 1}`;
+      mergeTeammateCard(cards, {
+        ...item,
+        card_key: String(identity),
+        id: identity,
+        teammate_id: identity,
+        agent_type: identity,
+        role: item.role || item.type || null,
+        status: item.status || item.lifecycle_state || "declared",
+        latest_report: item.latest_report || item.summary || null
+      });
+    });
   }
 
   for (const binding of companion.sessionBindings || []) {
+    if (isRuntimeObserverRecord(binding)) continue;
     const card = mergeTeammateCard(cards, binding);
     card.status = binding.run_binding_state || card.status;
   }
 
   for (const item of companion.activeOperations?.teammates || []) {
+    if (isRuntimeObserverRecord(item)) continue;
     const card = mergeTeammateCard(cards, item);
     card.status = item.active_tool ? "running" : "idle";
     card.activeTool = item.active_tool ? toolDisplay(item.active_tool) : null;
@@ -761,6 +781,7 @@ function extractTeammates(snapshot, events, companion = {}) {
 
   const recentToolEvents = [...(companion.sessionToolEvents || []), ...(companion.toolEvents || [])].slice(-160);
   for (const event of recentToolEvents) {
+    if (isRuntimeObserverRecord(event)) continue;
     const card = mergeTeammateCard(cards, event);
     const display = toolDisplay(event);
     if (event.status === "started") card.activeTool = display;
@@ -772,13 +793,13 @@ function extractTeammates(snapshot, events, companion = {}) {
       card.assignmentText = null;
       card.nextTextOverride = null;
     }
-    for (const ref of event.file_refs || []) {
-      const file = typeof ref === "string" ? ref : (ref.path || ref.artifact_ref || ref.file_path);
+    for (const file of structuredFileRefs(event)) {
       if (file && !card.fileRefs.includes(file)) card.fileRefs.push(file);
     }
   }
 
   for (const artifact of companion.artifactEvents || []) {
+    if (isRuntimeObserverRecord(artifact)) continue;
     const file = artifact.artifact_ref || artifact.path || artifact.file_path;
     const role = artifact.teammate_id || artifact.agent_type || artifact.agent_id;
     if (!file || !role) continue;
@@ -807,14 +828,14 @@ function extractTeammates(snapshot, events, companion = {}) {
 
   for (const event of [...events, ...(companion.teammateReports || []), ...(companion.processEvents || [])]) {
     const payload = event.payload || event.data || event;
+    if (isRuntimeObserverRecord(payload)) continue;
     const role = payload.teammate_role || payload.teammate_id || payload.agent_type || payload.agent_id || payload.session_id;
     if (!role) continue;
     const card = mergeTeammateCard(cards, payload);
     card.status = payload.progress_state || progressLabelFor(eventTypeOf(event));
     card.latest = payload.summary || summarizeEvent(event);
-    const refs = [...(payload.file_refs || []), ...(payload.artifacts || []), ...(payload.evidence_refs || [])];
-    for (const ref of refs) {
-      const file = typeof ref === "string" ? ref : (ref.path || ref.artifact_ref || ref.file_path);
+    const refs = structuredFileRefs(payload);
+    for (const file of refs) {
       if (file && !card.fileRefs.includes(file)) card.fileRefs.push(file);
     }
     if (!card.activeTool && !card.lastCompletedTool && card.fileRefs.length) {
@@ -824,7 +845,7 @@ function extractTeammates(snapshot, events, companion = {}) {
 
   return [...cards.values()].map(card => ({
     ...card,
-    displayRole: displayRoleName(card),
+    displayRole: cardDisplayName(card),
     currentText: card.assignmentText || statusTextForCard(card),
     lastText: card.lastCompletedTool?.text || (!card.assignmentText && card.latest ? plainSummary(card.latest, "最近有一条记录，详情保留在卷宗中。") : ""),
     nextText: card.nextTextOverride || nextTextForCard(card),

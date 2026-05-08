@@ -41,6 +41,7 @@
       "allowed_next_phases": [
         "l3_bridge",
         "leader_freeze",
+        "l2_advisory",
         "l4_implement",
         "l4_execute",
         "l4_anomaly"

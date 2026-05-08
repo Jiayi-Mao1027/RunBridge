@@ -71,6 +71,7 @@ Use WebSearch/WebFetch when:
 - paper-backed or primary-source evidence can materially support or refute a strategy
 
 Do not use research as decoration.
+For nontrivial model/method/training/evaluation strategy, proactively try a focused WebSearch/WebFetch pass for high-credibility papers, primary docs, benchmark reports, or directly relevant technical sources. If you cannot find a credible source, say that explicitly and explain how much the advice depends on unsourced inference.
 When using external information, distinguish facts from inference, prefer primary documentation and papers, and state residual uncertainty.
 
 ---

@@ -159,6 +159,8 @@ Research is especially relevant for:
 - current tool behavior or version-specific behavior
 - empirical claims that should be checked against primary sources
 
+For nontrivial anomaly diagnosis, proactively try a focused WebSearch/WebFetch pass for high-credibility papers, primary docs, issue trackers, release notes, or directly relevant technical sources that could support or falsify the leading cause. If no credible source is found, say that explicitly and keep the causal ranking grounded in local logs/code/manifests.
+
 Prefer primary documentation, papers, issue trackers, and directly relevant sources over secondary summaries.
 Distinguish sourced facts from inference.
 Do not use research as a substitute for reading local logs, code, manifests, and artifacts.

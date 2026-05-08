@@ -173,6 +173,44 @@ def session_id_from_payload(payload: dict[str, Any] | None = None, tool_input: d
     return None
 
 
+def teammate_agent_name_from_payload(*sources: Any) -> str | None:
+    for source in sources:
+        found = _find_teammate_agent_name(source)
+        if found:
+            return found
+    env_value = os.environ.get("BRIDGE_AGENT_TYPE") or os.environ.get("BRIDGE_AGENT_NAME")
+    if isinstance(env_value, str) and env_value.strip() in TEAMMATE_AGENT_NAMES:
+        return env_value.strip()
+    return None
+
+
+def _find_teammate_agent_name(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in (
+            "teammate_id",
+            "teammate_name",
+            "agent_type",
+            "agent_name",
+            "subagent_name",
+            "subagent_type",
+            "subagent",
+            "name",
+        ):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip() in TEAMMATE_AGENT_NAMES:
+                return raw.strip()
+        for key in ("tool_input", "arguments", "payload", "context", "session", "metadata"):
+            found = _find_teammate_agent_name(value.get(key))
+            if found:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_teammate_agent_name(item)
+            if found:
+                return found
+    return None
+
+
 def observer_binding(
     payload: dict[str, Any] | None = None,
     tool_input: dict[str, Any] | None = None,
@@ -195,8 +233,10 @@ def observer_binding(
         run_binding_state = "inferred"
     else:
         run_binding_state = "unbound"
+    teammate_agent_name = teammate_agent_name_from_payload(payload, tool_input, session_binding)
     agent_type = (
-        payload.get("agent_type")
+        teammate_agent_name
+        or payload.get("agent_type")
         or tool_input.get("agent_type")
         or os.environ.get("BRIDGE_AGENT_TYPE")
         or session_binding.get("agent_type")
@@ -216,21 +256,28 @@ def observer_binding(
     else:
         session_kind = "direct_session"
         binding_source = "unbound"
-    agent_id = payload.get("agent_id") or tool_input.get("agent_id") or os.environ.get("BRIDGE_AGENT_ID") or session_binding.get("agent_id") or agent_type
+    agent_id = payload.get("agent_id") or tool_input.get("agent_id") or os.environ.get("BRIDGE_AGENT_ID") or session_binding.get("agent_id") or teammate_agent_name or agent_type
     teammate_id = (
         payload.get("teammate_id")
         or tool_input.get("teammate_id")
+        or teammate_agent_name
         or session_binding.get("teammate_id")
         or (agent_type_text if is_teammate_agent else None)
         or payload.get("agent_id")
         or tool_input.get("agent_id")
     )
+    if not is_teammate_agent and isinstance(teammate_id, str) and teammate_id in TEAMMATE_AGENT_NAMES:
+        agent_type = teammate_id
+        agent_type_text = teammate_id
+        is_teammate_agent = True
+        if is_bridge_child_session():
+            session_kind = "bridge_teammate"
     return {
         "session_kind": session_kind,
         "run_binding_state": run_binding_state,
         "session_id": session_id,
         "run_id": run_id or None,
-        "main_session_id": control_main_session_id(payload, tool_input, packet) or active.get("main_session_id") or session_binding.get("main_session_id"),
+        "main_session_id": session_binding.get("main_session_id") or control_main_session_id(payload, tool_input, packet) or active.get("main_session_id"),
         "sub_session_id": control_binding_value("sub_session_id", payload, tool_input, packet, binding) or session_binding.get("sub_session_id"),
         "bridge_window_id": control_binding_value("bridge_window_id", payload, tool_input, packet, binding) or session_binding.get("bridge_window_id"),
         "team_id": control_binding_value("team_id", payload, tool_input, packet, binding) or session_binding.get("team_id"),

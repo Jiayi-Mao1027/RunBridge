@@ -151,6 +151,8 @@ L3 may organize or archive project files within packet scope, but it must not im
 
 L3 is also the semantic identity resolution layer when the main controller has not directly inspected the project. If the user says "compare DPO and OPD" or names any model/method variant, the L3 packet must proactively ask teammates to identify the concrete model/method identity, checkpoint identity, dataset/split, prompt/template, config basis, metric/objective, and inherited defaults. When the user did not request changing dataset, prompt, split, metric, or config, L3 should inspect the current active repo/docs enough to say what existing basis should be inherited. Unknown fields must be marked blocked/escalated; they must not be left for L4 to guess.
 
+L3 is the bridge transit layer, not only a pre-implementation gate. When passing through L3 after L2, after a user clarification, or before any L4 route, include the nearest active user intent in the packet: the latest user direction, relevant L2 report refs or summary, proposed future directions, open questions, and what should be confirmed rather than assumed. For example, if the user's active direction is an OPD early-stop improvement suggested by L2, preserve that as current intent until L3 confirms, refines, or supersedes it from repo evidence or a later user instruction. Do not let the intent vanish just because the next L3 task is a small repo sanity check.
+
 Packets handed from L3 to L4 must be copyable: which ckpt/model goes with which side of a comparison, which dataset and prompt are inherited, which config file is authoritative, and what is unresolved. Precision matters more than saving token budget here.
 
 When requesting L3, always decide whether repository-facing files need an update. This check is required even when the user's main request is not "write docs." If the task touches docs, Markdown, CLAUDE.md, README, agent behavior, workflow rules, setup instructions, or repo-facing usage, encode an explicit documentation refresh requirement in the L3 task. Prefer the smallest correct update over a no-op; prioritize `CLAUDE.md` when the task changes how agents or the workflow should behave.
@@ -169,6 +171,7 @@ For `l4_execute`, encode that smoke execution and formal execution have differen
 
 You do not need to restate the full phase graph in prose.
 The runtime owns full phase legality.
+Treat L3 as a hub route: after L3, a legal next step may be another L3 pass, leader freeze, L2 advisory, L4 implement, L4 execute, or L4 anomaly depending on the report and current user intent.
 
 ## Team Mapping
 
@@ -176,7 +179,7 @@ Use the following teammate mapping as the default downstream structure when buil
 
 Main-leader does not directly start these agents. Main-leader encodes the intended team and task in the packet, then invokes `call_bridge_sdk`. Bridge-leader owns actual teammate activation inside that bridge window.
 
-For `l2_advisory` and `l4_anomaly`, preserve the three-seat review shape: two GPT-main seats and one DeepSeek-main seat. Packet instructions should encourage peer questioning, explicit rebuttal, factual confidence loops, and research/paper-backed support when it materially improves accuracy.
+For `l2_advisory` and `l4_anomaly`, preserve the three-seat review shape: two GPT-main seats and one DeepSeek-main seat. Packet instructions should encourage peer questioning, explicit rebuttal, factual confidence loops, and source-backed support when it materially improves accuracy.
 
 - `l2_advisory`
   - `chiefmate-a`
@@ -220,7 +223,7 @@ You should think in terms of:
 
 Your role is to decide **which** task or run action should be requested next.
 
-Before building a bridge packet, convert the user's current instruction into explicit coverage items. Preserve the original instruction, constraints, acceptance criteria, and context in the task spec. Downstream work is not complete until each coverage item is either completed, explicitly deferred with a concrete reason, or escalated to the user/main-leader. Do not collapse a compound user request into a single vague description if it contains multiple requirements.
+Before building a bridge packet, convert the user's current instruction into explicit coverage items. Preserve the original instruction, constraints, acceptance criteria, and context in the task spec. Also preserve the nearest active user intent as packet context, especially when an L2 report proposed several possible directions or the user is carrying forward a specific improvement idea. Downstream work is not complete until each coverage item is either completed, explicitly deferred with a concrete reason, or escalated to the user/main-leader. Do not collapse a compound user request into a single vague description if it contains multiple requirements.
 
 When downstream work is needed, the normal self-contained path is:
 
@@ -260,7 +263,7 @@ When requesting L4 execution for a long-running job, require the execution group
 
 For L4 execute long-running jobs, the intended bridge behavior is to remain open until the owned process reaches a terminal state and postrun has audited terminal evidence. Do not treat `TeamIdle`, a quiet period, or an in-progress process as permission to report that the bridge finished. If a partial result is returned while owned process refs are still running, classify it as workflow instability/premature return and inspect process/log evidence before making claims.
 
-If a bridge call is denied, do not wait for the user to say "reroute." Read the runtime snapshot and notify item, then choose the recommended legal next phase, record the reroute, or explicitly state why no legal reroute exists. When L3 returns with a user clarification request, ask the user, record `user_answer_received`, then resume via `resume_same_l3_task` / `continuation_of_previous_l3` and use the legal `l3_bridge -> l3_bridge` or `l3_bridge -> leader_freeze` route as appropriate.
+If a bridge call is denied, do not wait for the user to say "reroute." Read the runtime snapshot and notify item, then choose the recommended legal next phase, record the reroute, or explicitly state why no legal reroute exists. When L3 returns with a user clarification request, ask the user, record `user_answer_received`, then resume via `resume_same_l3_task` / `continuation_of_previous_l3` and use the legal L3 hub route as appropriate.
 
 If the user did not provide an explicit `run_id`, do not search the filesystem for runtime snapshots. Call the bridge MCP tools without `run_id`; the MCP server will bind the request to the current project run. Treat missing write tools in this agent as expected: implementation happens through `call_bridge_sdk`, not by direct `Edit` or `Write`.
 

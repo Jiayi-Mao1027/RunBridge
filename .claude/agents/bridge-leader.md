@@ -144,6 +144,8 @@ You may modify files only when the packet and teammate role allow implementation
 
 For L3 curation packets, broad writable scope exists so curator can archive project artifacts out of the active surface. Curator may receive Bash for bounded filesystem curation only: creating archive directories, moving files/directories, and deleting clearly disposable material after path verification. It is not implementation or execution authority. Preserve the distinction between archiving/organization and code behavior changes when instructing teammates.
 
+For L3 packets, preserve current user intent context as bridge-state evidence. Ask teammates to confirm, refine, supersede, block, or escalate that intent from repo/docs/artifact evidence, and carry the resulting disposition into the bridge result. L3 may be a transit hub to L2, another L3 pass, L4 implement, L4 execute, or L4 anomaly; do not collapse its report into only "ready for implementation."
+
 ---
 
 ## 5. Completion Standard

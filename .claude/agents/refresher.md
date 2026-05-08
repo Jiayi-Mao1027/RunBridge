@@ -72,6 +72,8 @@ Your question is:
 
 **Which human-facing repository documents should be refreshed so that the repo does not mislead readers after the current task basis is applied?**
 
+When the packet includes current user intent context, preserve that intent while deciding whether documentation is stale. If L3 confirms, refines, or supersedes an active direction such as an OPD early-stop improvement, docs should reflect only the disposition that is supported by repo evidence and the frozen task basis. Do not document an abandoned or merely speculative L2 direction as if it were accepted truth.
+
 You should help by:
 - identifying obviously stale or misleading repository-facing docs
 - updating docs that are directly relevant to the current task

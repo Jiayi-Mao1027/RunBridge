@@ -60,7 +60,7 @@ def build_fixture(root: Path) -> tuple[Path, Path]:
         "phases": [
             {"name": "leader_freeze", "allowed_next_phases": ["l2_advisory", "l3_bridge"]},
             {"name": "l2_advisory", "allowed_next_phases": ["l3_bridge"]},
-            {"name": "l3_bridge", "allowed_next_phases": ["l3_bridge", "leader_freeze", "l4_implement", "l4_execute", "l4_anomaly"]},
+            {"name": "l3_bridge", "allowed_next_phases": ["l3_bridge", "leader_freeze", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly"]},
             {"name": "l4_implement", "allowed_next_phases": ["l4_execute", "l4_anomaly"]},
             {"name": "l4_execute", "allowed_next_phases": ["l4_anomaly"]},
             {"name": "l4_anomaly", "allowed_next_phases": ["l4_implement", "l4_execute"]},
@@ -821,6 +821,8 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         raise AssertionError(json.dumps(l3_task, ensure_ascii=False, indent=2))
     if l3_task.get("preserved_task_context", {}).get("context_note") != "extra context must survive normalization":
         raise AssertionError(json.dumps(l3_task, ensure_ascii=False, indent=2))
+    if "l3 documentation scope smoke" not in str(l3_task.get("current_user_intent_context", {}).get("active_user_intent", "")):
+        raise AssertionError(json.dumps(l3_task.get("current_user_intent_context"), ensure_ascii=False, indent=2))
     if "instruction_coverage" not in set(hardened_l3["report_contract"].get("required_sections", [])):
         raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
     if "instruction coverage disposition" not in set(hardened_l3["report_contract"].get("required_evidence", [])):
@@ -828,6 +830,8 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     if "semantic_identity_resolution" not in set(hardened_l3["report_contract"].get("required_sections", [])):
         raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
     if "semantic identity resolution" not in set(hardened_l3["report_contract"].get("required_evidence", [])):
+        raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
+    if "current_user_intent_context" not in set(hardened_l3["report_contract"].get("required_sections", [])):
         raise AssertionError(json.dumps(hardened_l3["report_contract"], ensure_ascii=False, indent=2))
     semantic_fields = set(l3_task.get("semantic_resolution_contract", {}).get("required_identity_fields", []))
     if not {"checkpoint_identity", "dataset_identity", "prompt_or_template_identity"}.issubset(semantic_fields):
@@ -854,6 +858,9 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         or "active code, log, checkpoint, data, document, and script surfaces minimum viable" not in l3_assignments
         or "Instruction coverage checklist" not in l3_assignments
         or "Semantic resolution contract" not in l3_assignments
+        or "Current user intent context" not in l3_assignments
+        or "L3 current-intent bridge rule" not in l3_assignments
+        or "confirmed, refined, superseded, blocked, or escalated" not in l3_assignments
         or "checkpoint" not in l3_assignments
         or "dataset" not in l3_assignments
         or "prompt" not in l3_assignments
@@ -1537,6 +1544,97 @@ def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
             }
             if not {"started", "completed"}.issubset(statuses):
                 raise AssertionError(json.dumps({"tool_name": tool_name, "statuses": sorted(statuses), "tail": run_tool_events[-20:]}, ensure_ascii=False, indent=2))
+
+        os.environ["BRIDGE_SUB_SESSION_ID"] = "sub_chiefmate"
+        os.environ["BRIDGE_WINDOW_ID"] = "bw_chiefmate"
+        os.environ["BRIDGE_TEAM_ID"] = "team_chiefmate"
+        os.environ["BRIDGE_TASK_ID"] = "task_chiefmate"
+        chiefmate_binding = module.observer_binding(
+            {"session_id": "chiefmate_session_demo", "agent_name": "chiefmate-a", "hook_event_name": "SubagentStart"},
+            {},
+        )
+        expected_chiefmate = {
+            "run_id": "run_demo",
+            "main_session_id": "main_demo",
+            "sub_session_id": "sub_chiefmate",
+            "bridge_window_id": "bw_chiefmate",
+            "team_id": "team_chiefmate",
+            "task_id": "task_chiefmate",
+            "teammate_id": "chiefmate-a",
+            "agent_type": "chiefmate-a",
+            "session_id": "chiefmate_session_demo",
+        }
+        for key, expected in expected_chiefmate.items():
+            if chiefmate_binding.get(key) != expected:
+                raise AssertionError(json.dumps({"key": key, "binding": chiefmate_binding}, ensure_ascii=False, indent=2))
+        module.emit_observer_record("session_bindings", {"timestamp": _now(), **chiefmate_binding})
+        for key in ["BRIDGE_RUN_ID", "CLAUDE_CONTROL_RUN_ID", *rebound_env_keys]:
+            os.environ.pop(key, None)
+        rebound_binding = module.observer_binding({"session_id": "chiefmate_session_demo"}, {"path": "src"})
+        for key, expected in expected_chiefmate.items():
+            if rebound_binding.get(key) != expected:
+                raise AssertionError(json.dumps({"key": key, "binding": rebound_binding}, ensure_ascii=False, indent=2))
+        required_tool_fields = {
+            "run_id",
+            "bridge_window_id",
+            "team_id",
+            "task_id",
+            "teammate_id",
+            "agent_type",
+            "session_id",
+            "tool_name",
+            "status",
+            "timestamp",
+        }
+        for tool_name, tool_input in [
+            ("Read", {"file_path": "README.md"}),
+            ("Grep", {"pattern": "TODO", "path": "."}),
+            ("Glob", {"pattern": "*.md", "path": "."}),
+            ("LS", {"path": "."}),
+            ("Bash", {"command": "echo inspect", "cwd": "."}),
+        ]:
+            tool_use_id = f"tool_chiefmate_{tool_name.lower()}"
+            for status in ["started", "completed"]:
+                tool_binding = module.observer_binding({"session_id": "chiefmate_session_demo"}, tool_input)
+                module.emit_observer_record(
+                    "tool_events",
+                    {
+                        "timestamp": _now(),
+                        **tool_binding,
+                        "tool_name": tool_name,
+                        "tool_use_id": tool_use_id,
+                        "action": "run_command" if tool_name == "Bash" else "inspect",
+                        "target": tool_input.get("file_path") or tool_input.get("path") or tool_input.get("command"),
+                        "summary": f"{tool_name} chiefmate evidence",
+                        "status": status,
+                        "started_at": _now(),
+                        "completed_at": _now() if status == "completed" else None,
+                        "duration_ms": 1 if status == "completed" else None,
+                        "normalized_input": tool_input,
+                        "safe_input_preview": module.safe_input_preview(tool_input),
+                        "file_refs": module.tool_file_refs(tool_name, tool_input, after=status == "completed"),
+                        "output_summary": None,
+                    },
+                )
+        run_bindings = _read_jsonl(runs_root / "run_demo" / "session_bindings.jsonl")
+        if not any(item.get("session_id") == "chiefmate_session_demo" and item.get("teammate_id") == "chiefmate-a" for item in run_bindings):
+            raise AssertionError(json.dumps(run_bindings[-10:], ensure_ascii=False, indent=2))
+        run_tool_events = _read_jsonl(runs_root / "run_demo" / "tool_events.jsonl")
+        for tool_name in ["Read", "Grep", "Glob", "LS", "Bash"]:
+            matching = [
+                item
+                for item in run_tool_events
+                if item.get("teammate_id") == "chiefmate-a"
+                and item.get("session_id") == "chiefmate_session_demo"
+                and item.get("tool_name") == tool_name
+            ]
+            statuses = {item.get("status") for item in matching}
+            if not {"started", "completed"}.issubset(statuses):
+                raise AssertionError(json.dumps({"tool_name": tool_name, "statuses": sorted(statuses), "tail": run_tool_events[-20:]}, ensure_ascii=False, indent=2))
+            for item in matching:
+                missing = sorted(field for field in required_tool_fields if item.get(field) in {None, ""})
+                if missing:
+                    raise AssertionError(json.dumps({"missing": missing, "record": item}, ensure_ascii=False, indent=2))
     finally:
         if old_runs_root is None:
             os.environ.pop("BRIDGE_RUNTIME_RUNS_ROOT", None)
@@ -1620,7 +1718,7 @@ def main() -> None:
         assert summary["orphan_status"] == "bridge_window_orphaned"
         assert summary["user_clarification_status"] == "continuation_of_previous_l3"
         assert "call_bridge_sdk" in summary["user_clarification_allowed_actions"]
-        assert "l3_bridge" in summary["l3_allowed_routes"] and "leader_freeze" in summary["l3_allowed_routes"]
+        assert {"l3_bridge", "leader_freeze", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly"}.issubset(set(summary["l3_allowed_routes"]))
         assert summary["mcp_helper_status"] == "bridge_window_orphaned"
         assert summary["stuck_dispatch_anomaly"] == "bridge_orchestration_hang"
         assert summary["execute_watchdog_alert"] == "execute_stale_heartbeat_with_owned_process_refs"

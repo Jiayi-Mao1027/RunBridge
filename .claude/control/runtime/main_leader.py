@@ -328,6 +328,7 @@ def _normalize_task_spec(
         "original_user_instruction": original_instruction,
         "instruction_coverage_checklist": _derive_instruction_coverage_checklist(source, original_instruction, description),
         "semantic_resolution_contract": _semantic_resolution_contract(source, original_instruction, target_phase),
+        "current_user_intent_context": _current_user_intent_context(source, original_instruction, description),
         "preserved_task_context": _preserved_task_context(source),
         "task_kind": str(source.get("task_kind") or "bridge_window_task"),
         "target_phase": target_phase,
@@ -352,11 +353,14 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
                         f"Original user instruction: {task_spec.get('original_user_instruction') or task_spec['task_description']}",
                         f"Instruction coverage checklist: {_json_list(task_spec.get('instruction_coverage_checklist'))}",
                         f"Semantic resolution contract: {_json_dict(task_spec.get('semantic_resolution_contract'))}",
+                        f"Current user intent context: {_json_dict(task_spec.get('current_user_intent_context'))}",
                         f"Preserved task context: {_json_dict(task_spec.get('preserved_task_context'))}",
                         "Coverage rule: do not mark the task complete until every checklist item is completed, explicitly deferred with a concrete reason, or escalated to main-leader/user.",
                         "Semantic identity rule: resolve or explicitly carry model/method identity, checkpoint identity, dataset identity, prompt identity, code/config basis, and inherited defaults before downstream implementation or execution. Do not silently change them.",
+                        "Current intent rule: treat current_user_intent_context as the nearest active user intent for this bridge window. Confirm it, refine it, or supersede it from evidence; do not silently drop or rewrite it when recommending the next phase.",
                         "Report rule: include an instruction coverage section that lists completed, deferred, blocked, and escalated checklist items.",
                         "Report rule: include a semantic identity resolution section with resolved, inherited, unknown, blocked, or escalated disposition for each required identity field.",
+                        "Report rule: include a current user intent context section that states confirmed, refined, superseded, blocked, or escalated disposition and the evidence for any change.",
                         f"Role: {teammate.get('role') or 'bridge teammate'}",
                         f"Responsibilities: {_json_list(responsibilities)}",
                         f"Allowed tools: {_json_list(teammate.get('allowed_tools'))}",
@@ -386,7 +390,7 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
         return [
             "L2 three-seat review rule: treat chiefmate-a, chiefmate-b, and chiefmate-c as independent peers. Inspect peer conclusions when available, but do not accept them passively; challenge unsupported assumptions, missing alternatives, and weak evidence.",
             "L2 factual confidence loop: ask, 'Do I have factual 100% confidence in this strategy?' If not, find every plausible flaw, missing assumption, brittle dependency, or evidence gap; propose appropriate repairs; then re-check the repaired strategy. Repeat until no material flaw remains or the remaining uncertainty is explicitly bounded with evidence.",
-            "L2 research rule: when a claim depends on current facts, external tool/library behavior, established methodology, or empirical/academic support, use WebSearch/WebFetch where available. Prefer primary docs, papers, and directly relevant sources over secondary summaries, and distinguish sourced facts from inference.",
+            "L2 research rule: when a claim depends on current facts, external tool/library behavior, established methodology, or empirical support, use WebSearch/WebFetch where available. Prefer primary docs and directly relevant sources over secondary summaries, and distinguish sourced facts from inference.",
             "L2 convergence rule: agreement across peers is not enough. State what would falsify the strategy, what peer claim you would reject or downgrade, and what evidence would change your recommendation.",
         ]
     if target_phase == "l3_bridge":
@@ -402,6 +406,7 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
         return [
             tool_rule,
             "L3 semantic identity rule: actively identify which model/method/checkpoint/dataset/prompt/config the user means. For comparisons such as DPO vs OPD, report the concrete ckpts or say exactly what is ambiguous.",
+            "L3 current-intent bridge rule: inspect current_user_intent_context before repo audit or curation. Confirm the user's active direction if evidence supports it, refine it if repo/docs make a narrower interpretation safer, or explicitly supersede it when L3 finds contradiction. The report must preserve the resulting intent so the next phase can route to L2, L3, L4 implement, L4 execute, or L4 anomaly without guessing.",
             "L3 inheritance rule: when the user does not request a dataset, prompt, split, metric, or config change, inspect the active repo/docs enough to identify the current basis and explicitly recommend inheriting it.",
             "L3 packet handoff rule: report the resolved semantic basis in a form L4 implement/execute can copy directly: model/method identity, ckpt paths/IDs, dataset/split, prompt/template, config files, and any unresolved field.",
             "L3 log curation rule: keep the log surface minimum viable, but do not archive logs merely because they are old or bulky. Retain logs that may be reused for comparison, audit, avoiding expensive regeneration, or downstream interpretation; archive only logs that are clearly unused, duplicate, superseded, or unrelated, and report the reason.",
@@ -455,7 +460,7 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
         return [
             "L4 anomaly three-seat review rule: treat anomaly-analyst-a, anomaly-analyst-b, and anomaly-analyst-c as independent peers. Inspect peer causal claims when available, but actively question them rather than merging them into consensus.",
             "L4 anomaly factual cause-confidence loop: ask, 'Do I have factual 100% confidence in this cause or explanation?' If not, identify every plausible alternative cause, contradiction, missing artifact, log gap, data issue, implementation issue, execution issue, or environment issue; propose the smallest discriminative check; then re-rank causes. Repeat until material alternatives are excluded or residual uncertainty is explicitly bounded with evidence.",
-            "L4 anomaly research rule: when external methodology, known failure modes, library/runtime behavior, hardware behavior, or paper-backed claims could materially affect diagnosis, use WebSearch/WebFetch where available. Prefer primary docs, papers, issue trackers, and direct evidence over summaries.",
+            "L4 anomaly research rule: when external methodology, known failure modes, library/runtime behavior, hardware behavior, or empirical claims could materially affect diagnosis, use WebSearch/WebFetch where available. Prefer primary docs, issue trackers, and direct evidence over summaries.",
             "L4 anomaly convergence rule: peer agreement does not prove causality. State what would falsify the leading cause, what peer claim you would reject or downgrade, and what evidence would change your ranking.",
         ]
     return []
@@ -514,6 +519,9 @@ def _default_report_contract(target_phase: str | None = None) -> dict[str, Any]:
             "warmup memory observed when warmup ran",
             "natural-language model dataset method semantics",
         ])
+    if str(target_phase or "") == "l3_bridge":
+        contract["required_sections"].append("current_user_intent_context")
+        contract["required_evidence"].append("current user intent confirmed refined superseded blocked or escalated with reason")
     return contract
 
 
@@ -576,6 +584,49 @@ def _semantic_resolution_contract(source: dict[str, Any], original_instruction: 
     return contract
 
 
+def _current_user_intent_context(source: dict[str, Any], original_instruction: str, description: str) -> dict[str, Any]:
+    supplied = (
+        source.get("current_user_intent_context")
+        or source.get("current_user_intent")
+        or source.get("active_user_intent")
+        or source.get("proposed_user_direction")
+    )
+    if isinstance(supplied, dict):
+        context = deepcopy(supplied)
+    else:
+        context = {}
+        if supplied:
+            context["active_user_intent"] = deepcopy(supplied)
+    context.setdefault("active_user_intent", original_instruction or description)
+    context.setdefault("basis", "latest user instruction and task_spec fields")
+    related_context = context.get("related_context") if isinstance(context.get("related_context"), dict) else {}
+    related_context = deepcopy(related_context)
+    for key in (
+        "latest_user_request",
+        "l2_advisory_summary",
+        "l2_report_refs",
+        "proposed_directions",
+        "rejected_directions",
+        "open_questions",
+        "decision_basis",
+        "prior_bridge_result_refs",
+        "source_report_refs",
+    ):
+        if key in source and key not in related_context:
+            related_context[key] = deepcopy(source[key])
+    context["related_context"] = related_context
+    context.setdefault(
+        "disposition_policy",
+        [
+            "confirm when repo/docs/evidence support the active intent",
+            "refine when the active intent is directionally right but needs narrower semantic or repo-facing basis",
+            "supersede when evidence contradicts the active intent or a later user instruction changes it",
+            "carry unresolved uncertainty forward as blocked or escalated instead of dropping it",
+        ],
+    )
+    return context
+
+
 def _preserved_task_context(source: dict[str, Any]) -> dict[str, Any]:
     reserved = {
         "task_id_or_null",
@@ -593,6 +644,10 @@ def _preserved_task_context(source: dict[str, Any]) -> dict[str, Any]:
         "must_do",
         "must_not_do",
         "semantic_resolution_contract",
+        "current_user_intent_context",
+        "current_user_intent",
+        "active_user_intent",
+        "proposed_user_direction",
         "task_kind",
     }
     preserved = {}
