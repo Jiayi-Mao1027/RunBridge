@@ -16,6 +16,7 @@ DEFAULT_BRIDGE_ACTIONS = ["team_create", "task_create", "send_messages", "task_c
 READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "LS"]
 RESEARCH_TOOLS = [*READ_ONLY_TOOLS, "WebSearch", "WebFetch"]
 READ_CHECK_TOOLS = [*READ_ONLY_TOOLS, "Bash"]
+ANOMALY_TOOLS = [*READ_CHECK_TOOLS, "WebSearch", "WebFetch"]
 L3_WRITE_TOOLS = [*READ_ONLY_TOOLS, "Edit", "Write"]
 WRITE_TOOLS = [*READ_ONLY_TOOLS, "Bash", "Edit", "Write"]
 DEFAULT_BRIDGE_LEADER_TOOLS = ["Agent", *WRITE_TOOLS]
@@ -24,11 +25,11 @@ PHASE_BRIDGE_TOOLS = {
     "l3_bridge": ["Agent", *L3_WRITE_TOOLS],
     "l4_implement": DEFAULT_BRIDGE_LEADER_TOOLS,
     "l4_execute": ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "Write"],
-    "l4_anomaly": ["Agent", *READ_CHECK_TOOLS],
+    "l4_anomaly": ["Agent", *ANOMALY_TOOLS],
 }
 DEFAULT_FORBIDDEN_ACTIONS = [
     "destructive filesystem operations outside writable scopes",
-    "external network calls unless explicitly approved",
+    "external network calls through Bash or project code unless explicitly approved; WebSearch/WebFetch are allowed only when present in allowed_tools and used for task-relevant research",
     "dependency installation unless explicitly approved",
     "implementation content edits during L3 artifact curation unless the file is human-facing documentation already in L3 doc scope",
     "physical deletion of user/project artifacts unless the item is clearly regenerable trash, an empty duplicate, or explicitly approved",
@@ -77,8 +78,9 @@ PHASE_TIMEOUT_POLICY = {
 
 PHASE_TEAM_DEFAULTS = {
     "l2_advisory": [
-        ("chiefmate-a", "advisory", RESEARCH_TOOLS, "produce upstream interpretation, assumptions, plan critique, and peer-aware advisory judgment"),
-        ("chiefmate-b", "advisory", RESEARCH_TOOLS, "produce independent upstream advisory judgment and critique chiefmate-a when relevant"),
+        ("chiefmate-a", "advisory", RESEARCH_TOOLS, "produce upstream interpretation, assumptions, plan critique, peer challenges, and confidence-loop advisory judgment"),
+        ("chiefmate-b", "advisory", RESEARCH_TOOLS, "produce independent upstream advisory judgment, critique chiefmate-a/chiefmate-c, and challenge weak convergence"),
+        ("chiefmate-c", "advisory", RESEARCH_TOOLS, "produce additional GPT-main peer critique, challenge chiefmate-a/chiefmate-b, and run confidence-loop validation"),
     ],
     "l3_bridge": [
         ("curator", "artifact_curation", L3_WRITE_TOOLS, "clarify active logs, datasets, checkpoints, outputs, archive boundaries, and traceability without running commands"),
@@ -90,12 +92,13 @@ PHASE_TEAM_DEFAULTS = {
         ("rungater", "implementation_gate", READ_CHECK_TOOLS, "judge post-implementation readiness and recommend proceed, repair, reroute, or stop"),
     ],
     "l4_execute": [
-        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow through conda env mjy, force formal GPU runs above 90% of selected GPU memory when applicable, and record exact execution evidence"),
+        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow through conda env mjy, adapt batch size and memory-related settings to actual GPU capacity, force formal GPU runs above 90% of selected GPU memory when applicable, and record exact execution evidence"),
         ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, conda env use, GPU memory utilization, outcome classification, and recommend anomaly routing when needed"),
     ],
     "l4_anomaly": [
-        ("anomaly-analyst-a", "anomaly_analysis", READ_CHECK_TOOLS, "build evidence-backed anomaly hypotheses and discriminative next checks"),
-        ("anomaly-analyst-b", "anomaly_analysis", READ_CHECK_TOOLS, "build independent anomaly hypotheses and critique anomaly-analyst-a when relevant"),
+        ("anomaly-analyst-a", "anomaly_analysis", ANOMALY_TOOLS, "build evidence-backed anomaly hypotheses, peer challenges, and discriminative next checks"),
+        ("anomaly-analyst-b", "anomaly_analysis", ANOMALY_TOOLS, "build independent anomaly hypotheses, critique anomaly-analyst-a/anomaly-analyst-c, and challenge weak causal convergence"),
+        ("anomaly-analyst-c", "anomaly_analysis", ANOMALY_TOOLS, "produce additional GPT-main anomaly critique, challenge peer causal claims, and run cause-confidence validation"),
     ],
 }
 
@@ -378,6 +381,13 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
 
 
 def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> list[str]:
+    if target_phase == "l2_advisory":
+        return [
+            "L2 three-seat review rule: treat chiefmate-a, chiefmate-b, and chiefmate-c as independent peers. Inspect peer conclusions when available, but do not accept them passively; challenge unsupported assumptions, missing alternatives, and weak evidence.",
+            "L2 factual confidence loop: ask, 'Do I have factual 100% confidence in this strategy?' If not, find every plausible flaw, missing assumption, brittle dependency, or evidence gap; propose appropriate repairs; then re-check the repaired strategy. Repeat until no material flaw remains or the remaining uncertainty is explicitly bounded with evidence.",
+            "L2 research rule: when a claim depends on current facts, external tool/library behavior, established methodology, or empirical/academic support, use WebSearch/WebFetch where available. Prefer primary docs, papers, and directly relevant sources over secondary summaries, and distinguish sourced facts from inference.",
+            "L2 convergence rule: agreement across peers is not enough. State what would falsify the strategy, what peer claim you would reject or downgrade, and what evidence would change your recommendation.",
+        ]
     if target_phase == "l3_bridge":
         return [
             "L3 no-run-tools rule: do not run shell commands or other execution tools in L3. Use Read/Grep/Glob/LS for inspection and Edit/Write only for explicitly permitted curation or documentation updates.",
@@ -414,6 +424,7 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
             "Execution environment rule: all formal execute commands must use the conda environment named mjy. Prefer `conda run -n mjy ...` for auditable commands, or explicitly record an equivalent `conda activate mjy` shell context. Do not create or use venv.",
             "Long-task ETA rule: before launching any long-running command, estimate expected wall-clock runtime as a range, state the basis for the estimate, and include that estimate in the execution report.",
             "Smoke-shape rule: before formal execution, use bounded smoke evidence to choose formal parameters such as per-device batch size, microbatch size, gradient accumulation, sequence length, precision, and effective batch size. Record why formal settings differ from smoke settings.",
+            "Batch/memory adaptation rule: do not copy user- or upstream-provided batch size, microbatch, gradient accumulation, sequence length, precision, or memory-saving settings mechanically when actual GPU memory makes them unsuitable. Treat those values as intent and constraints; adapt them inside the frozen semantic boundary to reach the formal GPU utilization target, preserving effective-batch semantics when possible, and record requested value, observed GPU capacity, adjusted value, and reason.",
             "Log manifest rule: every generated formal log folder must contain a manifest file inside that folder, analogous to checkpoint manifests. Do not rely on folder/file names alone. The manifest must record run/window/task IDs, command, cwd, environment, semantic basis, smoke evidence refs, formal parameters/effective batch size, process refs, log files, expected outputs/checkpoints, status, timestamps, and reuse/dependency notes.",
             "If runtime cannot be estimated, state that explicitly with the missing information and still record command, start time, owned process refs, logs, and expected outputs.",
             "L4 execute terminality rule: run formal long jobs in a way the bridge can wait on or poll until terminal completion. Do not return a final or partial bridge report while an owned process is still running; emit progress evidence and keep waiting.",
@@ -428,6 +439,13 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
             "Postrun must run after the formal execution process has reached a terminal state or produced terminal failure evidence; do not audit a still-running process as complete.",
             "Environment audit rule: verify formal execution used conda env mjy and did not use venv. Missing or contradictory environment evidence is an execution deviation.",
             "GPU memory audit rule: for formal GPU execution, verify observed memory exceeded 90% of selected GPU total memory after warmup; for typical 80GB GPUs, usage should usually exceed 70GB. Lower usage requires explicit smoke/conservative approval or hard resource evidence.",
+        ]
+    if target_phase == "l4_anomaly":
+        return [
+            "L4 anomaly three-seat review rule: treat anomaly-analyst-a, anomaly-analyst-b, and anomaly-analyst-c as independent peers. Inspect peer causal claims when available, but actively question them rather than merging them into consensus.",
+            "L4 anomaly factual cause-confidence loop: ask, 'Do I have factual 100% confidence in this cause or explanation?' If not, identify every plausible alternative cause, contradiction, missing artifact, log gap, data issue, implementation issue, execution issue, or environment issue; propose the smallest discriminative check; then re-rank causes. Repeat until material alternatives are excluded or residual uncertainty is explicitly bounded with evidence.",
+            "L4 anomaly research rule: when external methodology, known failure modes, library/runtime behavior, hardware behavior, or paper-backed claims could materially affect diagnosis, use WebSearch/WebFetch where available. Prefer primary docs, papers, issue trackers, and direct evidence over summaries.",
+            "L4 anomaly convergence rule: peer agreement does not prove causality. State what would falsify the leading cause, what peer claim you would reject or downgrade, and what evidence would change your ranking.",
         ]
     return []
 

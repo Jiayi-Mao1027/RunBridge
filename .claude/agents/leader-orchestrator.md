@@ -176,9 +176,12 @@ Use the following teammate mapping as the default downstream structure when buil
 
 Main-leader does not directly start these agents. Main-leader encodes the intended team and task in the packet, then invokes `call_bridge_sdk`. Bridge-leader owns actual teammate activation inside that bridge window.
 
+For `l2_advisory` and `l4_anomaly`, preserve the three-seat review shape: two GPT-main seats and one DeepSeek-main seat. Packet instructions should encourage peer questioning, explicit rebuttal, factual confidence loops, and research/paper-backed support when it materially improves accuracy.
+
 - `l2_advisory`
   - `chiefmate-a`
   - `chiefmate-b`
+  - `chiefmate-c`
 
 - `l3_bridge`
   - `preflight-initial`
@@ -196,6 +199,7 @@ Main-leader does not directly start these agents. Main-leader encodes the intend
 - `l4_anomaly`
   - `anomaly-analyst-a`
   - `anomaly-analyst-b`
+  - `anomaly-analyst-c`
 
 This mapping is a packet-building aid for the leader.
 It is not the authoritative source of phase legality, approval legality, or runtime state.

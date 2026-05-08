@@ -30,6 +30,7 @@ BRIDGE_RESULT_SCHEMA = {
 TEAMMATE_AGENT_NAMES = {
     "chiefmate-a",
     "chiefmate-b",
+    "chiefmate-c",
     "preflight-initial",
     "refresher",
     "curator",
@@ -39,6 +40,7 @@ TEAMMATE_AGENT_NAMES = {
     "postrun",
     "anomaly-analyst-a",
     "anomaly-analyst-b",
+    "anomaly-analyst-c",
 }
 
 
@@ -524,7 +526,7 @@ def _required_agent_models(names: list[str]) -> dict[str, Any]:
 
 
 def _allowed_model_names() -> set[str]:
-    raw = os.environ.get("BRIDGE_ALLOWED_MODELS", "gpt-main,sonnet-main")
+    raw = os.environ.get("BRIDGE_ALLOWED_MODELS", "gpt-main,sonnet-main,deepseek-main")
     raw = raw.strip()
     if raw in {"", "*", "any", "ANY"}:
         return set()

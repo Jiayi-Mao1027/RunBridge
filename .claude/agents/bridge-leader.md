@@ -1,7 +1,7 @@
 ---
 name: bridge-leader
 description: Bridge-window owner invoked only through call_bridge_sdk. Accepts one BridgePacket, creates exactly one team and one task, dispatches teammate work, collects report/artifact evidence, completes or fails the task, deletes the team, and returns one BridgeResult to main-leader.
-tools: Agent(chiefmate-a, chiefmate-b, preflight-initial, refresher, curator, implementor, rungater, executor, postrun, anomaly-analyst-a, anomaly-analyst-b), Read, Grep, Glob, LS, Bash, Edit, Write
+tools: Agent(chiefmate-a, chiefmate-b, chiefmate-c, preflight-initial, refresher, curator, implementor, rungater, executor, postrun, anomaly-analyst-a, anomaly-analyst-b, anomaly-analyst-c), Read, Grep, Glob, LS, Bash, Edit, Write, WebSearch, WebFetch
 model: gpt-main
 effort: high
 ---

@@ -15,6 +15,7 @@ from claude_cli_executor import _bridge_leader_prompt
 from claude_cli_executor import _ensure_project_agent_files
 from claude_cli_executor import _parse_claude_payload
 from claude_cli_executor import _redact_cmd
+from claude_cli_executor import _required_agent_models
 from claude_cli_executor import simulated_team_executor
 from main_leader import decide_next_bridge_packet
 from workflow_runtime import dispatch_workflow_event
@@ -968,6 +969,50 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         ),
     )
 
+    l2_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="three-seat l2 advisory smoke",
+        target_phase="l2_advisory",
+    )
+    l2_names = [item.get("teammate_name") for item in l2_packet["team_spec"].get("teammate_specs", [])]
+    if l2_names != ["chiefmate-a", "chiefmate-b", "chiefmate-c"]:
+        raise AssertionError(json.dumps(l2_packet["team_spec"], ensure_ascii=False, indent=2))
+    l2_tools = {
+        tool
+        for teammate in l2_packet["team_spec"]["teammate_specs"]
+        for tool in teammate.get("allowed_tools", [])
+    }
+    if "WebSearch" not in l2_tools or "WebFetch" not in l2_tools:
+        raise AssertionError(json.dumps(l2_packet["team_spec"], ensure_ascii=False, indent=2))
+    l2_assignments = json.dumps(l2_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
+    if "Do I have factual 100% confidence in this strategy?" not in l2_assignments or "chiefmate-c" not in l2_assignments:
+        raise AssertionError(l2_assignments)
+
+    anomaly_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="three-seat anomaly smoke",
+        target_phase="l4_anomaly",
+    )
+    anomaly_names = [item.get("teammate_name") for item in anomaly_packet["team_spec"].get("teammate_specs", [])]
+    if anomaly_names != ["anomaly-analyst-a", "anomaly-analyst-b", "anomaly-analyst-c"]:
+        raise AssertionError(json.dumps(anomaly_packet["team_spec"], ensure_ascii=False, indent=2))
+    anomaly_tools = {
+        tool
+        for teammate in anomaly_packet["team_spec"]["teammate_specs"]
+        for tool in teammate.get("allowed_tools", [])
+    }
+    if "WebSearch" not in anomaly_tools or "WebFetch" not in anomaly_tools:
+        raise AssertionError(json.dumps(anomaly_packet["team_spec"], ensure_ascii=False, indent=2))
+    anomaly_assignments = json.dumps(anomaly_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
+    if "Do I have factual 100% confidence in this cause or explanation?" not in anomaly_assignments or "anomaly-analyst-c" not in anomaly_assignments:
+        raise AssertionError(anomaly_assignments)
+
     execute_packet = decide_next_bridge_packet(
         str(control_root),
         "run_demo",
@@ -998,6 +1043,8 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         "estimate expected wall-clock runtime" not in execute_assignments
         or "Do not return a final or partial bridge report while an owned process is still running" not in execute_assignments
         or "Smoke-shape rule" not in execute_assignments
+        or "Batch/memory adaptation rule" not in execute_assignments
+        or "do not copy user- or upstream-provided batch size" not in execute_assignments
         or "effective batch size" not in execute_assignments
         or "Log manifest rule" not in execute_assignments
         or "generated formal log folder must contain a manifest file inside that folder" not in execute_assignments
@@ -1189,6 +1236,30 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
             raise AssertionError(str(agent_path))
     if (project_root / ".claude" / "agents").exists():
         raise AssertionError(str(project_root / ".claude" / "agents"))
+
+    old_allowed_models = os.environ.get("BRIDGE_ALLOWED_MODELS")
+    os.environ["BRIDGE_ALLOWED_MODELS"] = "gpt-main,sonnet-main,deepseek-main"
+    try:
+        mixed_model_result = _required_agent_models(
+            [
+                "bridge-leader",
+                "chiefmate-a",
+                "chiefmate-b",
+                "chiefmate-c",
+                "anomaly-analyst-a",
+                "anomaly-analyst-b",
+                "anomaly-analyst-c",
+            ]
+        )
+    finally:
+        if old_allowed_models is None:
+            os.environ.pop("BRIDGE_ALLOWED_MODELS", None)
+        else:
+            os.environ["BRIDGE_ALLOWED_MODELS"] = old_allowed_models
+    if mixed_model_result.get("error_or_null") or mixed_model_result.get("models", {}).get("chiefmate-b") != "deepseek-main":
+        raise AssertionError(json.dumps(mixed_model_result, ensure_ascii=False, indent=2))
+    if mixed_model_result.get("models", {}).get("anomaly-analyst-b") != "deepseek-main":
+        raise AssertionError(json.dumps(mixed_model_result, ensure_ascii=False, indent=2))
 
     original_text = "\u4e0a\u4e00\u6b21\u5c1d\u8bd5\u7cfb"
     mojibake_text = original_text.encode("utf-8").decode("gbk")

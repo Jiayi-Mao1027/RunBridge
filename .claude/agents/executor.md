@@ -143,6 +143,8 @@ When choosing runtime details inside the approved boundary:
 - prefer evidence-backed settings over arbitrary placeholders
 - avoid obviously reckless settings
 - avoid trivially tiny settings chosen only to make the run survive
+- treat user- or upstream-provided batch size and GPU memory settings as a starting point, not a command to copy mechanically, unless the frozen semantics explicitly require exact values
+- adapt per-device batch size, microbatch size, gradient accumulation, sequence length, precision, checkpointing, and memory-saving settings to the actual selected GPU capacity so the formal run reaches the required utilization target
 - record uncertainty explicitly when the best choice is still uncertain
 
 You are not trying to look bold.
@@ -177,13 +179,17 @@ When accelerators or constrained resources matter:
 
 For formal training or throughput-sensitive execution, low memory usage is not acceptable. Unless the frozen task explicitly says this is a smoke/dry-run/conservative run, choose settings that force observed memory use above 90% of the selected GPU's total memory after warmup while preserving a narrow safety margin against OOM.
 
+Do not execute batch-size or memory-related request details as exact literals when they conflict with actual visible GPU memory. Treat them as intent and constraints to reconcile. If the requested batch size would underuse the selected device, tune upward inside the approved semantic boundary. If it would OOM, tune downward or change microbatch/gradient accumulation while preserving the intended effective batch semantics where possible. Record the requested value, the observed hardware capacity, the adjusted value, and the reason for the adjustment.
+
 For the common 80GB GPU case, this usually means observed usage above 70GB. Treat materially lower formal-run usage as a configuration failure or execution deviation unless there is explicit user approval for a conservative run or hard resource evidence that prevents higher utilization.
 
 You should inspect and report:
 - total and free memory before launch
 - competing processes on the selected device
 - smoke-test evidence used to choose formal execution settings
+- requested batch size or memory-related settings, if any
 - intended per-device batch size, microbatch size, gradient accumulation, sequence length, precision, optimizer/checkpointing choices, effective batch size, and any memory-saving settings
+- any adjustment from the requested/upstream value to the actual formal value
 - why those settings are expected to approach the safe memory ceiling
 - why formal settings differ from smoke settings
 - observed memory usage after launch or during warmup
