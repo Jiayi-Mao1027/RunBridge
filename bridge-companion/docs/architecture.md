@@ -2,7 +2,7 @@
 
 ## 1. Product Definition
 
-Bridge Companion is an external, read-only observation layer for the Claude Code Bridge Runtime. It turns runtime snapshots, event ledgers, inbox notifications, reports, and artifact references into a readable foreground experience.
+Bridge Companion is an external, read-only observation layer for the Claude Code Bridge Runtime. Its realtime foreground experience is stream-first: bridge SDK stream and SDK hooks stream are the primary live sources, while runtime snapshots, event ledgers, inbox notifications, reports, and artifact references are audit, hydration, recovery, and backfill sources.
 
 It is not a controller. It does not create bridge windows, create teams, dispatch tasks, approve routes, modify ledgers, or inject context into any runtime agent.
 
@@ -25,9 +25,11 @@ bridge-companion/
 It must not modify or import runtime control code directly as a control dependency. It should consume exported data through one of these read-only mechanisms:
 
 ```text
-runtime snapshot file reader
-read-only HTTP adapter
+bridge SDK stream tap
+SDK hooks stream tap
+read-only HTTP adapter for hydration/backfill
 read-only websocket/SSE event stream
+runtime snapshot file reader for audit/recovery
 mock data during prototype development
 ```
 
@@ -53,12 +55,15 @@ It must not add context to implementor, bridge-leader, leader-orchestrator, or a
 Recommended flow:
 
 ```text
-Bridge Runtime files / read-only API
-  -> companion data adapter
-  -> normalized runtime view
-  -> companion status model
+bridge SDK stream + SDK hooks stream
+  -> companion live event bus
+  -> UI reducer / actor cards / activity timeline
+  -> derived status model
   -> fact copy / explanation copy / companion note
   -> themed UI
+
+runstate JSON / ledgers / snapshots
+  -> hydration, backfill, audit confirmation, recovery only
 ```
 
 The UI should not directly invent prose from raw logs. A status model should first determine what is known, what is unknown, what is waiting, what failed, and what lifecycle transitions are possible.
@@ -67,7 +72,7 @@ The UI should not directly invent prose from raw logs. A status model should fir
 
 Every status surface should distinguish three layers.
 
-The fact layer is authoritative and must come from runtime state. Example: current phase, latest event, lifecycle state, wait reason, completion report presence, artifact presence, failure event.
+The fact layer is authoritative and must come from observed system facts. Live activity facts come first from SDK stream and hooks stream. Runtime state confirms lifecycle, completion, audit, recovery, and backfill facts. Example: current phase, latest SDK message, active tool event, lifecycle state, wait reason, completion report presence, artifact presence, failure event.
 
 The explanation layer translates facts into user-readable language. It may explain that waiting does not necessarily mean stuck, but it may not claim file-level progress unless a report or event says so.
 
@@ -101,4 +106,4 @@ The API prompt should include a strict contract: only use provided facts, list u
 
 The prototype in this folder uses static mock data. This is intentional. The first milestone is to prove the UI grammar, copy boundaries, and status mapping without touching the existing Bridge Runtime.
 
-Later milestones can add a read-only adapter that loads runtime_snapshot.json and event_log.jsonl from a configured location or from a read-only server.
+Later milestones should add a read-only live adapter that consumes bridge SDK stream and SDK hooks stream directly. A runtime_snapshot.json / event_log.jsonl adapter is still useful, but only for cold-start hydration, missed-event backfill, audit confirmation, and recovery after stream disconnects.

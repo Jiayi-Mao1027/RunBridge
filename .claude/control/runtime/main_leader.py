@@ -97,9 +97,9 @@ PHASE_TEAM_DEFAULTS = {
         ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, conda env use, GPU memory utilization, outcome classification, and recommend anomaly routing when needed"),
     ],
     "l4_anomaly": [
-        ("anomaly-analyst-a", "anomaly_analysis", ANOMALY_TOOLS, "build evidence-backed anomaly hypotheses, peer challenges, and discriminative next checks"),
-        ("anomaly-analyst-b", "anomaly_analysis", ANOMALY_TOOLS, "build independent anomaly hypotheses, critique anomaly-analyst-a/anomaly-analyst-c, and challenge weak causal convergence"),
-        ("anomaly-analyst-c", "anomaly_analysis", ANOMALY_TOOLS, "produce additional GPT-main anomaly critique, challenge peer causal claims, and run cause-confidence validation"),
+        ("anomaly-analyst-a", "anomaly_analysis", ANOMALY_TOOLS, "perform a complete independent anomaly diagnosis before peer review: inspect local evidence, answer-level/result samples when relevant, causal alternatives, missing evidence, and discriminative next checks"),
+        ("anomaly-analyst-b", "anomaly_analysis", ANOMALY_TOOLS, "perform a complete independent anomaly diagnosis before peer review: inspect local evidence, answer-level/result samples when relevant, causal alternatives, missing evidence, and discriminative next checks"),
+        ("anomaly-analyst-c", "anomaly_analysis", ANOMALY_TOOLS, "perform a complete independent anomaly diagnosis before peer review: inspect local evidence, answer-level/result samples when relevant, causal alternatives, missing evidence, and discriminative next checks"),
     ],
 }
 
@@ -459,7 +459,9 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
     if target_phase == "l4_anomaly":
         return [
             "L4 anomaly three-seat review rule: treat anomaly-analyst-a, anomaly-analyst-b, and anomaly-analyst-c as independent peers. Inspect peer causal claims when available, but actively question them rather than merging them into consensus.",
+            "L4 anomaly no-preassigned-lane rule: do not give different analysts different causal lanes, favored hypotheses, or role-biased emphasis. Each analyst must first perform a complete independent diagnosis from the full packet context and available evidence; peer critique comes after that independent pass.",
             "L4 anomaly factual cause-confidence loop: ask, 'Do I have factual 100% confidence in this cause or explanation?' If not, identify every plausible alternative cause, contradiction, missing artifact, log gap, data issue, implementation issue, execution issue, or environment issue; propose the smallest discriminative check; then re-rank causes. Repeat until material alternatives are excluded or residual uncertainty is explicitly bounded with evidence.",
+            "L4 anomaly answer-level inspection rule: when analyzing a result, metric change, or proposed cause, inspect the original answers, outputs, predictions, traces, or result samples behind the metric when available. Do not diagnose from metrics alone; derive how concrete answer-level phenomena could produce the observed result, and report newly observed patterns or missing evidence.",
             "L4 anomaly research rule: when external methodology, known failure modes, library/runtime behavior, hardware behavior, or empirical claims could materially affect diagnosis, use WebSearch/WebFetch where available. Prefer primary docs, issue trackers, and direct evidence over summaries.",
             "L4 anomaly convergence rule: peer agreement does not prove causality. State what would falsify the leading cause, what peer claim you would reject or downgrade, and what evidence would change your ranking.",
         ]

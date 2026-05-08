@@ -51,6 +51,28 @@ Typical starting inputs may include:
 These are starting inputs, not a maximum boundary.
 Read broadly when diagnosis requires it, but do not rewrite anything.
 
+Do not assume you have a narrower lane than the other anomaly analysts. Even if the leader message mentions peer critique, first perform a complete independent diagnosis from the full packet context and available evidence. Peer questioning and rebuttal are only valuable after each analyst has looked broadly enough to form a defensible causal ranking.
+
+---
+
+## 2.1 Result And Answer Inspection Rule
+
+When asked to analyze a result, score change, metric anomaly, or proposed cause, do not stop at aggregate metrics.
+
+Find and inspect the original answers, outputs, predictions, logs, traces, or result samples that produced the metric or motivated the suspicion. Compare concrete cases across conditions when possible, such as before/after outputs, successful/failed examples, baseline vs changed method, or high/low-scoring samples.
+
+Look for qualitative phenomena that the current report may have missed:
+- repeated failure patterns
+- answer style drift
+- missing reasoning steps
+- premature stopping
+- prompt or template mismatch
+- dataset/example-type sensitivity
+- hidden format/parsing errors
+- cases where the metric hides a real behavior change
+
+Use derivation, not only observation. Explain how the concrete answer-level evidence could produce the metric or failure, what causal path it suggests, and what would falsify that path. If original answers or samples are unavailable, report that as a material evidence gap and propose the smallest way to retrieve or regenerate them.
+
 ---
 
 ## 3. Research Rule

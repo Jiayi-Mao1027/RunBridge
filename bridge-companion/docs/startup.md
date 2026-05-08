@@ -23,12 +23,15 @@ Without `BRIDGE_RUNTIME_ROOT`, the UI still opens with mock data. This is useful
 
 ## Reading Real Runtime Data
 
-Point the gateway at a run root folder that contains per-run directories with files such as:
+Point the gateway at a run root folder for hydration/backfill/audit, and when available connect it to the live SDK/hook stream source. During the transition, the gateway can tail observer JSONL files that emulate live event envelopes:
 
 ```text
 runtime_snapshot.json
 event_log.jsonl
 main_leader_inbox.jsonl
+tool_events.jsonl
+session_events.jsonl
+companion_events.jsonl
 ```
 
 Example:
@@ -39,7 +42,7 @@ $env:BRIDGE_COMPANION_PORT="8787"
 node gateway\server.mjs
 ```
 
-The gateway remains read-only. It only serves `GET`, `HEAD`, and `OPTIONS`.
+The gateway remains read-only. It only serves `GET`, `HEAD`, and `OPTIONS` for runtime routes; `/brief` is the only POST endpoint and only summarizes already-provided UI facts. It must never call bridge tools, create teams/tasks, or mutate runtime ledgers.
 
 ## Remote Server + Cursor Mapping
 
@@ -104,6 +107,6 @@ Do not expose the gateway publicly without authentication. Even though it is rea
 
 ## Boundary Reminder
 
-Bridge Companion must not import or execute Bridge Runtime control code as a controller. It should read exported files or a read-only adapter only.
+Bridge Companion must not import or execute Bridge Runtime control code as a controller. It should consume SDK/hook stream taps, exported files, or read-only adapters only. Runtime JSON is a fallback/audit surface, not the realtime UI source.
 
 The original agent system remains authoritative. Bridge Companion is a viewer.

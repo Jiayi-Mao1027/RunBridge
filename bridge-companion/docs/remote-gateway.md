@@ -10,7 +10,7 @@ The required shape is:
 remote Bridge Companion UI
   -> mapped connection through Cursor / local tunnel
   -> local read-only gateway
-  -> local runtime snapshot and event files
+  -> local SDK/hook live streams, plus runtime snapshot and event files for backfill
 ```
 
 This keeps Bridge Companion outside the agent system while still allowing a remote deployment to observe local runtime state.
@@ -22,12 +22,13 @@ The gateway is a read-only observation gateway. It must never become a control g
 Allowed:
 
 ```text
-read runtime snapshots
-read event logs
-read inbox notifications
-read bridge results
-normalize status for UI
-stream status updates
+subscribe to bridge SDK stream events
+subscribe to SDK hooks stream events
+stream UI-safe live event envelopes
+read runtime snapshots for hydration/recovery
+read event logs and inbox notifications for backfill/audit
+read bridge results for final confirmation
+normalize derived status for UI fallback
 ```
 
 Forbidden:
@@ -79,13 +80,19 @@ GET /runs/:runId/stream
 
 `/status` should return the normalized CompanionStatus model rather than raw internal control objects where possible.
 
-`/stream` can use SSE for simple live updates:
+`/stream` should use SSE for stream-first live updates. It should emit append-only event envelopes first, and may also emit derived status patches for compatibility:
 
 ```text
+event: companion_event
+id: <stream-sequence>
+data: { source: "sdk" | "hook" | "runstate", kind, runId, bridgeWindowId, actorId, toolUseId, timestamp, payloadPreview, refs }
+
 event: status
-id: <event-id>
+id: status-<stream-sequence>
 data: { ...CompanionStatus }
 ```
+
+`status` is a derived view and fallback surface. It is not the primary realtime feed.
 
 ## Gateway State vs Runtime State
 
@@ -128,9 +135,9 @@ It should reject non-GET methods for runtime routes. If future write routes are 
 
 ## Realtime Observation
 
-The UI should prefer `GET /runs/:runId/stream` for second-level live updates. The stream emits normalized `CompanionStatus` snapshots at roughly one-second cadence. If `EventSource` or the tunnel does not support SSE, the UI may fall back to `GET /runs/:runId/status` polling once per second.
+The UI should prefer `GET /runs/:runId/stream` for live updates. The stream is event-first: SDK stream events and hooks stream events should be forwarded as UI-safe envelopes as soon as they are observed. If direct SDK/hook streaming is unavailable during transition, the gateway may tail observer files such as `tool_events.jsonl`, `session_events.jsonl`, `agent_messages.jsonl`, and `companion_events.jsonl` to emulate the same event envelope shape. If `EventSource` or the tunnel does not support SSE, the UI may fall back to `GET /runs/:runId/status` polling.
 
-The realtime feed is still read-only. It reads `runtime_snapshot.json`, `event_log.jsonl`, `main_leader_inbox.jsonl`, and Companion observer side-channel files such as `tool_events.jsonl`, `agent_messages.jsonl`, `teammate_reports.jsonl`, `bridge_packets.jsonl`, `artifacts.jsonl`, and `completion_checks.jsonl`.
+The realtime feed is still read-only. `runtime_snapshot.json`, `event_log.jsonl`, `main_leader_inbox.jsonl`, bridge results, and artifact/report refs are secondary sources for hydration, missed-event backfill, lifecycle confirmation, and audit details. They should not replace SDK/hook streams as the main live UI source.
 
 This allows the UI to show direct session operations when hooks have recorded them, including tool names, actors, and file references. It does not rely solely on final reports. If these side-channel files do not exist or lack enough detail, the honest UI state is "unknown". Capturing additional internal operations would require adding or widening read-only hook/observer instrumentation in the Bridge Runtime; Companion itself must not make that system change without explicit approval.
 

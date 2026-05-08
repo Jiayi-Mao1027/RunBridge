@@ -524,6 +524,7 @@ function classifyKind(type, source = "") {
 }
 
 function titleForCompanionRecord(record, source) {
+  if (source === "sdk_stream_events" || source === "global_sdk_stream_events") return record.title || record.message_preview || progressLabelFor(eventTypeOf(record));
   if (source === "tool_events") return humanizeToolActivity(record).text;
   if (source === "agent_messages") {
     const target = displayRoleName({ role: record.to || record.teammate_id || record.agent_type || "队员" });
@@ -586,8 +587,81 @@ function toActivityItem(record, source = "event_log") {
   };
 }
 
+function companionEventSourceKind(source = "") {
+  if (["sdk_stream_events", "global_sdk_stream_events"].includes(source)) return "sdk";
+  if (["tool_events", "session_tool_events", "session_events", "agent_messages"].includes(source)) return "hook";
+  if (["event_log", "main_leader_inbox", "bridge_packets", "teammate_reports", "process_events", "artifacts", "completion_checks"].includes(source)) return "runstate";
+  return "runstate";
+}
+
+function toLiveEventEnvelope(runId, record, source = "event_log") {
+  const activity = toActivityItem(record, source);
+  const rawSequence = record.companion_sequence || record.sequence || record.monotonic_index || activity.sequence || 0;
+  const sourceKind = companionEventSourceKind(source);
+  return {
+    schemaVersion: 1,
+    runId,
+    streamSource: sourceKind,
+    source,
+    kind: activity.kind,
+    eventType: activity.eventType,
+    status: activity.status || null,
+    timestamp: activity.timestamp,
+    sequence: rawSequence,
+    streamId: `${source}:${rawSequence || activity.timestamp || "unknown"}:${activity.eventType}`,
+    bridgeWindowId: record.bridge_window_id || record.payload?.bridge_window_id || null,
+    teamId: record.team_id || record.payload?.team_id || null,
+    taskId: record.task_id || record.payload?.task_id || null,
+    sessionId: record.session_id || record.payload?.session_id || null,
+    actorId: activity.actor,
+    teammateId: record.teammate_id || record.to || record.payload?.teammate_id || null,
+    agentType: record.agent_type || record.payload?.agent_type || null,
+    toolUseId: record.tool_use_id || record.payload?.tool_use_id || null,
+    toolName: activity.tool || record.tool_name || null,
+    title: activity.title,
+    summary: activity.summary,
+    payloadPreview: activity.summary,
+    refs: {
+      files: activity.files,
+      sourceFile: record.source_file || `${source}.jsonl`,
+      sourceSequence: record.source_sequence || rawSequence || null
+    },
+    raw: record
+  };
+}
+
+function buildLiveEventEnvelopes(runId, events, inbox, companion = {}) {
+  const items = [
+    ...(companion.sdkStreamEvents || []).slice(-240).map(item => toLiveEventEnvelope(runId, item, "sdk_stream_events")),
+    ...(companion.globalSdkStreamEvents || []).slice(-120).map(item => toLiveEventEnvelope(runId, item, "global_sdk_stream_events")),
+    ...events.slice(-80).map(item => toLiveEventEnvelope(runId, item, "event_log")),
+    ...inbox.slice(-30).map(item => toLiveEventEnvelope(runId, item, "main_leader_inbox")),
+    ...(companion.bridgePackets || []).slice(-20).map(item => toLiveEventEnvelope(runId, item, "bridge_packets")),
+    ...(companion.agentMessages || []).slice(-60).map(item => toLiveEventEnvelope(runId, item, "agent_messages")),
+    ...(companion.sessionEvents || []).slice(-120).map(item => toLiveEventEnvelope(runId, item, "session_events")),
+    ...(companion.sessionToolEvents || []).slice(-180).map(item => toLiveEventEnvelope(runId, item, "session_tool_events")),
+    ...(companion.toolEvents || []).slice(-180).map(item => toLiveEventEnvelope(runId, item, "tool_events")),
+    ...(companion.teammateReports || []).slice(-50).map(item => toLiveEventEnvelope(runId, item, "teammate_reports")),
+    ...(companion.processEvents || []).slice(-50).map(item => toLiveEventEnvelope(runId, item, "process_events")),
+    ...(companion.artifactEvents || []).slice(-40).map(item => toLiveEventEnvelope(runId, item, "artifacts")),
+    ...(companion.completionChecks || []).slice(-40).map(item => toLiveEventEnvelope(runId, item, "completion_checks"))
+  ];
+  const seen = new Set();
+  return items
+    .sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")) || Number(a.sequence || 0) - Number(b.sequence || 0))
+    .filter(item => {
+      const key = item.streamId;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(-300);
+}
+
 function buildActivityFeed(events, inbox, companion = {}) {
   const items = [
+    ...(companion.sdkStreamEvents || []).slice(-160).map(item => toActivityItem(item, "sdk_stream_events")),
+    ...(companion.globalSdkStreamEvents || []).slice(-80).map(item => toActivityItem(item, "global_sdk_stream_events")),
     ...events.slice(-60).map(item => toActivityItem(item, "event_log")),
     ...inbox.slice(-20).map(item => toActivityItem(item, "main_leader_inbox")),
     ...(companion.bridgePackets || []).slice(-10).map(item => toActivityItem(item, "bridge_packets")),
@@ -856,7 +930,7 @@ function extractTeammates(snapshot, events, companion = {}) {
 }
 
 function buildInternalProgress(snapshot, events, inbox, artifacts, companion = {}) {
-  const allEvents = [...events, ...(companion.agentMessages || []), ...(companion.sessionEvents || []), ...(companion.sessionToolEvents || []), ...(companion.toolEvents || []), ...(companion.teammateReports || []), ...(companion.processEvents || []), ...(companion.artifactEvents || []), ...(companion.completionChecks || [])];
+  const allEvents = [...(companion.sdkStreamEvents || []), ...(companion.globalSdkStreamEvents || []), ...events, ...(companion.agentMessages || []), ...(companion.sessionEvents || []), ...(companion.sessionToolEvents || []), ...(companion.toolEvents || []), ...(companion.teammateReports || []), ...(companion.processEvents || []), ...(companion.artifactEvents || []), ...(companion.completionChecks || [])];
   const recentEvents = allEvents.slice(-12).map(event => {
     const type = eventTypeOf(event);
     return {
@@ -886,7 +960,9 @@ function buildInternalProgress(snapshot, events, inbox, artifacts, companion = {
   const artifactTotal = (Array.isArray(artifacts) ? artifacts.length : 0) + (companion.artifactEvents || []).length;
   if (artifactTotal) evidence.push(`已记录 ${artifactTotal} 个 artifact 引用。`);
   const toolEventTotal = (companion.toolEvents || []).length + (companion.sessionToolEvents || []).length;
-  if (toolEventTotal) evidence.push(`已记录 ${toolEventTotal} 条直接工具调用事件。`);
+  const sdkEventTotal = (companion.sdkStreamEvents || []).length + (companion.globalSdkStreamEvents || []).length;
+  if (sdkEventTotal) evidence.push(`已记录 ${sdkEventTotal} 条 SDK stream 事件。`);
+  if (toolEventTotal) evidence.push(`已记录 ${toolEventTotal} 条 hooks 工具调用事件。`);
   if ((companion.activeOperations?.teammates || []).length) evidence.push(`已记录 ${(companion.activeOperations?.teammates || []).length} 个 session / teammate 的当前操作快照。`);
   if ((companion.processEvents || []).length) evidence.push(`已记录 ${(companion.processEvents || []).length} 条长运行进程事件。`);
   if (snapshot?.team_idle?.wait_reason || snapshot?.wait_reason) evidence.push(`等待原因：${snapshot?.team_idle?.wait_reason || snapshot?.wait_reason}`);
@@ -908,6 +984,7 @@ function buildInternalProgress(snapshot, events, inbox, artifacts, companion = {
 }
 
 function normalizeStatus(runId, snapshot, events, inbox, artifacts, companion = {}) {
+  const liveEvents = buildLiveEventEnvelopes(runId, events, inbox, companion);
   const latest = events.at(-1) || null;
   const lifecycleState = inferLifecycle(snapshot, events);
   const copy = statusCopy[lifecycleState] || statusCopy.unknown;
@@ -950,6 +1027,12 @@ function normalizeStatus(runId, snapshot, events, inbox, artifacts, companion = 
     teammates,
     activityFeed,
     communicationFeed,
+    liveEvents,
+    streamContract: {
+      primary: "sdk_stream_and_hooks_stream",
+      currentAdapter: "sdk_stream_tap_with_observer_fallback",
+      runstateRole: "hydration_backfill_audit_recovery"
+    },
     detail: {
       packet: packetSummary,
       teammates,
@@ -959,10 +1042,18 @@ function normalizeStatus(runId, snapshot, events, inbox, artifacts, companion = 
       artifacts: [...(Array.isArray(artifacts) ? artifacts : []), ...(companion.artifactEvents || [])],
       completionChecks: companion.completionChecks || [],
       processEvents: companion.processEvents || [],
+      sdkStreamEvents: companion.sdkStreamEvents || [],
+      globalSdkStreamEvents: companion.globalSdkStreamEvents || [],
       sessionEvents: companion.sessionEvents || [],
       sessionBindings: companion.sessionBindings || [],
       activeOperations: companion.activeOperations || null,
       companionEvents: companion.companionEvents || [],
+      liveEvents,
+      streamContract: {
+        primary: "sdk_stream_and_hooks_stream",
+        currentAdapter: "sdk_stream_tap_with_observer_fallback",
+        runstateRole: "hydration_backfill_audit_recovery"
+      },
       recentEvents: internalProgress.recentEvents,
       inbox: inbox.slice(-10)
     },
@@ -1003,6 +1094,13 @@ function nextStepTextFor(nextEvents) {
   return "按当前 lifecycle，下一步只会从状态机允许的后续事件中产生；界面不会预测未被 runtime 记录的内部进展。";
 }
 
+function liveEventsSince(events, lastId) {
+  if (!lastId) return events.slice(-80);
+  const index = events.findIndex(event => event.streamId === lastId);
+  if (index < 0) return events.slice(-80);
+  return events.slice(index + 1);
+}
+
 async function getRunBundle(runId) {
   const runDir = safeJoinRun(runId);
   if (!runDir) return null;
@@ -1013,11 +1111,14 @@ async function getRunBundle(runId) {
   const runSessionBindings = await readJsonlIfExists(path.join(runDir, "session_bindings.jsonl"));
   const runSessionEvents = await readJsonlIfExists(path.join(runDir, "session_events.jsonl"));
   const globalToolEvents = await readJsonlIfExists(path.join(SESSION_OBSERVER_ROOT, "tool_events.jsonl"));
+  const globalSdkStreamEvents = await readJsonlIfExists(path.join(SESSION_OBSERVER_ROOT, "sdk_stream_events.jsonl"));
   const globalSessionEvents = await readJsonlIfExists(path.join(SESSION_OBSERVER_ROOT, "session_events.jsonl"));
   const globalSessionBindings = await readJsonlIfExists(path.join(SESSION_OBSERVER_ROOT, "session_bindings.jsonl"));
   const globalActiveOperations = await readJsonIfExists(path.join(SESSION_OBSERVER_ROOT, "active_operations.json"), null);
   const runMatches = record => !record.run_id || record.run_id === runId;
   const companion = {
+    sdkStreamEvents: await readJsonlIfExists(path.join(runDir, "sdk_stream_events.jsonl")),
+    globalSdkStreamEvents: globalSdkStreamEvents.filter(runMatches).slice(-240),
     bridgePackets: await readJsonlIfExists(path.join(runDir, "bridge_packets.jsonl")),
     agentMessages: await readJsonlIfExists(path.join(runDir, "agent_messages.jsonl")),
     toolEvents: await readJsonlIfExists(path.join(runDir, "tool_events.jsonl")),
@@ -1104,7 +1205,12 @@ const server = http.createServer(async (req, res) => {
         runtimeRoot: RUNTIME_ROOT,
         runtimeRootSource: configuredRuntimeRoot ? "env" : "default-safe-opd",
         runtimeRootExists: RUNTIME_ROOT ? await exists(RUNTIME_ROOT) : false,
-        refreshIntervalMs: STREAM_INTERVAL_MS
+        refreshIntervalMs: STREAM_INTERVAL_MS,
+        streamContract: {
+          primary: "sdk_stream_and_hooks_stream",
+          currentAdapter: "sdk_stream_tap_with_observer_fallback",
+          runstateRole: "hydration_backfill_audit_recovery"
+        }
       });
       return;
     }
@@ -1141,14 +1247,23 @@ const server = http.createServer(async (req, res) => {
           "connection": "keep-alive",
           "access-control-allow-origin": "*"
         });
-        const writeStatus = async () => {
+        let lastStreamId = "";
+        const writeLive = async () => {
           const fresh = await getRunBundle(runId);
-          const status = fresh ? normalizeStatus(runId, fresh.snapshot, fresh.events, fresh.inbox, fresh.artifacts, fresh.companion) : { error: "run unavailable" };
+          const status = fresh ? normalizeStatus(runId, fresh.snapshot, fresh.events, fresh.inbox, fresh.artifacts, fresh.companion) : { error: "run unavailable", liveEvents: [] };
+          const newEvents = liveEventsSince(status.liveEvents || [], lastStreamId);
+          for (const event of newEvents) {
+            lastStreamId = event.streamId || lastStreamId;
+            res.write(`event: companion_event\n`);
+            res.write(`id: ${lastStreamId}\n`);
+            res.write(`data: ${JSON.stringify(event)}\n\n`);
+          }
           res.write(`event: status\n`);
+          res.write(`id: status-${lastStreamId || Date.now()}\n`);
           res.write(`data: ${JSON.stringify(status)}\n\n`);
         };
-        await writeStatus();
-        const timer = setInterval(writeStatus, STREAM_INTERVAL_MS);
+        await writeLive();
+        const timer = setInterval(writeLive, STREAM_INTERVAL_MS);
         req.on("close", () => clearInterval(timer));
       }
       return;

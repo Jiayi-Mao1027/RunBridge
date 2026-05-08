@@ -14,8 +14,11 @@ from claude_cli_executor import _allowed_tools
 from claude_cli_executor import _bridge_leader_prompt
 from claude_cli_executor import _ensure_project_agent_files
 from claude_cli_executor import _parse_claude_payload
+from claude_cli_executor import _parse_claude_stdout_envelope
 from claude_cli_executor import _redact_cmd
 from claude_cli_executor import _required_agent_models
+from claude_cli_executor import _run_claude_streaming
+from claude_cli_executor import _sdk_stream_event_paths
 from claude_cli_executor import _settings_args
 from claude_cli_executor import simulated_team_executor
 from main_leader import decide_next_bridge_packet
@@ -1060,8 +1063,21 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     }
     if "WebSearch" not in anomaly_tools or "WebFetch" not in anomaly_tools:
         raise AssertionError(json.dumps(anomaly_packet["team_spec"], ensure_ascii=False, indent=2))
+    anomaly_responsibilities = [
+        tuple(item.get("responsibilities", []))
+        for item in anomaly_packet["team_spec"].get("teammate_specs", [])
+    ]
+    if len(set(anomaly_responsibilities)) != 1 or "complete independent anomaly diagnosis before peer review" not in " ".join(anomaly_responsibilities[0]):
+        raise AssertionError(json.dumps(anomaly_packet["team_spec"], ensure_ascii=False, indent=2))
     anomaly_assignments = json.dumps(anomaly_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
-    if "Do I have factual 100% confidence in this cause or explanation?" not in anomaly_assignments or "anomaly-analyst-c" not in anomaly_assignments:
+    if (
+        "Do I have factual 100% confidence in this cause or explanation?" not in anomaly_assignments
+        or "anomaly-analyst-c" not in anomaly_assignments
+        or "do not give different analysts different causal lanes" not in anomaly_assignments
+        or "complete independent diagnosis from the full packet context" not in anomaly_assignments
+        or "original answers, outputs, predictions, traces, or result samples" not in anomaly_assignments
+        or "Do not diagnose from metrics alone" not in anomaly_assignments
+    ):
         raise AssertionError(anomaly_assignments)
 
     execute_packet = decide_next_bridge_packet(
@@ -1238,6 +1254,34 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     if parsed.get("error_or_null") or parsed.get("payload", {}).get("status") != "succeeded":
         raise AssertionError(json.dumps(parsed, ensure_ascii=False, indent=2))
 
+    ndjson_stdout = "\n".join(
+        [
+            json.dumps({"type": "system", "subtype": "init"}),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": json.dumps(
+                        {
+                            "status": "succeeded",
+                            "reports": [{"summary": "ndjson ok"}],
+                            "artifact_refs": [],
+                            "evidence": {},
+                            "error_or_null": None,
+                            "cleanup_required": False,
+                        }
+                    ),
+                }
+            ),
+        ]
+    )
+    ndjson_envelope = _parse_claude_stdout_envelope(ndjson_stdout)
+    if not isinstance(ndjson_envelope, dict) or ndjson_envelope.get("type") != "result":
+        raise AssertionError(json.dumps(ndjson_envelope, ensure_ascii=False, indent=2))
+    ndjson_parsed = _parse_claude_payload(ndjson_stdout, "")
+    if ndjson_parsed.get("error_or_null") or ndjson_parsed.get("payload", {}).get("reports", [{}])[0].get("summary") != "ndjson ok":
+        raise AssertionError(json.dumps(ndjson_parsed, ensure_ascii=False, indent=2))
+
     empty_result = _parse_claude_payload(
         json.dumps({"type": "result", "subtype": "success", "result": ""}),
         "",
@@ -1363,6 +1407,75 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     )
     if original_text not in prompt or mojibake_text in prompt:
         raise AssertionError(json.dumps({"original": original_text, "mojibake": mojibake_text, "prompt": prompt}, ensure_ascii=False, indent=2))
+
+    stream_project_root = root / "sdk_stream_project"
+    stream_project_root.mkdir(parents=True, exist_ok=True)
+    stream_input = {
+        "run_id": "run_sdk_stream",
+        "main_session_id": "main_sdk_stream",
+        "sub_session_id": "sub_sdk_stream",
+        "bridge_window_id": "bw_sdk_stream",
+        "team_id": "team_sdk_stream",
+        "task_id": "task_sdk_stream",
+    }
+    for stream_path in _sdk_stream_event_paths(stream_project_root, stream_input):
+        if stream_path.exists():
+            stream_path.unlink()
+    stream_script = (
+        "import json, sys\n"
+        "print(json.dumps({'type':'assistant','content':[{'type':'text','text':'hello token=abc123 sk-demoSECRET12345'}]}), flush=True)\n"
+        "print(json.dumps({'type':'tool_use','id':'toolu_1','name':'Read','input':{'file_path':'README.md','limit':10}}), flush=True)\n"
+        "print(json.dumps({'type':'result','subtype':'success','result': json.dumps({'status':'succeeded','reports':[{'summary':'ok'}],'artifact_refs':[],'evidence':{},'error_or_null':None,'cleanup_required':False})}), flush=True)\n"
+        "print('warning password=abc123', file=sys.stderr, flush=True)\n"
+    )
+    stream_proc = _run_claude_streaming(
+        [sys.executable, "-c", stream_script],
+        stream_project_root,
+        env=os.environ.copy(),
+        timeout=30,
+        execution_input=stream_input,
+    )
+    if stream_proc.returncode != 0 or "warning password=abc123" not in stream_proc.stderr:
+        raise AssertionError(json.dumps({"returncode": stream_proc.returncode, "stderr": stream_proc.stderr}, ensure_ascii=False, indent=2))
+    parsed_stream_result = _parse_claude_payload(stream_proc.stdout, stream_proc.stderr)
+    if parsed_stream_result.get("error_or_null") or parsed_stream_result.get("payload", {}).get("status") != "succeeded":
+        raise AssertionError(json.dumps(parsed_stream_result, ensure_ascii=False, indent=2))
+    stream_paths = _sdk_stream_event_paths(stream_project_root, stream_input)
+    for stream_path in stream_paths:
+        if not stream_path.exists():
+            raise AssertionError(str(stream_path))
+        records = [json.loads(line) for line in stream_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        event_types = {record.get("event_type") for record in records}
+        required_event_types = {"sdk_stream_started", "sdk_stream_assistant_text", "sdk_stream_tool_use", "sdk_stream_stderr", "sdk_stream_final"}
+        if not required_event_types.issubset(event_types):
+            raise AssertionError(json.dumps({"path": str(stream_path), "event_types": sorted(event_types)}, ensure_ascii=False, indent=2))
+        for record in records:
+            for key in [
+                "timestamp",
+                "event_type",
+                "stream_source",
+                "run_id",
+                "bridge_window_id",
+                "team_id",
+                "task_id",
+                "session_id",
+                "agent_type",
+                "status",
+                "message_preview",
+                "payload_keys",
+                "sequence",
+                "monotonic_index",
+            ]:
+                if key not in record:
+                    raise AssertionError(json.dumps(record, ensure_ascii=False, indent=2))
+            if record.get("run_id") != "run_sdk_stream" or record.get("agent_type") != "bridge-leader":
+                raise AssertionError(json.dumps(record, ensure_ascii=False, indent=2))
+            preview = str(record.get("message_preview") or "")
+            if "abc123" in preview or "sk-demoSECRET12345" in preview:
+                raise AssertionError(json.dumps(record, ensure_ascii=False, indent=2))
+        tool_records = [record for record in records if record.get("event_type") == "sdk_stream_tool_use"]
+        if not tool_records or tool_records[0].get("tool_name") != "Read" or "file_path" not in tool_records[0].get("tool_input_keys", []):
+            raise AssertionError(json.dumps(tool_records, ensure_ascii=False, indent=2))
     return {"cli_executor_policy": "passed"}
 
 

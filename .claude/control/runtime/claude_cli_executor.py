@@ -3,12 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from persist import append_jsonl, sanitize_json_value
 
 
 BRIDGE_RESULT_SCHEMA = {
@@ -43,6 +48,10 @@ TEAMMATE_AGENT_NAMES = {
     "anomaly-analyst-b",
     "anomaly-analyst-c",
 }
+
+_SDK_STREAM_LOCK = threading.Lock()
+_SDK_STREAM_MONOTONIC_INDEX = 0
+_SDK_STREAM_PREVIEW_LIMIT = 1000
 
 
 def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
@@ -90,7 +99,8 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
             "--model",
             bridge_model,
             "--output-format",
-            "json",
+            "stream-json",
+            "--include-hook-events",
             "--json-schema",
             json.dumps(BRIDGE_RESULT_SCHEMA, separators=(",", ":")),
             "--append-system-prompt",
@@ -128,14 +138,12 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     _bind_bridge_child_session_env(env, execution_input)
 
     try:
-        proc = subprocess.run(
+        proc = _run_claude_streaming(
             cmd,
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=_timeout_seconds(packet),
+            project_root,
             env=env,
+            timeout=_timeout_seconds(packet),
+            execution_input=execution_input,
         )
     except subprocess.TimeoutExpired as exc:
         return _failure(
@@ -308,6 +316,296 @@ def _write_bridge_prompt_file(project_root: Path, prompt: str, execution_input: 
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
     return prompt_path
+
+
+def _run_claude_streaming(
+    cmd: list[str],
+    project_root: Path,
+    *,
+    env: dict[str, str],
+    timeout: int,
+    execution_input: dict[str, Any],
+) -> subprocess.CompletedProcess[str]:
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    sequence = 0
+    sequence_lock = threading.Lock()
+
+    def next_sequence() -> int:
+        nonlocal sequence
+        with sequence_lock:
+            sequence += 1
+            return sequence
+
+    _emit_sdk_stream_event(
+        project_root,
+        execution_input,
+        "sdk_stream_started",
+        {"cmd_preview": _redact_cmd(cmd)},
+        sequence=next_sequence(),
+    )
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(project_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+    except Exception:
+        _emit_sdk_stream_event(
+            project_root,
+            execution_input,
+            "sdk_stream_error",
+            {"message": "claude cli bridge executor could not start"},
+            status="failed",
+            sequence=next_sequence(),
+        )
+        raise
+
+    def read_stdout() -> None:
+        for line in proc.stdout or []:
+            stdout_parts.append(line)
+            parsed = _parse_json_object_text(line)
+            payload = parsed if parsed is not None else {"text": line}
+            _emit_sdk_stream_event(
+                project_root,
+                execution_input,
+                _sdk_stream_event_type(payload),
+                payload,
+                sequence=next_sequence(),
+            )
+
+    def read_stderr() -> None:
+        for line in proc.stderr or []:
+            stderr_parts.append(line)
+            _emit_sdk_stream_event(
+                project_root,
+                execution_input,
+                "sdk_stream_stderr",
+                {"text": line},
+                sequence=next_sequence(),
+            )
+
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    try:
+        returncode = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+        stdout = "".join(stdout_parts)
+        stderr = "".join(stderr_parts)
+        _emit_sdk_stream_event(
+            project_root,
+            execution_input,
+            "sdk_stream_timeout",
+            {"timeout_seconds": timeout},
+            status="failed",
+            sequence=next_sequence(),
+        )
+        raise subprocess.TimeoutExpired(exc.cmd, exc.timeout, output=stdout, stderr=stderr) from exc
+
+    stdout_thread.join(timeout=2)
+    stderr_thread.join(timeout=2)
+    stdout = "".join(stdout_parts)
+    stderr = "".join(stderr_parts)
+    _emit_sdk_stream_event(
+        project_root,
+        execution_input,
+        "sdk_stream_final",
+        {"returncode": returncode},
+        status="completed" if returncode == 0 else "failed",
+        sequence=next_sequence(),
+    )
+    return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+
+def _emit_sdk_stream_event(
+    project_root: Path,
+    execution_input: dict[str, Any],
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    status: str = "streaming",
+    sequence: int | None = None,
+) -> None:
+    global _SDK_STREAM_MONOTONIC_INDEX
+    record = {
+        "timestamp": _now_iso(),
+        "event_type": event_type,
+        "stream_source": "sdk",
+        "run_id": execution_input.get("run_id"),
+        "main_session_id": execution_input.get("main_session_id"),
+        "sub_session_id": execution_input.get("sub_session_id"),
+        "bridge_window_id": execution_input.get("bridge_window_id"),
+        "team_id": execution_input.get("team_id"),
+        "task_id": execution_input.get("task_id"),
+        "session_id": execution_input.get("sub_session_id") or execution_input.get("main_session_id"),
+        "agent_id": "bridge-leader",
+        "agent_type": "bridge-leader",
+        "status": status,
+        "message_preview": _sdk_message_preview(payload),
+        "payload_keys": _sdk_payload_keys(payload),
+        "sequence": sequence,
+        "monotonic_index": None,
+    }
+    record.update(_sdk_compact_tool_fields(payload))
+    if "cmd_preview" in payload:
+        record["cmd_preview"] = sanitize_json_value(payload.get("cmd_preview"))
+    if "returncode" in payload:
+        record["returncode"] = payload.get("returncode")
+    if "timeout_seconds" in payload:
+        record["timeout_seconds"] = payload.get("timeout_seconds")
+
+    with _SDK_STREAM_LOCK:
+        _SDK_STREAM_MONOTONIC_INDEX += 1
+        record["monotonic_index"] = _SDK_STREAM_MONOTONIC_INDEX
+        if record["sequence"] is None:
+            record["sequence"] = record["monotonic_index"]
+        for path in _sdk_stream_event_paths(project_root, execution_input):
+            append_jsonl(path, record)
+
+
+def _sdk_stream_event_paths(project_root: Path, execution_input: dict[str, Any]) -> list[Path]:
+    run_id = _safe_path_component(str(execution_input.get("run_id") or "run"))
+    return [
+        _control_claude_dir()
+        / "runtime_state"
+        / "projects"
+        / _project_state_key(project_root)
+        / "runs"
+        / run_id
+        / "sdk_stream_events.jsonl",
+        _control_claude_dir() / "runtime_state" / "session_observer" / "sdk_stream_events.jsonl",
+    ]
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _sdk_payload_keys(payload: dict[str, Any]) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    return sorted(str(key) for key in payload.keys())[:20]
+
+
+def _sdk_stream_event_type(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return "sdk_stream_delta"
+    if _collect_tool_use_blocks(payload, limit=1):
+        return "sdk_stream_tool_use"
+    if _collect_tool_result_blocks(payload, limit=1):
+        return "sdk_stream_tool_result"
+    if _payload_has_assistant_text(payload):
+        return "sdk_stream_assistant_text"
+    return "sdk_stream_delta"
+
+
+def _sdk_message_preview(payload: dict[str, Any]) -> str:
+    parts: list[str] = []
+    if isinstance(payload, dict):
+        for key in ("text", "message", "summary", "stop_reason", "subtype", "type"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+        result = payload.get("result")
+        if isinstance(result, str) and result.strip():
+            parts.append(result.strip())
+        content = payload.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+    elif payload is not None:
+        parts.append(str(payload))
+
+    preview = "\n".join(parts)
+    if not preview and isinstance(payload, dict):
+        tool_fields = _sdk_compact_tool_fields(payload)
+        if tool_fields:
+            preview = json.dumps(tool_fields, ensure_ascii=False, separators=(",", ":"))
+    return _redact_sdk_text(preview)[:_SDK_STREAM_PREVIEW_LIMIT]
+
+
+def _sdk_compact_tool_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    tool_blocks = _collect_tool_use_blocks(payload, limit=1) or _collect_tool_result_blocks(payload, limit=1)
+    if not tool_blocks:
+        return {}
+    block = tool_blocks[0]
+    compact: dict[str, Any] = {}
+    for source_key, target_key in (
+        ("id", "tool_id"),
+        ("name", "tool_name"),
+        ("tool_name", "tool_name"),
+        ("server_name", "server_name"),
+        ("type", "tool_block_type"),
+    ):
+        value = block.get(source_key)
+        if isinstance(value, str) and value.strip() and target_key not in compact:
+            compact[target_key] = value.strip()
+    input_keys = block.get("input_keys")
+    if isinstance(input_keys, list):
+        compact["tool_input_keys"] = input_keys[:20]
+    return compact
+
+
+def _collect_tool_result_blocks(value: Any, *, limit: int = 5) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+
+    def walk(node: Any) -> None:
+        if len(blocks) >= limit:
+            return
+        if isinstance(node, dict):
+            if node.get("type") in {"tool_result", "server_tool_result"}:
+                blocks.append(_compact_tool_result_block(node))
+            for nested in node.values():
+                if isinstance(nested, (dict, list)):
+                    walk(nested)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(value)
+    return blocks
+
+
+def _compact_tool_result_block(block: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {"type": block.get("type")}
+    for key in ("id", "tool_use_id", "name", "tool_name", "server_name"):
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            compact[key] = value
+    return compact
+
+
+def _payload_has_assistant_text(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("text"), str) and payload.get("text", "").strip():
+        return True
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip() for item in content)
+
+
+def _redact_sdk_text(text: str) -> str:
+    text = re.sub(r"(?i)(api[_-]?key|token|password|secret)(\s*[:=]\s*)(\S+)", r"\1\2<redacted>", text)
+    text = re.sub(r"sk-[A-Za-z0-9_-]{12,}", "sk-<redacted>", text)
+    return text
 
 
 def _attach_cli_debug_evidence(
@@ -799,9 +1097,8 @@ def _command_too_long_for_windows(cmd: list[str]) -> int | None:
 
 
 def _parse_claude_payload(stdout: str, stderr: str) -> dict[str, Any]:
-    try:
-        envelope = json.loads(stdout)
-    except json.JSONDecodeError:
+    envelope = _parse_claude_stdout_envelope(stdout)
+    if envelope is None:
         return _failure(
             message="claude cli bridge executor returned non-json output",
             error_type="ClaudeCliNonJsonOutput",
@@ -839,6 +1136,31 @@ def _parse_claude_payload(stdout: str, stderr: str) -> dict[str, Any]:
         )
 
     return {"payload": payload, "error_or_null": None}
+
+
+def _parse_claude_stdout_envelope(stdout: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+
+    parsed_lines: list[dict[str, Any]] = []
+    for line in stdout.splitlines():
+        parsed_line = _parse_json_object_text(line)
+        if parsed_line is not None:
+            parsed_lines.append(parsed_line)
+    if not parsed_lines:
+        return None
+
+    for item in reversed(parsed_lines):
+        if item.get("type") == "result":
+            return item
+    for item in reversed(parsed_lines):
+        if item.get("status") in {"succeeded", "failed", "partial", "partial_or_failed"}:
+            return item
+    return parsed_lines[-1]
 
 
 def _is_tool_use_without_final_result(envelope: Any, extracted_payload: Any) -> bool:

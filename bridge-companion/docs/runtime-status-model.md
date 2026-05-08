@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The status model is the safety layer between raw Bridge Runtime facts and the Bridge Companion UI. The UI should render this model instead of freely interpreting event logs.
+The status model is the safety layer between observed Bridge Runtime facts and the Bridge Companion UI. It is now derived from a live event stream first, then supplemented by runtime JSON for hydration, backfill, audit confirmation, and recovery. The UI should not freely interpret event logs as a realtime source.
 
 The goal is to prevent two failures:
 
@@ -53,7 +53,14 @@ type CompanionDisplayCopy = {
 
 ## Input Sources
 
-The model may consume:
+The model should consume live sources first:
+
+```text
+bridge SDK stream events
+SDK hooks stream events
+```
+
+It may then consume secondary sources for hydration, backfill, audit confirmation, and recovery:
 
 ```text
 runtime_snapshot.json
@@ -62,9 +69,10 @@ transitions.jsonl
 main_leader_inbox.jsonl
 bridge result payloads
 artifact/report references
+observer JSONL files
 ```
 
-The model must not consume agent chat context unless that content has already been recorded into runtime reports or artifacts.
+The model must not consume free-floating agent chat context unless that content appears in SDK stream, hooks stream, runtime reports, artifacts, or audit records.
 
 ## Status Mapping
 
