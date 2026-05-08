@@ -140,6 +140,7 @@ You should inspect, when relevant:
 - smoke evidence used to choose formal execution settings
 - formal per-device batch size, microbatch, gradient accumulation, precision, sequence length, and effective batch size
 - log folder manifests stored inside generated formal log folders
+- manifest required fields checklist: run ID, bridge window ID, task ID, command, cwd, batchbasis, gpu_id/device IDs, smoke memory observed when smoke ran, warmup memory observed when warmup ran, formal observed memory, checkpoint/config/prompt paths, natural-language model/dataset/method semantics, dataset count when known, and terminal status
 - environment evidence proving conda env `mjy` was used
 - accelerator utilization records, including GPU memory use for training runs
 
@@ -224,7 +225,9 @@ Ask:
 - Did the stages complete in the intended order?
 - Are outputs complete and internally coherent?
 - Do logs show silent or partial failure?
-- Does each generated formal log folder contain an internal manifest, and does that manifest match the actual command, semantic basis, process refs, parameters, log files, outputs, and terminal status?
+- Does each generated formal log folder contain an internal manifest, and does that manifest match the actual command, cwd, run ID, bridge window ID, task ID, semantic basis, process refs, parameters, log files, outputs, memory observations, and terminal status?
+- Does the manifest include both exact executable facts and natural-language semantic facts: checkpoint path plus model/checkpoint meaning, dataset name/split/count, method/objective, OPD/DPO/SFT or early-stop behavior when relevant, prompt/template basis, and inherited defaults?
+- Does the manifest include batchbasis and resource fields: requested/upstream batch setting, smoke-derived basis, final per-device batch, microbatch, gradient accumulation, effective batch, gpu_id/device IDs, smoke memory observed, warmup memory observed, formal observed memory, and adjustment reason?
 - Were formal batch/effective-batch settings chosen from smoke evidence rather than accidentally inheriting toy smoke settings?
 - Did formal training use the intended accelerator and a credible amount of available memory?
 - Did formal execution use conda env `mjy` rather than venv/virtualenv?

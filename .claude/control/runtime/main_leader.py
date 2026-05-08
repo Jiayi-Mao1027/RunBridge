@@ -425,7 +425,8 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
             "Long-task ETA rule: before launching any long-running command, estimate expected wall-clock runtime as a range, state the basis for the estimate, and include that estimate in the execution report.",
             "Smoke-shape rule: before formal execution, use bounded smoke evidence to choose formal parameters such as per-device batch size, microbatch size, gradient accumulation, sequence length, precision, and effective batch size. Record why formal settings differ from smoke settings.",
             "Batch/memory adaptation rule: do not copy user- or upstream-provided batch size, microbatch, gradient accumulation, sequence length, precision, or memory-saving settings mechanically when actual GPU memory makes them unsuitable. Treat those values as intent and constraints; adapt them inside the frozen semantic boundary to reach the formal GPU utilization target, preserving effective-batch semantics when possible, and record requested value, observed GPU capacity, adjusted value, and reason.",
-            "Log manifest rule: every generated formal log folder must contain a manifest file inside that folder, analogous to checkpoint manifests. Do not rely on folder/file names alone. The manifest must record run/window/task IDs, command, cwd, environment, semantic basis, smoke evidence refs, formal parameters/effective batch size, process refs, log files, expected outputs/checkpoints, status, timestamps, and reuse/dependency notes.",
+            "Log manifest rule: every generated formal log folder must contain a manifest file inside that folder, analogous to checkpoint manifests. Do not rely on folder/file names alone. The manifest must record run ID, bridge window ID, task ID, stage name, command, cwd, environment, conda env evidence, checkpoint/config/prompt paths, batchbasis, requested/upstream batch settings, smoke-derived basis, final per-device batch, microbatch, gradient accumulation, sequence length, precision, effective batch size, adjustment reason, gpu_id/device IDs, selected GPU total/free memory, competing process summary when relevant, smoke memory observed when smoke ran, warmup memory observed when warmup ran, formal observed memory, process refs, log files, expected outputs/checkpoints, status, timestamps, and reuse/dependency notes.",
+            "Natural-language manifest semantics rule: the manifest must include human-meaningful semantics in addition to concrete paths and commands: model or model family/name, checkpoint semantic label if different from the path, dataset name/split/source, dataset row/example count when known, method/objective such as SFT/DPO/OPD, early-stop behavior such as OPD early stop when relevant, metric/objective basis, prompt/template meaning, and inherited defaults. If a field is unknown or not applicable, write unknown/not_applicable with the reason rather than omitting it.",
             "If runtime cannot be estimated, state that explicitly with the missing information and still record command, start time, owned process refs, logs, and expected outputs.",
             "L4 execute terminality rule: run formal long jobs in a way the bridge can wait on or poll until terminal completion. Do not return a final or partial bridge report while an owned process is still running; emit progress evidence and keep waiting.",
             "Formal GPU memory rule: unless the task is explicitly smoke/dry-run/conservative, configure formal GPU execution to exceed 90% of the selected GPU's total memory after warmup. On a typical 80GB GPU this usually means observed usage above 70GB.",
@@ -475,8 +476,11 @@ def _default_completion_contract(target_phase: str | None = None) -> dict[str, A
     }
     if str(target_phase or "") == "l4_execute":
         contract["required_artifacts"] = ["log_manifest"]
-        contract["validation_requirements"] = ["generated formal log folders include internal manifests"]
-        contract["success_criteria"].append("formal execution log folders are not identified by filename alone; each generated log folder has an internal manifest")
+        contract["validation_requirements"] = [
+            "generated formal log folders include internal manifests",
+            "log manifests include required identity command cwd batchbasis gpu memory and semantic fields",
+        ]
+        contract["success_criteria"].append("formal execution log folders are not identified by filename alone; each generated log folder has an internal manifest with identity, command, cwd, batchbasis, GPU/memory, and natural-language semantic fields")
     return contract
 
 
@@ -490,7 +494,16 @@ def _default_report_contract(target_phase: str | None = None) -> dict[str, Any]:
     }
     if str(target_phase or "") == "l4_execute":
         contract["required_sections"].append("artifact_manifests")
-        contract["required_evidence"].extend(["log manifest path", "formal execution parameter manifest"])
+        contract["required_evidence"].extend([
+            "log manifest path",
+            "formal execution parameter manifest",
+            "manifest required fields checklist",
+            "batchbasis",
+            "gpu_id",
+            "smoke memory observed when smoke ran",
+            "warmup memory observed when warmup ran",
+            "natural-language model dataset method semantics",
+        ])
     return contract
 
 

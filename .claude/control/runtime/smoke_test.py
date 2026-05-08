@@ -16,6 +16,7 @@ from claude_cli_executor import _ensure_project_agent_files
 from claude_cli_executor import _parse_claude_payload
 from claude_cli_executor import _redact_cmd
 from claude_cli_executor import _required_agent_models
+from claude_cli_executor import _settings_args
 from claude_cli_executor import simulated_team_executor
 from main_leader import decide_next_bridge_packet
 from workflow_runtime import dispatch_workflow_event
@@ -129,7 +130,7 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
             "completion_contract": {
                 "required_outputs": ["report"],
                 "required_artifacts": ["artifact", "log_manifest"],
-                "validation_requirements": ["validated", "generated formal log folders include internal manifests"],
+                "validation_requirements": ["validated", "generated formal log folders include internal manifests", "log manifests include required identity command cwd batchbasis gpu memory and semantic fields"],
                 "success_criteria": ["done"],
                 "allowed_partial_result": False,
                 "timeout_policy": {
@@ -141,7 +142,7 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
             },
             "report_contract": {
                 "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution", "artifact_manifests"],
-                "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution", "log manifest path", "formal execution parameter manifest"],
+                "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution", "log manifest path", "formal execution parameter manifest", "manifest required fields checklist", "batchbasis", "gpu_id", "smoke memory observed when smoke ran", "warmup memory observed when warmup ran", "natural-language model dataset method semantics"],
                 "artifact_reporting_format": "list",
                 "include_failure_reason": True,
                 "include_next_action_recommendation": True,
@@ -155,7 +156,7 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
         "completion_contract": {
             "required_outputs": ["report"],
             "required_artifacts": ["artifact", "log_manifest"],
-            "validation_requirements": ["validated", "generated formal log folders include internal manifests"],
+            "validation_requirements": ["validated", "generated formal log folders include internal manifests", "log manifests include required identity command cwd batchbasis gpu memory and semantic fields"],
             "success_criteria": ["done"],
             "allowed_partial_result": False,
             "timeout_policy": {
@@ -167,7 +168,7 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
         },
         "report_contract": {
             "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution", "artifact_manifests"],
-            "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution", "log manifest path", "formal execution parameter manifest"],
+            "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution", "log manifest path", "formal execution parameter manifest", "manifest required fields checklist", "batchbasis", "gpu_id", "smoke memory observed when smoke ran", "warmup memory observed when warmup ran", "natural-language model dataset method semantics"],
             "artifact_reporting_format": "list",
             "include_failure_reason": True,
             "include_next_action_recommendation": True,
@@ -676,9 +677,41 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         persist=True,
         team_executor=lambda _: {
             "status": "succeeded",
-            "reports": [{"summary": "manifest present"}],
+            "reports": [
+                {
+                    "summary": "manifest present",
+                    "manifest required fields checklist": {
+                        "run_id": "present",
+                        "bridge_window_id": "present",
+                        "task_id": "present",
+                        "command": "present",
+                        "cwd": "present",
+                        "batchbasis": "present",
+                        "gpu_id": "present",
+                        "memory observed": "present",
+                        "model": "present",
+                        "dataset": "present",
+                        "method": "present",
+                    },
+                }
+            ],
             "artifact_refs": ["logs/runs/demo/artifact_manifest.json"],
-            "evidence": {"classification": "manifest present"},
+            "evidence": {
+                "classification": "manifest present",
+                "manifest_required_fields_checklist": {
+                    "run_id": "run_demo",
+                    "bridge_window_id": manifest_packet["binding"]["bridge_window_id"],
+                    "task_id": "task_demo",
+                    "command": "conda run -n mjy torchrun train.py --ckpt ckpt/demo --batch_size 8",
+                    "cwd": ".",
+                    "batchbasis": "smoke-derived final batch 8",
+                    "gpu_id": "0",
+                    "memory observed": "smoke memory observed 12GB; warmup memory observed 72GB",
+                    "model": "demo model",
+                    "dataset": "demo dataset",
+                    "method": "DPO",
+                },
+            },
             "error_or_null": None,
             "cleanup_required": False,
         },
@@ -1034,6 +1067,17 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         raise AssertionError(json.dumps(execute_packet["report_contract"], ensure_ascii=False, indent=2))
     if "log manifest path" not in set(execute_packet["report_contract"].get("required_evidence", [])):
         raise AssertionError(json.dumps(execute_packet["report_contract"], ensure_ascii=False, indent=2))
+    required_execute_evidence = set(execute_packet["report_contract"].get("required_evidence", []))
+    for required_manifest_evidence in [
+        "manifest required fields checklist",
+        "batchbasis",
+        "gpu_id",
+        "smoke memory observed when smoke ran",
+        "warmup memory observed when warmup ran",
+        "natural-language model dataset method semantics",
+    ]:
+        if required_manifest_evidence not in required_execute_evidence:
+            raise AssertionError(json.dumps(execute_packet["report_contract"], ensure_ascii=False, indent=2))
     execute_assignments = "\n".join(
         str(item.get("assignment") or "")
         for item in execute_packet.get("task_team_mapping", {}).get("teammate_assignments", [])
@@ -1048,6 +1092,10 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         or "effective batch size" not in execute_assignments
         or "Log manifest rule" not in execute_assignments
         or "generated formal log folder must contain a manifest file inside that folder" not in execute_assignments
+        or "Natural-language manifest semantics rule" not in execute_assignments
+        or "batchbasis" not in execute_assignments
+        or "warmup memory observed" not in execute_assignments
+        or "dataset row/example count" not in execute_assignments
     ):
         raise AssertionError(json.dumps(execute_packet.get("task_team_mapping"), ensure_ascii=False, indent=2))
     execute_assignments = json.dumps(execute_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
@@ -1237,6 +1285,24 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     if (project_root / ".claude" / "agents").exists():
         raise AssertionError(str(project_root / ".claude" / "agents"))
 
+    old_settings = os.environ.pop("BRIDGE_CLAUDE_SETTINGS", None)
+    try:
+        settings_args = _settings_args()
+    finally:
+        if old_settings is not None:
+            os.environ["BRIDGE_CLAUDE_SETTINGS"] = old_settings
+    if not settings_args or settings_args[0] != "--settings":
+        raise AssertionError(json.dumps(settings_args, ensure_ascii=False, indent=2))
+    generated_settings = Path(settings_args[1])
+    settings_payload = json.loads(generated_settings.read_text(encoding="utf-8"))
+    hooks = settings_payload.get("hooks", {}) if isinstance(settings_payload, dict) else {}
+    for event_name in ["SessionStart", "SubagentStart", "PreToolUse", "PostToolUse"]:
+        if event_name not in hooks:
+            raise AssertionError(json.dumps(settings_payload, ensure_ascii=False, indent=2))
+    settings_text = generated_settings.read_text(encoding="utf-8")
+    if "../.claude/hooks" in settings_text or ".claude/hooks/" in settings_text:
+        raise AssertionError(settings_text)
+
     old_allowed_models = os.environ.get("BRIDGE_ALLOWED_MODELS")
     os.environ["BRIDGE_ALLOWED_MODELS"] = "gpt-main,sonnet-main,deepseek-main"
     try:
@@ -1297,6 +1363,15 @@ def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
     old_run_id = os.environ.pop("BRIDGE_RUN_ID", None)
     old_control_run_id = os.environ.pop("CLAUDE_CONTROL_RUN_ID", None)
     old_child = os.environ.pop("BRIDGE_CHILD_CLAUDE_SESSION", None)
+    rebound_env_keys = [
+        "BRIDGE_MAIN_SESSION_ID",
+        "CLAUDE_CONTROL_MAIN_SESSION_ID",
+        "BRIDGE_SUB_SESSION_ID",
+        "BRIDGE_WINDOW_ID",
+        "BRIDGE_TEAM_ID",
+        "BRIDGE_TASK_ID",
+    ]
+    old_rebound_env = {key: os.environ.get(key) for key in rebound_env_keys}
     try:
         os.environ["BRIDGE_RUNTIME_RUNS_ROOT"] = str(runs_root)
         os.environ["BRIDGE_SESSION_OBSERVER_ROOT"] = str(observer_root)
@@ -1384,6 +1459,73 @@ def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
         bash_events = [item for item in run_tool_events if item.get("tool_use_id") == "tool_executor_train"]
         if not bash_events or "executor_formal_gpu_probe_missing" not in {item.get("code") for item in bash_events[-1].get("soft_reminders", [])}:
             raise AssertionError(json.dumps(run_tool_events[-5:], ensure_ascii=False, indent=2))
+
+        os.environ["BRIDGE_CHILD_CLAUDE_SESSION"] = "1"
+        os.environ["BRIDGE_RUN_ID"] = "run_demo"
+        os.environ["CLAUDE_CONTROL_RUN_ID"] = "run_demo"
+        os.environ["BRIDGE_MAIN_SESSION_ID"] = "main_demo"
+        os.environ["CLAUDE_CONTROL_MAIN_SESSION_ID"] = "main_demo"
+        os.environ["BRIDGE_SUB_SESSION_ID"] = "sub_anomaly"
+        os.environ["BRIDGE_WINDOW_ID"] = "bw_anomaly"
+        os.environ["BRIDGE_TEAM_ID"] = "team_anomaly"
+        os.environ["BRIDGE_TASK_ID"] = "task_anomaly"
+        anomaly_binding = module.observer_binding(
+            {"session_id": "anomaly_session_demo", "agent_type": "anomaly-analyst-a"},
+            {"file_path": "logs/anomaly.log"},
+        )
+        expected_anomaly = {
+            "run_id": "run_demo",
+            "main_session_id": "main_demo",
+            "sub_session_id": "sub_anomaly",
+            "bridge_window_id": "bw_anomaly",
+            "team_id": "team_anomaly",
+            "task_id": "task_anomaly",
+            "teammate_id": "anomaly-analyst-a",
+            "agent_type": "anomaly-analyst-a",
+        }
+        for key, expected in expected_anomaly.items():
+            if anomaly_binding.get(key) != expected:
+                raise AssertionError(json.dumps({"key": key, "binding": anomaly_binding}, ensure_ascii=False, indent=2))
+        module.emit_observer_record("session_bindings", {"timestamp": _now(), **anomaly_binding})
+        for tool_name, tool_input in [
+            ("Read", {"file_path": "logs/anomaly.log"}),
+            ("Grep", {"pattern": "error|oom", "path": "logs"}),
+            ("Bash", {"command": "python - <<'PY'\nprint('inspect anomaly')\nPY", "cwd": "."}),
+        ]:
+            tool_use_id = f"tool_anomaly_{tool_name.lower()}"
+            for status in ["started", "completed"]:
+                module.emit_observer_record(
+                    "tool_events",
+                    {
+                        "timestamp": _now(),
+                        **anomaly_binding,
+                        "tool_name": tool_name,
+                        "tool_use_id": tool_use_id,
+                        "action": "run_command" if tool_name == "Bash" else ("search" if tool_name == "Grep" else "read_file"),
+                        "target": tool_input.get("file_path") or tool_input.get("path") or tool_input.get("command"),
+                        "summary": f"{tool_name} anomaly evidence",
+                        "status": status,
+                        "started_at": _now(),
+                        "completed_at": _now() if status == "completed" else None,
+                        "duration_ms": 1 if status == "completed" else None,
+                        "normalized_input": tool_input,
+                        "safe_input_preview": module.safe_input_preview(tool_input),
+                        "file_refs": module.tool_file_refs(tool_name, tool_input, after=status == "completed"),
+                        "output_summary": None,
+                    },
+                )
+        run_bindings = _read_jsonl(runs_root / "run_demo" / "session_bindings.jsonl")
+        if not any(item.get("session_id") == "anomaly_session_demo" and item.get("teammate_id") == "anomaly-analyst-a" for item in run_bindings):
+            raise AssertionError(json.dumps(run_bindings[-10:], ensure_ascii=False, indent=2))
+        run_tool_events = _read_jsonl(runs_root / "run_demo" / "tool_events.jsonl")
+        for tool_name in ["Read", "Grep", "Bash"]:
+            statuses = {
+                item.get("status")
+                for item in run_tool_events
+                if item.get("teammate_id") == "anomaly-analyst-a" and item.get("tool_name") == tool_name
+            }
+            if not {"started", "completed"}.issubset(statuses):
+                raise AssertionError(json.dumps({"tool_name": tool_name, "statuses": sorted(statuses), "tail": run_tool_events[-20:]}, ensure_ascii=False, indent=2))
     finally:
         if old_runs_root is None:
             os.environ.pop("BRIDGE_RUNTIME_RUNS_ROOT", None)
@@ -1395,10 +1537,21 @@ def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
             os.environ["BRIDGE_SESSION_OBSERVER_ROOT"] = old_observer_root
         if old_run_id is not None:
             os.environ["BRIDGE_RUN_ID"] = old_run_id
+        else:
+            os.environ.pop("BRIDGE_RUN_ID", None)
         if old_control_run_id is not None:
             os.environ["CLAUDE_CONTROL_RUN_ID"] = old_control_run_id
+        else:
+            os.environ.pop("CLAUDE_CONTROL_RUN_ID", None)
         if old_child is not None:
             os.environ["BRIDGE_CHILD_CLAUDE_SESSION"] = old_child
+        else:
+            os.environ.pop("BRIDGE_CHILD_CLAUDE_SESSION", None)
+        for key, old_value in old_rebound_env.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
     return {"hook_observer_rebind": "passed"}
 
 

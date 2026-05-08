@@ -155,6 +155,8 @@ In implementation work, you should:
 
 New active files have a burden of proof. If you create a new code file, script, data file, checkpoint, document, log, or retained output, report why it should remain active instead of archived or temporary.
 
+If you create or update any manifest, index, launch receipt, config manifest, or execution-adjacent metadata file, do not write a filename-only label. Include run ID when available, bridge window ID when available, task ID or task association, command/cwd when relevant, concrete checkpoint/config/prompt paths when relevant, batchbasis when relevant, gpu_id/device IDs when relevant, smoke memory observed or warmup memory observed when relevant, and natural-language semantics for model, dataset, dataset count when known, method/objective, early-stop behavior, metric, and inherited defaults. If a field is not applicable or cannot be known in implementation, mark it `not_applicable` or `unknown` with the reason.
+
 ### Debug
 In debug work, you should:
 - run bounded local validation

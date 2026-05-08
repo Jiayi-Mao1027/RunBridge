@@ -158,6 +158,8 @@ For L4 execute specifically, do not close the bridge window, delete the team, or
 
 For long-running execution tasks, require and preserve the executor's runtime estimate. The bridge-level report should include the estimated wall-clock range, the basis for that estimate, start time, owned process refs, log path, expected output/checkpoint path, and whether the process is still running at report time. Missing runtime estimate is a report-quality issue that should be surfaced in partial evidence.
 
+For L4 execute manifest-producing work, require and preserve a manifest-required-fields checklist from executor/postrun. The bridge-level report should state whether the manifest includes run ID, bridge window ID, task ID, command, cwd, batchbasis, gpu_id/device IDs, smoke memory observed when smoke ran, warmup memory observed when warmup ran, formal observed memory, concrete checkpoint/config/prompt paths, natural-language model/dataset/method semantics, dataset count when known, process refs, output refs, and terminal status. If the manifest path exists but these fields are missing or unknown without reason, treat the result as partial or failed according to the completion contract rather than silently accepting a filename-only manifest.
+
 When `task_spec.instruction_coverage_checklist` is present, preserve it as bridge-level completion evidence. The final BridgeResult must say, for every checklist item, whether it was completed, deferred with a concrete reason, blocked with a blocker, or escalated. Missing coverage disposition is a report-quality issue even when some teammate work succeeded.
 
 The bridge task is completed by you, not by any teammate. The expected sequence is:

@@ -1,0 +1,27 @@
+{
+  "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+  "updated_at": "2026-05-08T07:11:04.188514+00:00",
+  "teammates": [
+    {
+      "teammate_id": null,
+      "agent_id": "leader-orchestrator",
+      "session_id": "627ec93e-8c13-4351-afb3-6584d3d381ef",
+      "agent_type": "leader-orchestrator",
+      "display_name": "leader-orchestrator",
+      "bridge_window_id": null,
+      "team_id": null,
+      "task_id": null,
+      "active_tool": null,
+      "last_completed_tool": {
+        "tool_use_id": "call_Zfh4LvvtQ0VebzPxeTn7qdMt",
+        "tool_name": "mcp__bridge__call_bridge_sdk",
+        "started_at": "2026-05-08T07:03:47.574285+00:00",
+        "completed_at": "2026-05-08T07:11:04.188514+00:00",
+        "target": null,
+        "status": "completed",
+        "summary": "mcp__bridge__call_bridge_sdk input keys: persist",
+        "soft_reminders": []
+      }
+    }
+  ]
+}

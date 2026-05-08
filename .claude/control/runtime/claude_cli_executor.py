@@ -6,6 +6,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -213,12 +214,27 @@ def simulated_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     task_spec = packet.get("task_spec", {})
     required_artifacts = packet.get("completion_contract", {}).get("required_artifacts")
     artifact_refs = [str(item) for item in required_artifacts] if isinstance(required_artifacts, list) else []
+    manifest_required = "log_manifest" in artifact_refs
+    manifest_checklist = {
+        "run_id": execution_input.get("run_id"),
+        "bridge_window_id": execution_input.get("bridge_window_id"),
+        "task_id": execution_input.get("task_id"),
+        "command": "simulated command",
+        "cwd": "simulated cwd",
+        "batchbasis": "simulated batch basis",
+        "gpu_id": "not_applicable",
+        "memory observed": "not_applicable",
+        "model": "simulated model",
+        "dataset": "simulated dataset",
+        "method": "simulated method",
+    } if manifest_required else {}
     return {
         "status": "succeeded",
         "reports": [
             {
                 "summary": f"Simulated completion for {task_spec.get('task_subject') or execution_input['task_id']}",
                 "task_description": task_spec.get("task_description"),
+                **({"manifest required fields checklist": manifest_checklist} if manifest_required else {}),
             }
         ],
         "artifact_refs": artifact_refs,
@@ -228,6 +244,7 @@ def simulated_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
             "team_id": execution_input["team_id"],
             "task_id": execution_input["task_id"],
             "artifact_refs": artifact_refs,
+            **({"manifest_required_fields_checklist": manifest_checklist} if manifest_required else {}),
         },
         "error_or_null": None,
         "cleanup_required": False,
@@ -430,9 +447,55 @@ def _settings_args() -> list[str]:
 
     default_settings = _control_claude_dir() / "settings.json"
     if default_settings.exists():
-        return ["--settings", str(default_settings)]
+        return ["--settings", str(_materialize_bridge_settings(default_settings))]
+
+    hook_settings = _control_claude_dir() / "hooks" / "settings.json"
+    if hook_settings.exists():
+        return ["--settings", str(_materialize_bridge_settings(hook_settings))]
 
     return []
+
+
+def _materialize_bridge_settings(source: Path) -> Path:
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid Claude settings payload: {source}")
+    normalized = _normalize_hook_commands(payload)
+    target = _control_claude_dir() / "runtime_state" / "generated" / "bridge_hooks_settings.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target
+
+
+def _normalize_hook_commands(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _normalize_hook_commands(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_hook_commands(item) for item in value]
+    if isinstance(value, str):
+        return _absolute_hook_command(value)
+    return value
+
+
+def _absolute_hook_command(command: str) -> str:
+    hooks_root = _control_claude_dir() / "hooks"
+    normalized = command.replace("\\", "/")
+    match = None
+    for pattern in ("../.claude/hooks/", ".claude/hooks/"):
+        index = normalized.find(pattern)
+        if index >= 0:
+            tail = normalized[index + len(pattern):].strip()
+            script = tail.split()[0] if tail else ""
+            if script:
+                match = hooks_root / script
+                break
+    if match is None:
+        return command
+    return f"{_quote_cmd_arg(sys.executable)} {_quote_cmd_arg(str(match))}"
+
+
+def _quote_cmd_arg(value: str) -> str:
+    return '"' + value.replace('"', '\\"') + '"'
 
 
 def _ensure_project_agent_files(project_root: Path, names: list[str]) -> dict[str, Any]:

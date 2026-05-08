@@ -196,6 +196,8 @@ If run-id anchoring is unavailable but an artifact still clearly matters:
 
 Do not present weak linkage as strong traceability.
 
+When you write a manifest or index for retained material, make it structurally useful rather than a loose label. Include run ID when available, bridge window ID when available, task ID or task association, source path, retained/archive path, artifact type, stage association, retention/archive reason, semantic meaning in natural language, and linkage confidence. For execution-adjacent artifacts, also include command/cwd if known, checkpoint/config/prompt paths if known, dataset/method/model semantics if known, and mark execution-only fields such as batchbasis, gpu_id, smoke memory observed, and warmup memory observed as `not_applicable` or `unknown` with a reason rather than omitting them.
+
 ---
 
 ## 8. Classification Rule

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from typing import Any, Callable
 import uuid
@@ -489,8 +490,37 @@ def _validation_requirement_satisfied(requirement: str, execution: dict[str, Any
     lowered = requirement.casefold()
     if "manifest" in lowered:
         refs = execution.get("artifact_refs") if isinstance(execution.get("artifact_refs"), list) else []
-        return any(_looks_like_log_manifest(str(ref)) for ref in refs)
+        has_manifest_ref = any(_looks_like_log_manifest(str(ref)) for ref in refs)
+        if "required" in lowered and "field" in lowered:
+            return has_manifest_ref and _manifest_field_evidence_present(execution)
+        return has_manifest_ref
     return bool(execution.get("validation_passed", True))
+
+
+def _manifest_field_evidence_present(execution: dict[str, Any]) -> bool:
+    evidence_blob = json.dumps(
+        {
+            "reports": execution.get("reports", []),
+            "evidence": execution.get("evidence"),
+        },
+        ensure_ascii=False,
+        default=str,
+    ).casefold()
+    required_markers = [
+        ("manifest required fields", "required fields checklist", "manifest checklist"),
+        ("run_id", "run id"),
+        ("bridge_window_id", "bridge window id"),
+        ("task_id", "task id"),
+        ("command",),
+        ("cwd",),
+        ("batchbasis", "batch basis"),
+        ("gpu_id", "gpu id", "device id"),
+        ("memory observed", "smoke memory", "warmup memory", "formal observed memory"),
+        ("model",),
+        ("dataset",),
+        ("method", "objective"),
+    ]
+    return all(any(marker in evidence_blob for marker in group) for group in required_markers)
 
 
 def _checks_satisfied(checks: dict[str, Any]) -> bool:

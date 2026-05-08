@@ -11,6 +11,23 @@ from pathlib import Path
 from typing import Any
 
 
+TEAMMATE_AGENT_NAMES = {
+    "chiefmate-a",
+    "chiefmate-b",
+    "chiefmate-c",
+    "preflight-initial",
+    "refresher",
+    "curator",
+    "implementor",
+    "rungater",
+    "executor",
+    "postrun",
+    "anomaly-analyst-a",
+    "anomaly-analyst-b",
+    "anomaly-analyst-c",
+}
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -178,8 +195,17 @@ def observer_binding(
         run_binding_state = "inferred"
     else:
         run_binding_state = "unbound"
+    agent_type = (
+        payload.get("agent_type")
+        or tool_input.get("agent_type")
+        or os.environ.get("BRIDGE_AGENT_TYPE")
+        or session_binding.get("agent_type")
+        or ("bridge-leader" if is_bridge_child_session() else "main-leader")
+    )
+    agent_type_text = str(agent_type or "").strip()
+    is_teammate_agent = agent_type_text in TEAMMATE_AGENT_NAMES
     if is_bridge_child_session():
-        session_kind = "bridge_child"
+        session_kind = "bridge_teammate" if is_teammate_agent else "bridge_child"
         binding_source = "env"
     elif session_binding.get("run_id"):
         session_kind = str(session_binding.get("session_kind") or "bridge_child")
@@ -190,18 +216,12 @@ def observer_binding(
     else:
         session_kind = "direct_session"
         binding_source = "unbound"
-    agent_type = (
-        payload.get("agent_type")
-        or tool_input.get("agent_type")
-        or os.environ.get("BRIDGE_AGENT_TYPE")
-        or session_binding.get("agent_type")
-        or ("bridge-leader" if is_bridge_child_session() else "main-leader")
-    )
     agent_id = payload.get("agent_id") or tool_input.get("agent_id") or os.environ.get("BRIDGE_AGENT_ID") or session_binding.get("agent_id") or agent_type
     teammate_id = (
         payload.get("teammate_id")
         or tool_input.get("teammate_id")
         or session_binding.get("teammate_id")
+        or (agent_type_text if is_teammate_agent else None)
         or payload.get("agent_id")
         or tool_input.get("agent_id")
     )
@@ -759,7 +779,7 @@ def bash_execution_soft_reminders(tool_name: str, tool_input: dict[str, Any], bi
             {
                 "level": "warn",
                 "code": "executor_log_manifest_reminder",
-                "message": "Formal-looking executor Bash should create/update the log-folder manifest and report its path; filenames alone are not sufficient.",
+                "message": "Formal-looking executor Bash should create/update the log-folder manifest and report its path. The manifest should include run_id, bridge_window_id, task_id, command, cwd, batchbasis, gpu_id, smoke/warmup memory observations when applicable, concrete checkpoint/config/prompt paths, and natural-language model/dataset/method semantics; filenames alone are not sufficient.",
             }
         )
     if after and isinstance(tool_response, dict):

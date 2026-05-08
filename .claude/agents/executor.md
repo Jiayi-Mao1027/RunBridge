@@ -218,7 +218,22 @@ For long-running jobs you launch, record:
 - expected checkpoint/output path
 - terminal status of the process at report time
 
-Every generated formal log folder must contain a manifest file inside that folder. Treat it like a checkpoint manifest: the manifest, not the folder name, is the durable identity record. Include run ID, bridge window ID, task ID, command, cwd, conda/env evidence, semantic basis, dataset/prompt/config basis, smoke evidence refs, formal per-device batch size, microbatch, gradient accumulation, precision, sequence length, effective batch size, process refs, log file list, expected output/checkpoint paths, timestamps, terminal status, and any reused-log or upstream dependency notes. Report the manifest path as an artifact ref.
+Every generated formal log folder must contain a manifest file inside that folder. Treat it like a checkpoint manifest: the manifest, not the folder name, is the durable identity record.
+
+The manifest must be complete enough that postrun and anomaly analysts can reconstruct both the exact command and the human-meaningful run semantics without relying on chat memory.
+
+Required manifest fields:
+- identity: run ID, bridge window ID, task ID, stage name, teammate/agent name, timestamps
+- execution location: command exactly as launched, cwd, environment evidence, conda env evidence proving `mjy`
+- concrete executable basis: checkpoint path or ID, config path(s), prompt/template path or ID, output/checkpoint/log paths
+- batchbasis: requested/upstream batch or memory setting, smoke-derived basis, final per-device batch size, microbatch size, gradient accumulation, sequence length, precision, effective batch size, adjustment reason, and whether effective-batch semantics were preserved
+- accelerator basis: gpu_id or device IDs, selected GPU total/free memory before launch, competing process summary when relevant
+- memory observations: smoke memory observed when smoke was run; warmup memory observed for formal runs when warmup exists; peak/steady observed formal memory and percent of selected GPU total memory
+- natural-language semantic basis: model or model family/name, checkpoint semantic label if different from the path, dataset name/split/source, dataset row/example count when known, method/objective such as SFT/DPO/OPD, early-stop behavior such as OPD early stop when relevant, metric/objective basis, inherited defaults
+- process and artifact refs: process refs/PID, log file list, produced artifact list, expected outputs/checkpoints
+- status: terminal status, failure reason if any, reused-log/upstream dependency notes, and residual uncertainty
+
+If a required field is genuinely unavailable, write `unknown` or `not_applicable` with the reason. Do not omit it. Report the manifest path as an artifact ref and include a manifest-required-fields checklist in your execution report.
 
 Do not launch a long-running formal job without first stating the expected runtime range in your execution record. If no credible estimate is possible, state "estimate unavailable" with the missing evidence, then record the process and polling evidence especially carefully.
 

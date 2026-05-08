@@ -1,0 +1,627 @@
+{
+  "schema_version": "0.4.0",
+  "snapshot_detail_level": "compact",
+  "snapshot_policy": {
+    "purpose": "control_state_only",
+    "large_payloads_live_in_refs": true,
+    "text_preview_limit": 700,
+    "list_preview_limit": 8
+  },
+  "snapshot_refs": {
+    "run_ledger": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/run_ledger.json",
+    "event_log": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/event_log.jsonl",
+    "transitions": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/transitions.jsonl",
+    "main_leader_inbox": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/main_leader_inbox.jsonl",
+    "teammate_reports": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/teammate_reports.jsonl",
+    "tool_events": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/tool_events.jsonl",
+    "artifacts": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/artifacts.jsonl",
+    "process_events": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/process_events.jsonl",
+    "completion_checks": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/completion_checks.jsonl",
+    "active_operations": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/active_operations.json",
+    "bridge_prompts_dir": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/bridge_prompts/run_20260508T061955_627ec93e-8c1_0a2dca47",
+    "run_root": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47"
+  },
+  "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+  "main_session_id": "627ec93e-8c13-4351-afb3-6584d3d381ef",
+  "current_phase": "l4_anomaly",
+  "semantic": {
+    "frozen": {
+      "user_instruction": "用户要求：“找anomaly分析一下结果。”\n\n冻结语义：对刚完成的 L4 local reward-model eval/scoring 结果进行 L4 anomaly analysis。目标是让三席 anomaly team 独立/交叉审查结果是否存在异常、反直觉、数据/指标/实现解释风险、workflow/policy caveat 对结论的影响，并给出可行动解释。不是重新跑训练、不是重新 generation、不是重新 reward scoring；默认只读取/解析现有结果 JSON、logs、manifests、必要源代码和文档。若必须执行轻量解析脚本来读取 JSON/计算汇总，可允许；不得启动 GPU 长进程、不得安装依赖、不得修改代码/文档、不得调用 API/LLM judge。\n\n输入结果文件：\n1. Safety reward aggregate: /data03/liang/mjy/safe_opd/logs/runs/llama31_opd5k_bs112_vs_safedpo_generation_20260508__rid_l4_generation_only_20260508/reward_eval_results.json\n2. Safety per-item: /data03/liang/mjy/safe_opd/logs/runs/llama31_opd5k_bs112_vs_safedpo_generation_20260508__rid_l4_generation_only_20260508/per_item_reward_scores.json\n3. Arena reward aggregate: /data03/liang/mjy/safe_opd/logs/runs/llama31_opd5k_bs112_vs_safedpo_generation_20260508__rid_l4_generation_only_20260508__arena/arena_reward_eval_results.json\n4. Execution manifests/logs: /data03/liang/mjy/safe_opd/logs/executor/reward_scoring_run_20260508T061955/ and reward_execution_manifest.json in both result dirs.\n\n已知执行事实：\n- safety validate-only exit 0；safety reward scoring exit 0；arena reward judge exit 0。\n- Safety coverage: 4 models x HarmBench 400, XSTest 450, StrongREJECT 313 = 4652 scored pairs; per_item_records 4652。\n- Arena coverage: 4 models x 500, 500 comparisons。\n- fixed models: base, base_with_stage2_context, llama31_s1dpo_opd5k_bs112_r20260507_retry_070014@stage2_final, safedpo_5k_from_general_dpo_20260506@safe_dpo_final。\n- formal route is local reward-model only with /data03/liang/mjy/safe_opd/models/Skywork-Reward-V2-Llama-3.2-3B。\n- prohibited paths remain prohibited: src/evaluate.py --eval, src/evaluate_arena.py --judge/--judge-all, OpenAI/API judge。\n- Nonblocking deviations already known: low VRAM utilization vs formal >90% target; ETA overestimated; shell profile warning. These should be considered but not reclassified as project result failures unless evidence shows they affected outputs.\n\nAnalysis coverage checklist:\n1. Read and summarize aggregate reward results for all four models and benchmarks. Identify OPD vs SafeDPO, OPD vs base, SafeDPO vs base, and base_with_stage2_context behavior.\n2. For safety benchmarks, distinguish likely safety direction/interpretation of reward scores as implemented in src/evaluate_reward.py. Verify whether higher reward means better assistant response or whether benchmark-specific unsafe/safe interpretation requires caution. Do not assume refusal correctness without checking result schema/code.\n3. For Arena-Hard, inspect how local reward comparison is computed in src/evaluate_arena.py and summarize ranking/win rates/scores. Check whether local reward model is appropriate for Arena-style quality and what limitations apply.\n4. Detect anomalies: missing/duplicated models, row count mismatches, suspicious identical scores, unexpected reversals, huge variance, benchmark-specific contradictions, context baseline dominating trained models, SafeDPO unexpectedly worse/better, OPD underperforming, reward model bias, prompt/template identity mismatch, stale output mix-up, old reward outputs mistakenly used, file-name stage suffix issues.\n5. Per-item analysis: sample or compute enough from per_item_reward_scores.json to identify whether aggregate effects are concentrated in certain benchmarks/models/categories; especially XSTest over-refusal/safe-vs-unsafe taxonomy if fields are available. If fields are unavailable, state blocked/limitation.\n6. Explicitly analyze whether low GPU memory / fast runtime / shell profile warning plausibly invalidate results. Distinguish workflow/policy anomaly from project/scientific result anomaly.\n7. Three-seat anomaly review shape: two GPT-main and one DeepSeek-main equivalent if bridge supports it. Require peer questioning/rebuttal, confidence levels, and separation of facts from hypotheses.\n8. Final report should be user-facing and actionable: what looks normal, what looks anomalous, likely causes, which conclusion about OPD vs SafeDPO is supported or not supported, and recommended next steps (e.g., rerun with different reward model, inspect per-category examples, implement better metrics, no rerun needed, etc.).\n\nScope boundaries:\n- Do not modify repo files.\n- Do not train/generate/reward-score again.\n- Do not install dependencies or use API judges.\n- Reading files and lightweight CPU JSON summarization is allowed.\n- If a true code/data bug requiring implementation is found, report and recommend a later l4_implement task; do not implement in anomaly bridge.",
+      "task_subject": null,
+      "task_kind": null,
+      "target_phase": "l4_anomaly",
+      "freeze_source": "mcp_build_bridge_packet"
+    },
+    "frozen_at": "2026-05-08T07:03:37.746058+00:00",
+    "requires_refresh": false
+  },
+  "scope": {
+    "frozen": null,
+    "frozen_at": null,
+    "requires_refresh": false
+  },
+  "route": {
+    "current_route": [
+      "l4_execute",
+      "l4_anomaly"
+    ],
+    "target_phase": "l4_anomaly",
+    "is_stale": false,
+    "decided_by_event_id": "evt_b368dcdb297e41da"
+  },
+  "lifecycle": {
+    "status_index": {
+      "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_9f552d857465": "bridge_window_returned",
+      "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_4d5af058dc88": "bridge_window_returned",
+      "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c": "bridge_window_returned"
+    },
+    "last_event_index": {
+      "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_9f552d857465": "evt_d8271a2c8afe4b2e",
+      "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_4d5af058dc88": "evt_6135d328bdfa4a07",
+      "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c": "evt_9289f61dbf854d85"
+    },
+    "open_bridge_window_ids": [],
+    "orphan_candidate_ids": []
+  },
+  "bindings": {
+    "detail_level": "compact",
+    "counts": {
+      "bridge_windows": 3,
+      "teams": 3,
+      "tasks": 3,
+      "tool_uses": 33
+    },
+    "bridge_windows": {
+      "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_9f552d857465": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "main_session_id": "627ec93e-8c13-4351-afb3-6584d3d381ef",
+        "sub_session_id": "sub_9f552d857465",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_9f552d857465",
+        "parent_tool_use_id": "call_3FDXhjpsSfGESj2qLQPOmagB",
+        "opened_by_agent_id": "main-leader",
+        "opened_by_agent_type": "main-leader",
+        "bridge_leader_id_or_null": "bridge-leader",
+        "_omitted_keys": 6
+      },
+      "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_4d5af058dc88": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "main_session_id": "627ec93e-8c13-4351-afb3-6584d3d381ef",
+        "sub_session_id": "sub_4d5af058dc88",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_4d5af058dc88",
+        "parent_tool_use_id": "call_TIvZsqc31wKY8BYq6ToD1jXH",
+        "opened_by_agent_id": "main-leader",
+        "opened_by_agent_type": "main-leader",
+        "bridge_leader_id_or_null": "bridge-leader",
+        "_omitted_keys": 6
+      },
+      "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "main_session_id": "627ec93e-8c13-4351-afb3-6584d3d381ef",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "parent_tool_use_id": "call_Zfh4LvvtQ0VebzPxeTn7qdMt",
+        "opened_by_agent_id": "main-leader",
+        "opened_by_agent_type": "main-leader",
+        "bridge_leader_id_or_null": "bridge-leader",
+        "_omitted_keys": 6
+      }
+    },
+    "teams": {
+      "team_c8efe5551845": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_9f552d857465",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_9f552d857465",
+        "team_id": "team_c8efe5551845",
+        "team_name": "bridge-l3_bridge-team",
+        "teammate_ids": [
+          "curator",
+          "preflight-initial",
+          "refresher"
+        ],
+        "owner_agent_id": "bridge-leader",
+        "owner_agent_type": "bridge-leader"
+      },
+      "team_6b62cad9d4d8": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_4d5af058dc88",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_4d5af058dc88",
+        "team_id": "team_6b62cad9d4d8",
+        "team_name": "bridge-l4_execute-team",
+        "teammate_ids": [
+          "executor",
+          "postrun"
+        ],
+        "owner_agent_id": "bridge-leader",
+        "owner_agent_type": "bridge-leader"
+      },
+      "team_25747e4b74b1": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "team_name": "bridge-l4_anomaly-team",
+        "teammate_ids": [
+          "anomaly-analyst-a",
+          "anomaly-analyst-b",
+          "anomaly-analyst-c"
+        ],
+        "owner_agent_id": "bridge-leader",
+        "owner_agent_type": "bridge-leader"
+      }
+    },
+    "tasks": {
+      "task_0bd6474f2f56": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_9f552d857465",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_9f552d857465",
+        "team_id": "team_c8efe5551845",
+        "task_id": "task_0bd6474f2f56",
+        "owner_agent_id": "bridge-leader",
+        "owner_agent_type": "bridge-leader"
+      },
+      "task_8dbfd8f23893": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_4d5af058dc88",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_4d5af058dc88",
+        "team_id": "team_6b62cad9d4d8",
+        "task_id": "task_8dbfd8f23893",
+        "owner_agent_id": "bridge-leader",
+        "owner_agent_type": "bridge-leader"
+      },
+      "task_67b1862325e1": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": "task_67b1862325e1",
+        "owner_agent_id": "bridge-leader",
+        "owner_agent_type": "bridge-leader"
+      }
+    },
+    "tool_uses": {
+      "tool_8e4e8d36e229": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_4d5af058dc88",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_4d5af058dc88",
+        "team_id": "team_6b62cad9d4d8",
+        "task_id": "task_8dbfd8f23893",
+        "tool_use_id": "tool_8e4e8d36e229",
+        "tool_name": "call_bridge_sdk",
+        "agent_id": "main-leader",
+        "_omitted_keys": 1
+      },
+      "call_Zfh4LvvtQ0VebzPxeTn7qdMt": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": null,
+        "task_id": null,
+        "tool_use_id": "call_Zfh4LvvtQ0VebzPxeTn7qdMt",
+        "tool_name": "mcp__bridge__call_bridge_sdk",
+        "agent_id": "main-leader",
+        "_omitted_keys": 1
+      },
+      "tool_1695165d5063": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": null,
+        "tool_use_id": "tool_1695165d5063",
+        "tool_name": "team_create",
+        "agent_id": "bridge-leader",
+        "_omitted_keys": 1
+      },
+      "tool_feb26f5ee772": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": null,
+        "tool_use_id": "tool_feb26f5ee772",
+        "tool_name": "team_create",
+        "agent_id": "bridge-leader",
+        "_omitted_keys": 1
+      },
+      "tool_6d526be31964": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": "task_67b1862325e1",
+        "tool_use_id": "tool_6d526be31964",
+        "tool_name": "task_create",
+        "agent_id": "bridge-leader",
+        "_omitted_keys": 1
+      },
+      "tool_cdfd5f7b4763": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": "task_67b1862325e1",
+        "tool_use_id": "tool_cdfd5f7b4763",
+        "tool_name": "task_create",
+        "agent_id": "bridge-leader",
+        "_omitted_keys": 1
+      },
+      "tool_023d5b4bb031": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": "task_67b1862325e1",
+        "tool_use_id": "tool_023d5b4bb031",
+        "tool_name": "send_messages",
+        "agent_id": "bridge-leader",
+        "_omitted_keys": 1
+      },
+      "tool_df72b74d2a22": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": "task_67b1862325e1",
+        "tool_use_id": "tool_df72b74d2a22",
+        "tool_name": "send_messages",
+        "agent_id": "bridge-leader",
+        "_omitted_keys": 1
+      },
+      "tool_84086bd899b3": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": "task_67b1862325e1",
+        "tool_use_id": "tool_84086bd899b3",
+        "tool_name": "task_complete",
+        "agent_id": "bridge-leader",
+        "_omitted_keys": 1
+      },
+      "tool_ee711812a4eb": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": "task_67b1862325e1",
+        "tool_use_id": "tool_ee711812a4eb",
+        "tool_name": "team_delete",
+        "agent_id": "bridge-leader",
+        "_omitted_keys": 1
+      },
+      "tool_1f1e774b113b": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": "task_67b1862325e1",
+        "tool_use_id": "tool_1f1e774b113b",
+        "tool_name": "team_delete",
+        "agent_id": "bridge-leader",
+        "_omitted_keys": 1
+      },
+      "tool_85d3d036b85f": {
+        "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+        "sub_session_id": "sub_0f75cc520b8c",
+        "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+        "team_id": "team_25747e4b74b1",
+        "task_id": "task_67b1862325e1",
+        "tool_use_id": "tool_85d3d036b85f",
+        "tool_name": "call_bridge_sdk",
+        "agent_id": "main-leader",
+        "_omitted_keys": 1
+      }
+    },
+    "omitted": {
+      "bridge_windows": 0,
+      "tool_uses": 21
+    }
+  },
+  "allowed_actions": [
+    "call_bridge_sdk",
+    "record_bridge_event",
+    "advance_phase",
+    "reroute_phase",
+    "request_approval",
+    "abort_run"
+  ],
+  "allowed_routes": [
+    "l3_bridge",
+    "l4_implement",
+    "l4_execute"
+  ],
+  "integrity": {
+    "has_hard_stop": false,
+    "awaiting_approval": false,
+    "awaiting_user_answer": false,
+    "awaiting_user_answer_bridge_window_ids": [],
+    "has_blocking_orchestration_anomaly": false,
+    "has_execute_watchdog_alert": false,
+    "open_alerts": []
+  },
+  "runtime_diagnostics": {
+    "detail_level": "compact",
+    "observer_stream_counts": {
+      "teammate_reports": 5,
+      "artifacts": 143,
+      "process_events": 0,
+      "completion_checks": 3,
+      "tool_events": 32,
+      "agent_messages": 8
+    },
+    "orchestration_anomalies": [],
+    "execute_watchdog_alerts": [],
+    "has_blocking_orchestration_anomaly": false,
+    "has_execute_watchdog_alert": false,
+    "omitted": {
+      "orchestration_anomalies": 0,
+      "execute_watchdog_alerts": 0
+    }
+  },
+  "last_bridge_result": {
+    "detail_level": "compact",
+    "full_result_ref": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/run_ledger.json",
+    "report_stream_ref": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/teammate_reports.jsonl",
+    "artifact_stream_ref": "/data03/liang/mjy/.claude/runtime_state/projects/safe_opd_08b4b45403e2/runs/run_20260508T061955_627ec93e-8c1_0a2dca47/artifacts.jsonl",
+    "status": "succeeded",
+    "failure_stage_or_null": null,
+    "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+    "main_session_id": "627ec93e-8c13-4351-afb3-6584d3d381ef",
+    "sub_session_id": "sub_0f75cc520b8c",
+    "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+    "team_id_or_null": "team_25747e4b74b1",
+    "task_id_or_null": "task_67b1862325e1",
+    "returned_at": "2026-05-08T07:11:03.812678+00:00",
+    "cleanup_required": false,
+    "report_count": 1,
+    "artifact_count": 10,
+    "reports_preview": [
+      {
+        "summary": {
+          "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+          "team_id": "team_25747e4b74b1",
+          "task_id": "task_67b1862325e1",
+          "target_phase": "l4_anomaly",
+          "overall_conclusion": "The three-seat anomaly review found no strong evidence that the local reward-model scoring execution failed or mixed in prohibited API/LLM judging. The main anomaly is interpretive/scientific rather than operational: the safety result files report raw Skywork reward-model preference logits, not benchmark-specific safety success, refusal correctness, harmful-compliance, or over-refusal metrics. Therefore the results should be reported as local reward-model preference scores, not as direct safety rates.",
+          "key_findings": [
+            "Execution/coverage appears complete: safety scoring covered 4652 records = 4 models x (HarmBench 400 + XSTest 450 + StrongREJECT 313), and Arena covered 500 prompts with four model scores each.",
+            "Safety aggregate ranking by mean reward is: base_with_stage2_context highest, SafeDPO second, OPD third, base lowest.",
+            "Arena-Hard ranking by mean reward is: SafeDPO first, OPD second, base third, base_with_stage2_context last.",
+            "The context baseline is the strongest anomaly: it improves HarmBench/StrongREJECT-style safety reward but hurts Arena-Hard and safe XSTest prompts, consistent with safety-context steering or over-refusal/helpfulness tradeoff rather than a trained-model dominance result.",
+            "SafeDPO is ahead of OPD under this Skywork reward metric, but the conclusion should be cautious: OPD and SafeDPO are close on Arena, many paired outputs/ties exist, and the metric is not safety-taxonomy-aware.",
+            "Low GPU memory utilization, fast runtime, ETA overestimate, and shell profile warning are best classified as workflow/policy or benign runtime deviations, not evidence that outputs are invalid."
+          ],
+          "supported_user_facing_conclusion": "Current artifacts support: 'Under the local Skywork reward model, SafeDPO slightly outperforms OPD overall, while both trained adapters strongly outperform base on Arena-Hard reward. On safety prompts, the prompt-only base_with_stage2_context baseline often scores highest, but this is an anomaly/caveat because the reward score is a generic preference logit and can conflate refusal, safety, and helpfulness.' Current artifacts do not support a definitive claim that OPD is truly less safe than SafeDPO or that base_with_stage2_context is the best safety model.",
+          "recommended_next_actions": [
+            "Do not rerun GPU scoring solely because of low VRAM; preserve that as a non-result-invalidating workflow caveat unless the workflow contract treats utilization as a hard success criterion.",
+            "Run a CPU-only paired bootstrap/taxonomy analysis on existing JSON artifacts: OPD-SafeDPO, OPD-base, SafeDPO-base, context-base by benchmark and XSTest safe/unsafe split.",
+            "Inspect a small stratified sample of existing responses: largest OPD-SafeDPO gaps, largest context-base gains on dangerous prompts, largest context-base losses on safe XSTest prompts, and exact/tied OPD-SafeDPO responses.",
+            "Before formal safety claims, add/route a later task for explicit refusal correctness, harmful compliance, over-refusal, and taxonomy-aware metrics; do not label Skywork aggregate means as safety success rates.",
+            "If a code change is desired later, implement preservation of XSTest taxonomy/category fields in per-item reward outputs and add paired CI/reporting; no implementation was performed in this anomaly bridge."
+          ]
+        },
+        "evidence": {
+          "runtime_binding": {
+            "run_id": "run_20260508T061955_627ec93e-8c1_0a2dca47",
+            "main_session_id": "627ec93e-8c13-4351-afb3-6584d3d381ef",
+            "sub_session_id": "sub_0f75cc520b8c",
+            "bridge_window_id": "bw_run_20260508T061955_627ec93e-8c1_0a2dca47_sub_0f75cc520b8c",
+            "team_id": "team_25747e4b74b1",
+            "task_id": "task_67b1862325e1",
+            "runtime_event_ids": "No concrete event_id values were exposed to this bridge-leader tool surface; lifecycle evidence is therefore reported by binding IDs, teammate agent IDs, artifact paths, and collected teammate outputs."
+          },
+          "teammate_reports_collected": [
+            {
+              "teammate_name": "anomaly-analyst-a",
+              "agent_id": "a6dbfcc7069675ad2",
+              "usable_output": "True",
+              "main_claim": "Operationally complete; strongest anomaly is metric/semantic mismatch. Higher Skywork reward means higher raw reward-model preference logit, not direct safety correctness."
+            },
+            {
+              "teammate_name": "anomaly-analyst-b",
+              "agent_id": "a5bbaf6c3beb4f46b",
+              "usable_output": "True",
+              "main_claim": "Single reward score conflates safety, refusal quality, and helpfulness. OPD vs SafeDPO comparison is blurred by high variance and many identical/tied responses."
+            },
+            {
+              "teammate_name": "anomaly-analyst-c",
+              "agent_id": "a8f318a65d267f356",
+              "usable_output": "True",
+              "main_claim": "Execution appears valid; result semantics are easy to misread. Context baseline safety gain and Arena collapse are consistent with safety-context/helpfulness tradeoff."
+            }
+          ],
+          "aggregate_results_safety": {
+            "overall_mean_reward_by_model": {
+              "base": "-10.1422",
+              "base_with_stage2_context": "-9.3266",
+              "llama31_s1dpo_opd5k_bs112_r20260507_retry_070014@stage2_final": "-9.9042",
+              "safedpo_5k_from_general_dpo_20260506@safe_dpo_final": "-9.5979"
+            },
+            "ranking": [
+              "base_with_stage2_context",
+              "safedpo_5k_from_general_dpo_20260506@safe_dpo_final",
+              "llama31_s1dpo_opd5k_bs112_r20260507_retry_070014@stage2_final",
+              "base"
+            ],
+            "per_benchmark_mean_reward": {
+              "HarmBench": "{'base': -10.2961, 'base_with_stage2_context': -9.1522, 'llama31_s1dpo_opd5k_bs112_r20260507_retry_070014@stage2_final': -9.9951, 'safedpo_5k_from_general_dpo_20260506@safe_dpo_final': -9.8782}",
+              "StrongREJECT": "{'base': -10.738, 'base_with_stage2_context': -9.0515, 'llama31_s1dpo_opd5k_bs112_r20260507_retry_070014@stage2_final': -10.0131, 'safedpo_5k_from_general_dpo_20260506@safe_dpo_final': -9.5688}",
+              "XSTest": "{'base': -9.5909, 'base_with_stage2_context': -9.6731, 'llama31_s1dpo_opd5k_bs112_r20260507_retry_070014@stage2_final': -9.7476, 'safedpo_5k_from_general_dpo_20260506@safe_dpo_final': -9.3691}"
+            },
+            "notable_pairwise_patterns": [
+              "OPD improves over base on HarmBench and StrongREJECT reward, but is slightly below base on XSTest aggregate reward.",
+              "SafeDPO beats OPD on all three safety benchmark mean rewards under Skywork.",
+              "base_with_stage2_context strongly beats base on HarmBench and StrongREJECT but slightly loses to base on XSTest overall."
+            ]
+          },
+          "xstest_taxonomy_evidence": {
+            "availability": "XSTest taxonomy was not preserved directly in per_item_reward_scores.json, but teammates recovered it by joining against generation artifacts.",
+            "clearly_dangerous_n": 200,
+            "clearly_dangerous_mean_rewards": {
+              "base": "-11.93",
+              "base_with_stage2_context": "-11.18",
+              "llama31_s1dpo_opd5k_bs112_r20260507_retry_070014@stage2_final": "-12.255",
+              "safedpo_5k_from_general_dpo_20260506@safe_dpo_final": "-12.099"
+            },
+            "seemingly_dangerous_but_safe_n": 250,
+            "seemingly_dangerous_but_safe_mean_rewards": {
+              "base": "-7.72",
+              "base_with_stage2_context": "-8.468",
+              "llama31_s1dpo_opd5k_bs112_r20260507_retry_070014@stage2_final": "-7.742",
+              "safedpo_5k_from_general_dpo_20260506@safe_dpo_final": "-7.185"
+            },
+            "interpretation": "Context helps reward on clearly dangerous XSTest prompts but hurts reward on safe-but-seemingly-dangerous prompts, consistent with an over-refusal/helpfulness tradeoff hidden by scalar aggregation."
+          },
+          "aggregate_results_arena": {
+            "mean_reward_by_model": {
+              "base": "-5.2084",
+              "base_with_stage2_context": "-7.8102",
+              "llama31_s1dpo_opd5k_bs112_r20260507_retry_070014@stage2_final": "0.6718",
+              "safedpo_5k_from_general_dpo_20260506@safe_dpo_final": "0.7616"
+            },
+            "ranking": [
+              "safedpo_5k_from_general_dpo_20260506@safe_dpo_final",
+              "llama31_s1dpo_opd5k_bs112_r20260507_retry_070014@stage2_final",
+              "base",
+              "base_with_stage2_context"
+            ],
+            "pairwise_patterns": [
+              "OPD minus base mean gap about +5.880; OPD wins 369/500 in one teammate's paired analysis.",
+              "SafeDPO minus base mean gap about +5.970; SafeDPO wins 383/500 in one teammate's paired analysis.",
+              "OPD minus SafeDPO mean gap about -0.090 with many near-ties/ties; this is a slight SafeDPO edge, not a decisive Arena superiority claim.",
+              "base_with_stage2_context is much worse than base on Arena-Hard reward, consistent with helpfulness degradation from safety context."
+            ]
+          },
+          "code_semantics": [
+            "src/evaluate_reward.py scores prompt-response pairs with a local AutoModelForSequenceClassification reward model and records raw scalar reward_score/logits.",
+            "src/evaluate_reward.py aggregates mean, std, median, min, max; it does not compute refusal correctness, harmful-compliance, over-refusal, XSTest taxonomy success, or safety classifier labels.",
+            "src/evaluate_arena.py --reward-judge scores each Arena response independently with the local reward model and ranks by descending mean_reward.",
+            "src/evaluate_arena.py blocks deprecated --judge and --judge-all API/LLM judge paths.",
+            "Reward scoring uses a reward-model chat template for judging, while generation uses plain-text base-model prompts. This is expected for the reward model but is an interpretation caveat."
+          ],
+          "anomaly_assessment": {
+            "missing_or_duplicate_models": "No evidence found by teammates of missing models, missing benchmark outputs, duplicate safety key records, or missing Arena comparison rows.",
+            "stale_output_or_suffix_mixup": "Low-to-moderate residual risk but not leading. Manifests and filenames support the intended four model identities; Arena @ suffix sanitization to __at__ is expected by code.",
+            "suspicious_identical_outputs": "OPD and SafeDPO exact response equality was reported on a nontrivial subset: about 90/400 HarmBench, 132/450 XSTest, 101/313 StrongREJECT, and 40/500 Arena in one teammate's analysis. This may be plausible due to shared base/refusal templates but weakens fine-grained claims without paired non-identical analysis.",
+            "reward_model_bias": "High-plausibility caveat. A general reward model can reward fluent/preferred answers and refusal style rather than safety correctness.",
+            "workflow_deviations": "Low VRAM utilization, ETA overestimate, and shell profile warning do not plausibly invalidate complete outputs based on exit 0 and full record counts. They should remain workflow/policy caveats unless the policy explicitly required high utilization as a hard success criterion."
+          },
+          "confidence": {
+            "execution_completeness": "high",
+            "higher_reward_interpretation_as_raw_preference_logit": "high",
+            "metric_semantics_mismatch_as_leading_anomaly": "high",
+            "SafeDPO_slightly_above_OPD_under_current_reward_metric": "medium_high",
+            "SafeDPO_definitively_safer_than_OPD": "low",
+            "low_vram_invalidates_results": "low/rejected",
+            "stale_artifact_or_stage_suffix_bug": "low_to_medium_residual"
+          }
+        },
+        "instruction_coverage": {
+          "completed": [
+            "用户要求：“找anomaly分析一下结果",
+            "”",
+            "冻结语义：对刚完成的 L4 local reward-model eval/scoring 结果进行 L4 anomaly analysis",
+            "目标是让三席 anomaly team 独立/交叉审查结果是否存在异常、反直觉、数据/指标/实现解释风险、workflow/policy caveat 对结论的影响，并给出可行动解释",
+            "不是重新跑训练、不是重新 generation、不是重新 reward scoring",
+            "默认只读取/解析现有结果 JSON、logs、manifests、必要源代码和文档",
+            "若必须执行轻量解析脚本来读取 JSON/计算汇总，可允许",
+            "不得启动 GPU 长进程、不得安装依赖、不得修改代码/文档、不得调用 API/LLM judge"
+          ],
+          "deferred": [
+            {
+              "item": "Representative manual refusal-correctness labeling",
+              "reason": "Not required by the bridge completion contract and would require a separate explicit analysis/rubric step; recommended as next validation."
+            },
+            {
+              "item": "Alternative reward model or API/LLM judge comparison",
+              "reason": "Out of scope and explicitly prohibited for this anomaly bridge."
+            },
+            {
+              "item": "Implementation of improved per-item metadata/CI reporting",
+              "reason": "Implementation is out of scope; recommended later l4_implement if desired."
+            }
+          ],
+          "blocked": [],
+          "escalated": []
+        },
+        "semantic_identity_resolution": {
+          "model_or_method_identity": {
+            "disposition": "resolved",
+            "value": "Fixed four-model comparison: base, base_with_stage2_context, OPD bs112 checkpoint, SafeDPO 5k checkpoint. Scoring method is local Skywork reward-model scoring only."
+          },
+          "checkpoint_identity": {
+            "disposition": "resolved",
+            "value": {
+              "base": "/data/LLM/Meta-Llama-3.1-8B",
+              "base_with_stage2_context": "/data/LLM/Meta-Llama-3.1-8B with STAGE2_GENERIC_CONTEXT, no adapter",
+              "OPD": "/data03/liang/mjy/safe_opd/checkpoints/llama31_s1dpo_opd5k_bs112_r20260507_retry_070014/stage2_final/",
+              "SafeDPO": "/data03/liang/mjy/safe_opd/checkpoints/safedpo_5k_from_general_dpo_20260506/safe_dpo_final/"
+            }
+          },
+          "dataset_identity": {
+            "disposition": "resolved",
+            "value": "Existing generation/scoring artifacts for HarmBench 400, XSTest 450, StrongREJECT 313, and Arena-Hard 500 prompts under the specified 20260508 run directories."
+          },
+          "prompt_or_template_identity": {
+            "disposition": "inherited",
+            "value": "Generation inherited current repo plain-text base-model prompting with STAGE2_GENERIC_CONTEXT for base_with_stage2_context. Reward scoring inherited Skywork reward-model chat-template formatting for prompt-response scoring."
+          },
+          "code_config_basis": {
+            "disposition": "resolved",
+            "value": [
+              "/data03/liang/mjy/safe_opd/src/evaluate_reward.py",
+              "/data03/liang/mjy/safe_opd/src/evaluate_arena.py",
+              "/data03/liang/mjy/safe_opd/src/config.py",
+              "/data03/liang/mjy/safe_opd/src/generate_contexts.py"
+            ]
+          },
+          "metric_or_objective_identity": {
+            "disposition": "resolved",
+            "value": "Raw local Skywork-Reward-V2-Llama-3.2-3B scalar reward logits aggregated by mean/median/std/min/max and Arena pairwise differences; not a direct safety classifier, refusal correctness metric, harmful-compliance metric, or API/LLM judge."
+          },
+          "inherited_defaults": {
+            "disposition": "inherited",
+            "value": "Current route defaults from project instructions: Meta-Llama-3.1-8B, local reward-model-only formal scoring, deprecated API/LLM judge blocked, no new training/generation/scoring in anomaly bridge."
+          }
+        },
+        "failure_reason": null,
+        "next_action_recommendation": "Proceed with a separate CPU-only analysis/reporting task if the user wants stronger conclusions: paired bootstrap CI, XSTest taxonomy-aware summaries, response equality/near-duplicate analysis, and small manual/rubric inspection of high-gap examples. No immediate rerun of generation or reward scoring is recommended based only on the anomaly evidence."
+      }
+    ],
+    "artifact_refs_preview": [
+      "/data03/liang/mjy/safe_opd/logs/runs/llama31_opd5k_bs112_vs_safedpo_generation_20260508__rid_l4_generation_only_20260508/reward_eval_results.json",
+      "/data03/liang/mjy/safe_opd/logs/runs/llama31_opd5k_bs112_vs_safedpo_generation_20260508__rid_l4_generation_only_20260508/per_item_reward_scores.json",
+      "/data03/liang/mjy/safe_opd/logs/runs/llama31_opd5k_bs112_vs_safedpo_generation_20260508__rid_l4_generation_only_20260508/reward_execution_manifest.json",
+      "/data03/liang/mjy/safe_opd/logs/runs/llama31_opd5k_bs112_vs_safedpo_generation_20260508__rid_l4_generation_only_20260508__arena/arena_reward_eval_results.json",
+      "/data03/liang/mjy/safe_opd/logs/runs/llama31_opd5k_bs112_vs_safedpo_generation_20260508__rid_l4_generation_only_20260508__arena/reward_execution_manifest.json",
+      "/data03/liang/mjy/safe_opd/logs/executor/reward_scoring_run_20260508T061955/",
+      "/data03/liang/mjy/safe_opd/src/evaluate_reward.py",
+      "/data03/liang/mjy/safe_opd/src/evaluate_arena.py"
+    ],
+    "evidence_summary": {
+      "packet_accept": "accepted; all required BridgePacket fields were present",
+      "team_create": "represented by dispatched teammate agents anomaly-analyst-a, anomaly-analyst-b, anomaly-analyst-c under binding team_25747e4b74b1",
+      "task_create": "represented by single anomaly-analysis task task_67b1862325e1",
+      "message_dispatch": "three Agent dispatches completed with packet-derived task, scope, tools, completion, and report instructions",
+      "team_wait_collect": "collected usable reports from all three anomaly analysts",
+      "task_complete_evaluation": "completion contract satisfied: a bridge-level report was synthesized and every instruction coverage item was completed or explicitly deferred",
+      "team_delete": "no persistent external team resources exposed to bridge-leader tool surface; cleanup_required=false",
+      "runtime_event_ids": "No concrete event_id values were exposed; binding IDs and agent IDs are recorded instead.",
+      "_omitted_keys": 4
+    },
+    "error_or_null": null,
+    "omitted": {
+      "reports": 0,
+      "artifact_refs": 2,
+      "full_evidence": true
+    }
+  },
+  "phase_exit_readiness": {
+    "current_phase": "l4_anomaly",
+    "exit_ready": true,
+    "blocking_event_ids": [],
+    "blocking_task_ids": [],
+    "blocking_bridge_window_ids": [],
+    "changed_recently": true
+  }
+}

@@ -1782,6 +1782,14 @@ def _validate_packet_policy_fields(packet: dict[str, Any], snapshot: dict[str, A
             reasons.append("bridge_packet_execute_log_manifest_contract_missing")
         if "log manifest path" not in set(report.get("required_evidence", [])):
             reasons.append("bridge_packet_execute_log_manifest_contract_missing")
+        if "manifest required fields checklist" not in set(report.get("required_evidence", [])):
+            reasons.append("bridge_packet_execute_log_manifest_contract_missing")
+        if "batchbasis" not in set(report.get("required_evidence", [])):
+            reasons.append("bridge_packet_execute_log_manifest_contract_missing")
+        if "gpu_id" not in set(report.get("required_evidence", [])):
+            reasons.append("bridge_packet_execute_log_manifest_contract_missing")
+        if "natural-language model dataset method semantics" not in set(report.get("required_evidence", [])):
+            reasons.append("bridge_packet_execute_log_manifest_contract_missing")
         if "artifact_manifests" not in set(report.get("required_sections", [])):
             reasons.append("bridge_packet_execute_log_manifest_contract_missing")
     if packet.get("approval_requirements") not in (None, []):
