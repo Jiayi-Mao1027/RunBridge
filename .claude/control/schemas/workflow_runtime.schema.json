@@ -56,6 +56,7 @@
       ],
       "properties": {
         "schema_version": {"type": "string"},
+        "policy_contract_ref": {"type": "object"},
         "binding": {"$ref": "#/definitions/BridgeWindowBinding"},
         "frozen_semantics": {"type": "object"},
         "frozen_scope": {"type": "object"},

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase_contracts.schema.json",
+  "title": "System-Owned Phase Contracts",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "workflow_name",
+    "default_bridge_actions",
+    "classification_taxonomy",
+    "semantic_resolution_contract",
+    "base_report_contract",
+    "base_completion_contract",
+    "phases"
+  ],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "workflow_name": {"type": "string"},
+    "tool_sets": {"type": "object"},
+    "default_bridge_actions": {"type": "array", "items": {"type": "string"}},
+    "default_forbidden_actions": {"type": "array", "items": {"type": "string"}},
+    "classification_taxonomy": {
+      "type": "object",
+      "required": ["common", "coverage", "semantic_disposition"],
+      "additionalProperties": {"type": "array", "items": {"type": "string"}}
+    },
+    "semantic_resolution_contract": {
+      "type": "object",
+      "required": ["required_identity_fields", "resolution_policy"],
+      "properties": {
+        "required_identity_fields": {"type": "array", "items": {"type": "string"}},
+        "resolution_policy": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "manifest_contracts": {
+      "type": "object",
+      "properties": {
+        "formal_log_manifest_required_fields": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "execution_policy": {"type": "object"},
+    "base_report_contract": {"type": "object"},
+    "base_completion_contract": {"type": "object"},
+    "phases": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["bridge_tools", "ownership_boundary", "teammates"],
+        "properties": {
+          "bridge_tools": {"type": "array", "items": {"type": "string"}},
+          "ownership_boundary": {
+            "type": "object",
+            "required": ["readable_scopes", "writable_scopes"],
+            "properties": {
+              "readable_scopes": {"type": "array", "items": {"type": "string"}},
+              "writable_scopes": {"type": "array", "items": {"type": "string"}}
+            }
+          },
+          "active_surface_policy": {"type": "array", "items": {"type": "string"}},
+          "timeout_policy": {"type": "object"},
+          "teammates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["teammate_name", "role", "allowed_tools", "responsibilities"],
+              "properties": {
+                "teammate_name": {"type": "string"},
+                "role": {"type": "string"},
+                "allowed_tools": {"type": "array", "items": {"type": "string"}},
+                "responsibilities": {"type": "array", "items": {"type": "string"}}
+              }
+            }
+          },
+          "assignment_instructions": {"type": "array", "items": {"type": "string"}},
+          "teammate_assignment_instructions": {"type": "object"},
+          "completion_contract_additions": {"type": "object"},
+          "report_contract_additions": {"type": "object"}
+        }
+      }
+    }
+  }
+}

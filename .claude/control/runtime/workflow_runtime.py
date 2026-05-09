@@ -65,6 +65,7 @@ TERMINAL_LIFECYCLE_STATUSES = {
     "bridge_window_partial_returned",
     "bridge_window_failed",
     "bridge_window_orphaned",
+    "bridge_window_interrupted",
     "paused_for_user_answer",
     "user_answer_received",
     "resume_same_l3_task",
@@ -80,45 +81,54 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
     "bridge_call_intended": {
         "pretooluse_allowed_by_main_leader": "bridge_call_prechecked",
         "pretooluse_denied_by_main_leader": "bridge_call_denied",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "bridge_call_prechecked": {
         "call_bridge_sdk_started": "bridge_call_started",
         "call_bridge_sdk_error": "bridge_call_failed",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "bridge_call_started": {
         "bridge_window_opened": "bridge_window_opened",
         "call_bridge_sdk_error": "bridge_call_failed",
         "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "bridge_window_opened": {
         "bridge_packet_accepted": "bridge_packet_accepted",
         "bridge_packet_rejected": "bridge_packet_rejected",
         "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "bridge_packet_rejected": {"bridge_result_returned": "bridge_window_returned"},
     "bridge_packet_accepted": {
         "team_create_started": "team_create_started",
         "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "team_create_started": {
         "team_create_succeeded": "team_create_completed",
         "team_create_failed": "team_create_failed",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "team_create_failed": {"bridge_result_returned": "bridge_window_failed"},
-    "team_create_completed": {"task_create_started": "task_create_started"},
+    "team_create_completed": {"task_create_started": "task_create_started", "bridge_call_interrupted": "bridge_window_interrupted"},
     "task_create_started": {
         "task_create_succeeded": "task_create_completed",
         "task_create_failed": "task_create_failed",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "task_create_failed": {"bridge_result_returned": "bridge_window_failed"},
     "task_create_completed": {
         "taskcreated_hook_accepted": "task_created_recorded",
         "taskcreated_hook_denied": "task_create_failed",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
-    "task_created_recorded": {"message_dispatch_started": "message_dispatch_started"},
+    "task_created_recorded": {"message_dispatch_started": "message_dispatch_started", "bridge_call_interrupted": "bridge_window_interrupted"},
     "message_dispatch_started": {
         "message_dispatch_succeeded": "message_dispatch_completed",
         "message_dispatch_failed": "message_dispatch_failed",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "message_dispatch_failed": {
         "message_dispatch_retry_started": "message_dispatch_started",
@@ -132,6 +142,7 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "partial_evidence_collected": "bridge_window_partial_returned",
         "user_clarification_required": "blocked_for_user_clarification",
         "blocked_for_user_clarification": "blocked_for_user_clarification",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "team_waiting": {
         "team_idle_waiting": "team_waiting",
@@ -143,6 +154,7 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "bridge_leader_fails_task": "task_failed",
         "task_failed_by_bridge_leader": "task_failed",
         "orphan_timeout_without_heartbeat": "bridge_window_orphaned",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "blocked_for_user_clarification": {
         "bridge_result_returned_with_user_clarification_request": "paused_for_user_answer",
@@ -155,10 +167,12 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "partial_evidence_collected": "bridge_window_partial_returned",
         "task_failed_by_bridge_leader": "task_failed",
         "bridge_result_returned": "bridge_window_partial_returned",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "task_completion_started": {
         "completion_contract_satisfied": "task_completion_completed",
         "completion_contract_rejected": "task_completion_rejected",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "task_completion_rejected": {
         "continue_waiting": "team_waiting",
@@ -167,13 +181,15 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "blocked_for_user_clarification": "blocked_for_user_clarification",
         "bridge_leader_fails_task": "task_failed",
         "bridge_result_returned": "bridge_window_failed",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
-    "task_completion_completed": {"team_delete_started": "team_delete_started"},
-    "task_failed": {"team_delete_started": "team_delete_started", "bridge_result_returned": "bridge_window_failed"},
-    "bridge_window_partial_returned": {"team_delete_started": "team_delete_started"},
+    "task_completion_completed": {"team_delete_started": "team_delete_started", "bridge_call_interrupted": "bridge_window_interrupted"},
+    "task_failed": {"team_delete_started": "team_delete_started", "bridge_result_returned": "bridge_window_failed", "bridge_call_interrupted": "bridge_window_interrupted"},
+    "bridge_window_partial_returned": {"team_delete_started": "team_delete_started", "bridge_call_interrupted": "bridge_window_interrupted"},
     "team_delete_started": {
         "team_delete_succeeded": "team_delete_completed",
         "team_delete_failed": "team_delete_failed",
+        "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "team_delete_completed": {
         "bridge_result_returned": "bridge_window_returned",
@@ -193,6 +209,7 @@ EVENT_TO_UPDATE_KIND = {
     "pretooluse_allowed_by_main_leader": "record_bridge_call_prechecked",
     "pretooluse_denied_by_main_leader": "record_bridge_call_denied",
     "call_bridge_sdk_error": "record_bridge_call_failed",
+    "bridge_call_interrupted": "persist_bridge_call_interrupted",
     "bridge_window_opened": "register_bridge_window_open",
     "bridge_packet_rejected": "persist_bridge_packet_rejected",
     "team_create_succeeded": "persist_team_created",
@@ -648,6 +665,7 @@ def notify(event: WorkflowEvent, snapshot: dict[str, Any], check_result: CheckRe
     trigger_items = {
         "pretooluse_denied_by_main_leader": ("blocking", "bridge_call_denied", _recommended_reroute_action(snapshot)),
         "call_bridge_sdk_error": ("error", "bridge_call_failed", "read_runtime_snapshot_and_decide_retry_or_report"),
+        "bridge_call_interrupted": ("warn", "bridge_window_interrupted", "treat_interrupted_bridge_as_closed_then_read_snapshot_before_dispatching_next_work"),
         "bridge_packet_rejected": ("error", "bridge_packet_rejected", "rebuild_packet_from_runtime_truth_or_report_blocked"),
         "team_create_failed": ("error", "team_create_failed", "retry_bridge_window_or_report_failure"),
         "task_create_failed": ("error", "task_create_failed", "delete_team_if_created_then_rebuild_task_packet"),
@@ -1760,6 +1778,7 @@ def _validate_packet_policy_fields(packet: dict[str, Any], snapshot: dict[str, A
     completion = packet.get("completion_contract") if isinstance(packet.get("completion_contract"), dict) else {}
     report = packet.get("report_contract") if isinstance(packet.get("report_contract"), dict) else {}
     task_spec = packet.get("task_spec") if isinstance(packet.get("task_spec"), dict) else {}
+    policy_ref = packet.get("policy_contract_ref") if isinstance(packet.get("policy_contract_ref"), dict) else {}
     if "report" not in set(completion.get("required_outputs", [])):
         reasons.append("bridge_packet_completion_contract_not_policy_owned")
     if not isinstance(completion.get("timeout_policy"), dict) or completion.get("timeout_policy", {}).get("timeout_action") != "ask_main_leader":
@@ -1777,6 +1796,15 @@ def _validate_packet_policy_fields(packet: dict[str, Any], snapshot: dict[str, A
     semantic_contract = task_spec.get("semantic_resolution_contract")
     if not isinstance(semantic_contract, dict) or not semantic_contract.get("required_identity_fields"):
         reasons.append("bridge_packet_missing_semantic_resolution_contract")
+    if policy_ref.get("source") == "control/policy/phase_contracts.json":
+        taxonomy = report.get("classification_taxonomy")
+        if not isinstance(taxonomy, dict):
+            reasons.append("bridge_packet_missing_classification_taxonomy")
+        else:
+            for key in ("common", "coverage", "semantic_disposition"):
+                if not isinstance(taxonomy.get(key), list) or not taxonomy.get(key):
+                    reasons.append("bridge_packet_missing_classification_taxonomy")
+                    break
     if str(packet.get("target_phase")) == "l4_execute":
         if "log_manifest" not in set(completion.get("required_artifacts", [])):
             reasons.append("bridge_packet_execute_log_manifest_contract_missing")
@@ -1792,6 +1820,13 @@ def _validate_packet_policy_fields(packet: dict[str, Any], snapshot: dict[str, A
             reasons.append("bridge_packet_execute_log_manifest_contract_missing")
         if "artifact_manifests" not in set(report.get("required_sections", [])):
             reasons.append("bridge_packet_execute_log_manifest_contract_missing")
+        if policy_ref.get("source") == "control/policy/phase_contracts.json":
+            manifest_fields = completion.get("manifest_required_fields")
+            if not isinstance(manifest_fields, list) or not {"run_id", "bridge_window_id", "task_id", "command", "cwd", "batchbasis", "gpu_id_or_device_ids", "formal_memory_observed", "terminal_status"}.issubset({str(item) for item in manifest_fields}):
+                reasons.append("bridge_packet_execute_manifest_schema_missing")
+            execution_policy = completion.get("execution_policy")
+            if not isinstance(execution_policy, dict) or execution_policy.get("formal_conda_env") != "mjy":
+                reasons.append("bridge_packet_execute_policy_missing")
     if packet.get("approval_requirements") not in (None, []):
         reasons.append("bridge_packet_approval_requirements_not_runtime_owned")
     if packet.get("expires_at") is not None:

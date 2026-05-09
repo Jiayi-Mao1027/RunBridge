@@ -93,7 +93,7 @@ PHASE_TEAM_DEFAULTS = {
         ("rungater", "implementation_gate", READ_CHECK_TOOLS, "judge post-implementation readiness and recommend proceed, repair, reroute, or stop"),
     ],
     "l4_execute": [
-        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow through conda env mjy, adapt batch size and memory-related settings to actual GPU capacity, force formal GPU runs above 90% of selected GPU memory when applicable, and record exact execution evidence"),
+        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow through conda env mjy, adapt batch size and memory-related settings to actual GPU capacity, force formal GPU runs above 70GB on typical 80GB GPUs or above 90% of selected GPU memory otherwise when applicable, and record exact execution evidence"),
         ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, conda env use, GPU memory utilization, outcome classification, and recommend anomaly routing when needed"),
     ],
     "l4_anomaly": [
@@ -140,13 +140,21 @@ def decide_next_bridge_packet(
     target_phase: str | None = None,
 ) -> dict[str, Any]:
     snapshot = read_runtime_snapshot(control_root, run_id, runtime_runs_root=runtime_runs_root)
+    phase_contracts = load_phase_contracts(control_root)
     return build_bridge_instruction_packet_for_this_invoke(
         snapshot=snapshot,
         main_session_id=main_session_id,
         user_instruction=user_instruction,
         task_spec=task_spec,
         target_phase=target_phase,
+        phase_contracts=phase_contracts,
     )
+
+
+def load_phase_contracts(control_root: str | Path) -> dict[str, Any]:
+    path = Path(control_root).expanduser().resolve() / "policy" / "phase_contracts.json"
+    payload = load_json_file(path, default={}) or {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def build_bridge_instruction_packet_for_this_invoke(
@@ -156,6 +164,7 @@ def build_bridge_instruction_packet_for_this_invoke(
     user_instruction: str | None = None,
     task_spec: dict[str, Any] | None = None,
     target_phase: str | None = None,
+    phase_contracts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if snapshot.get("integrity", {}).get("has_hard_stop"):
         raise ValueError("cannot build bridge packet while hard_stop is active")
@@ -173,18 +182,20 @@ def build_bridge_instruction_packet_for_this_invoke(
 
     resolved_target_phase = _resolve_target_phase(snapshot, target_phase)
     resolved_route = _resolve_phase_route(snapshot, resolved_target_phase)
-    resolved_completion = _default_completion_contract(resolved_target_phase)
-    resolved_report = _default_report_contract(resolved_target_phase)
-    bridge_allowed_tools = _default_bridge_tools(resolved_target_phase)
-    resolved_team = _normalize_team_spec(target_phase=resolved_target_phase)
+    contracts = phase_contracts if isinstance(phase_contracts, dict) else {}
+    resolved_completion = _default_completion_contract(resolved_target_phase, contracts)
+    resolved_report = _default_report_contract(resolved_target_phase, contracts)
+    bridge_allowed_tools = _default_bridge_tools(resolved_target_phase, contracts)
+    resolved_team = _normalize_team_spec(target_phase=resolved_target_phase, phase_contracts=contracts)
     resolved_task = _normalize_task_spec(
         task_spec,
         user_instruction=user_instruction,
         target_phase=resolved_target_phase,
         completion_contract=resolved_completion,
         report_contract=resolved_report,
+        phase_contracts=contracts,
     )
-    mapping = _build_task_team_mapping(resolved_task, resolved_team)
+    mapping = _build_task_team_mapping(resolved_task, resolved_team, phase_contracts=contracts)
 
     binding = {
         "run_id": run_id,
@@ -205,6 +216,7 @@ def build_bridge_instruction_packet_for_this_invoke(
 
     packet = {
         "schema_version": PACKET_SCHEMA_VERSION,
+        "policy_contract_ref": _policy_contract_ref(contracts),
         "binding": binding,
         "frozen_semantics": deepcopy(snapshot.get("semantic", {}).get("frozen") or {}),
         "frozen_scope": deepcopy(snapshot.get("scope", {}).get("frozen") or {}),
@@ -215,7 +227,7 @@ def build_bridge_instruction_packet_for_this_invoke(
         "task_team_mapping": mapping,
         "completion_contract": resolved_completion,
         "report_contract": resolved_report,
-        "allowed_actions": list(DEFAULT_BRIDGE_ACTIONS),
+        "allowed_actions": _contracts_list(contracts, "default_bridge_actions") or list(DEFAULT_BRIDGE_ACTIONS),
         "allowed_tools": list(bridge_allowed_tools),
         "approval_requirements": [],
         "created_at": now,
@@ -247,13 +259,10 @@ def _resolve_phase_route(snapshot: dict[str, Any], target_phase: str) -> list[st
 def _normalize_team_spec(
     *,
     target_phase: str,
+    phase_contracts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if target_phase in PHASE_TEAM_DEFAULTS:
-        teammates = _default_teammate_specs(target_phase)
-        ownership = _default_ownership_boundary(target_phase)
-    else:
-        teammates = _default_teammate_specs(target_phase)
-        ownership = _default_ownership_boundary(target_phase)
+    teammates = _default_teammate_specs(target_phase, phase_contracts)
+    ownership = _default_ownership_boundary(target_phase, phase_contracts)
     return {
         "team_id_or_null": None,
         "team_name": f"bridge-{target_phase}-team",
@@ -262,22 +271,53 @@ def _normalize_team_spec(
     }
 
 
-def _default_bridge_tools(target_phase: str) -> list[str]:
+def _default_bridge_tools(target_phase: str, phase_contracts: dict[str, Any] | None = None) -> list[str]:
+    config = _phase_config(phase_contracts, target_phase)
+    configured = config.get("bridge_tools") if isinstance(config, dict) else None
+    if isinstance(configured, list) and configured:
+        return [str(item) for item in configured if str(item)]
     return list(PHASE_BRIDGE_TOOLS.get(target_phase, DEFAULT_BRIDGE_LEADER_TOOLS))
 
 
-def _default_ownership_boundary(target_phase: str) -> dict[str, Any]:
-    scopes = PHASE_OWNERSHIP_DEFAULTS.get(target_phase, {"readable_scopes": ["."], "writable_scopes": []})
+def _default_ownership_boundary(target_phase: str, phase_contracts: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = _phase_config(phase_contracts, target_phase)
+    configured = config.get("ownership_boundary") if isinstance(config, dict) else None
+    scopes = configured if isinstance(configured, dict) else PHASE_OWNERSHIP_DEFAULTS.get(target_phase, {"readable_scopes": ["."], "writable_scopes": []})
+    active_surface = config.get("active_surface_policy") if isinstance(config, dict) else None
+    forbidden = _contracts_list(phase_contracts, "default_forbidden_actions") or list(DEFAULT_FORBIDDEN_ACTIONS)
     return {
-        "readable_scopes": list(scopes["readable_scopes"]),
-        "writable_scopes": list(scopes["writable_scopes"]),
+        "readable_scopes": list(scopes.get("readable_scopes", ["."])),
+        "writable_scopes": list(scopes.get("writable_scopes", [])),
         "process_ownership_rules": ["only manage processes launched inside this bridge window"],
-        "forbidden_actions": list(DEFAULT_FORBIDDEN_ACTIONS),
-        "active_surface_policy": list(PHASE_ACTIVE_SURFACE_POLICIES.get(target_phase, [])),
+        "forbidden_actions": forbidden,
+        "active_surface_policy": list(active_surface if isinstance(active_surface, list) else PHASE_ACTIVE_SURFACE_POLICIES.get(target_phase, [])),
     }
 
 
-def _default_teammate_specs(target_phase: str) -> list[dict[str, Any]]:
+def _default_teammate_specs(target_phase: str, phase_contracts: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    config = _phase_config(phase_contracts, target_phase)
+    configured = config.get("teammates") if isinstance(config, dict) else None
+    if isinstance(configured, list) and configured:
+        specs = []
+        for teammate in configured:
+            if not isinstance(teammate, dict):
+                continue
+            name = str(teammate.get("teammate_name") or "").strip()
+            if not name:
+                continue
+            tools = teammate.get("allowed_tools") if isinstance(teammate.get("allowed_tools"), list) else []
+            responsibilities = teammate.get("responsibilities") if isinstance(teammate.get("responsibilities"), list) else []
+            specs.append(
+                {
+                    "teammate_id_or_null": teammate.get("teammate_id_or_null"),
+                    "teammate_name": name,
+                    "role": str(teammate.get("role") or "bridge teammate"),
+                    "allowed_tools": [str(item) for item in tools if str(item)],
+                    "responsibilities": [str(item) for item in responsibilities if str(item)],
+                }
+            )
+        if specs:
+            return specs
     defaults = PHASE_TEAM_DEFAULTS.get(target_phase)
     if not defaults:
         return [
@@ -311,6 +351,7 @@ def _normalize_task_spec(
     target_phase: str,
     completion_contract: dict[str, Any],
     report_contract: dict[str, Any],
+    phase_contracts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = deepcopy(task_spec or {})
     original_instruction = str(
@@ -327,7 +368,7 @@ def _normalize_task_spec(
         "task_description": description,
         "original_user_instruction": original_instruction,
         "instruction_coverage_checklist": _derive_instruction_coverage_checklist(source, original_instruction, description),
-        "semantic_resolution_contract": _semantic_resolution_contract(source, original_instruction, target_phase),
+        "semantic_resolution_contract": _semantic_resolution_contract(source, original_instruction, target_phase, phase_contracts),
         "current_user_intent_context": _current_user_intent_context(source, original_instruction, description),
         "preserved_task_context": _preserved_task_context(source),
         "task_kind": str(source.get("task_kind") or "bridge_window_task"),
@@ -338,7 +379,7 @@ def _normalize_task_spec(
     return normalized
 
 
-def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any]) -> dict[str, Any]:
+def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any], *, phase_contracts: dict[str, Any] | None = None) -> dict[str, Any]:
     assignments = []
     ownership = team_spec.get("ownership_boundary", {}) if isinstance(team_spec.get("ownership_boundary"), dict) else {}
     for teammate in team_spec.get("teammate_specs", []):
@@ -370,7 +411,7 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
                         f"Active surface policy: {_json_list(ownership.get('active_surface_policy'))}",
                         f"Completion contract: {_json_dict(task_spec.get('completion_contract'))}",
                         f"Report contract: {_json_dict(task_spec.get('report_contract'))}",
-                        *_phase_assignment_instructions(str(task_spec.get("target_phase") or ""), name),
+                        *_phase_assignment_instructions(str(task_spec.get("target_phase") or ""), name, phase_contracts),
                         "Do not read .claude/runtime_state/bridge_prompts for task context; that bridge prompt artifact is for audit only.",
                         "When using Read, omit optional parameters you do not need. Never pass pages as an empty string.",
                     ]
@@ -385,13 +426,38 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
     }
 
 
-def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> list[str]:
+def _phase_assignment_instructions(target_phase: str, teammate_name: str, phase_contracts: dict[str, Any] | None = None) -> list[str]:
+    config = _phase_config(phase_contracts, target_phase)
+    if isinstance(config, dict) and config:
+        result = []
+        base = config.get("assignment_instructions")
+        if isinstance(base, list):
+            result.extend(str(item) for item in base if str(item))
+        teammate_rules = config.get("teammate_assignment_instructions")
+        if isinstance(teammate_rules, dict):
+            specific = teammate_rules.get(teammate_name)
+            if isinstance(specific, list):
+                result.extend(str(item) for item in specific if str(item))
+        if target_phase == "l4_execute":
+            manifest_fields = (
+                phase_contracts.get("manifest_contracts", {}).get("formal_log_manifest_required_fields", [])
+                if isinstance(phase_contracts, dict) and isinstance(phase_contracts.get("manifest_contracts"), dict)
+                else []
+            )
+            execution_policy = phase_contracts.get("execution_policy", {}) if isinstance(phase_contracts, dict) else {}
+            if manifest_fields:
+                result.append(f"Formal log manifest required fields: {_json_list(manifest_fields)}")
+            if isinstance(execution_policy, dict) and execution_policy:
+                result.append(f"Execution policy: {_json_dict(execution_policy)}")
+        if result:
+            return result
     if target_phase == "l2_advisory":
         return [
             "L2 three-seat review rule: treat chiefmate-a, chiefmate-b, and chiefmate-c as independent peers. Inspect peer conclusions when available, but do not accept them passively; challenge unsupported assumptions, missing alternatives, and weak evidence.",
             "L2 factual confidence loop: ask, 'Do I have factual 100% confidence in this strategy?' If not, find every plausible flaw, missing assumption, brittle dependency, or evidence gap; propose appropriate repairs; then re-check the repaired strategy. Repeat until no material flaw remains or the remaining uncertainty is explicitly bounded with evidence.",
             "L2 research rule: when a claim depends on current facts, external tool/library behavior, established methodology, or empirical support, use WebSearch/WebFetch where available. Prefer primary docs and directly relevant sources over secondary summaries, and distinguish sourced facts from inference.",
             "L2 convergence rule: agreement across peers is not enough. State what would falsify the strategy, what peer claim you would reject or downgrade, and what evidence would change your recommendation.",
+            "L2 pseudocode rule: if your final advisory report proposes any new major technical plan or substantial architecture/algorithm change, include a pseudocode flow that shows the proposed control/data path. If no such new plan is proposed, state `pseudocode: not_applicable` with the reason.",
         ]
     if target_phase == "l3_bridge":
         if teammate_name == "curator":
@@ -440,12 +506,13 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
             "Long-task ETA rule: before launching any long-running command, estimate expected wall-clock runtime as a range, state the basis for the estimate, and include that estimate in the execution report.",
             "Smoke-shape rule: before formal execution, use bounded smoke evidence to choose formal parameters such as per-device batch size, microbatch size, gradient accumulation, sequence length, precision, and effective batch size. Record why formal settings differ from smoke settings.",
             "Batch/memory adaptation rule: do not copy user- or upstream-provided batch size, microbatch, gradient accumulation, sequence length, precision, or memory-saving settings mechanically when actual GPU memory makes them unsuitable. Treat those values as intent and constraints; adapt them inside the frozen semantic boundary to reach the formal GPU utilization target, preserving effective-batch semantics when possible, and record requested value, observed GPU capacity, adjusted value, and reason.",
+            "Multi-stage memory rule: if one execute task or session contains multiple formal stages such as train, value, generate, evaluate, or score, each formal stage must independently satisfy the batch/memory adaptation rule. Do not let an earlier stage's successful settings, smoke shape, or low-memory fallback silently carry into a later stage; rerun or justify stage-specific memory evidence and record the formal target result per stage.",
             "Log manifest rule: every generated formal log folder must contain a manifest file inside that folder, analogous to checkpoint manifests. Do not rely on folder/file names alone. The manifest must record run ID, bridge window ID, task ID, stage name, command, cwd, environment, conda env evidence, checkpoint/config/prompt paths, batchbasis, requested/upstream batch settings, smoke-derived basis, final per-device batch, microbatch, gradient accumulation, sequence length, precision, effective batch size, adjustment reason, gpu_id/device IDs, selected GPU total/free memory, competing process summary when relevant, smoke memory observed when smoke ran, warmup memory observed when warmup ran, formal observed memory, process refs, log files, expected outputs/checkpoints, status, timestamps, and reuse/dependency notes.",
             "Natural-language manifest semantics rule: the manifest must include human-meaningful semantics in addition to concrete paths and commands: model or model family/name, checkpoint semantic label if different from the path, dataset name/split/source, dataset row/example count when known, method/objective such as SFT/DPO/OPD, early-stop behavior such as OPD early stop when relevant, metric/objective basis, prompt/template meaning, and inherited defaults. If a field is unknown or not applicable, write unknown/not_applicable with the reason rather than omitting it.",
             "If runtime cannot be estimated, state that explicitly with the missing information and still record command, start time, owned process refs, logs, and expected outputs.",
             "L4 execute terminality rule: run formal long jobs in a way the bridge can wait on or poll until terminal completion. Do not return a final or partial bridge report while an owned process is still running; emit progress evidence and keep waiting.",
-            "Formal GPU memory rule: unless the task is explicitly smoke/dry-run/conservative, configure formal GPU execution to exceed 90% of the selected GPU's total memory after warmup. On a typical 80GB GPU this usually means observed usage above 70GB.",
-            "If >90% memory use cannot be reached safely, stop or classify the run as blocked/deviated with evidence; do not silently accept a low-memory formal run.",
+            "Formal GPU memory rule: unless the task is explicitly smoke/dry-run/conservative, configure formal GPU execution so observed memory after warmup exceeds 70GB on typical 80GB GPUs, or exceeds 90% of selected GPU total memory on other GPU sizes.",
+            "If the applicable formal memory target (>70GB on an 80GB GPU, otherwise >90%) cannot be reached safely, stop or classify the run as blocked/deviated with evidence; do not silently accept a low-memory formal run.",
         ]
     if target_phase == "l4_execute" and teammate_name == "postrun":
         return [
@@ -454,7 +521,8 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
             "Audit ETA rule: compare actual runtime against the executor's estimate when available, and flag material deviation as execution evidence rather than treating it as chat context.",
             "Postrun must run after the formal execution process has reached a terminal state or produced terminal failure evidence; do not audit a still-running process as complete.",
             "Environment audit rule: verify formal execution used conda env mjy and did not use venv. Missing or contradictory environment evidence is an execution deviation.",
-            "GPU memory audit rule: for formal GPU execution, verify observed memory exceeded 90% of selected GPU total memory after warmup; for typical 80GB GPUs, usage should usually exceed 70GB. Lower usage requires explicit smoke/conservative approval or hard resource evidence.",
+            "GPU memory audit rule: for formal GPU execution, verify observed memory after warmup exceeded 70GB on typical 80GB GPUs, or exceeded 90% of selected GPU total memory on other GPU sizes. Lower usage requires explicit smoke/conservative approval or hard resource evidence.",
+            "Multi-stage memory audit rule: when the task contains multiple formal stages such as train then value/evaluate/score, audit GPU memory target satisfaction separately for each stage. A good train-stage memory record does not prove a later value/eval stage satisfied the target.",
         ]
     if target_phase == "l4_anomaly":
         return [
@@ -468,6 +536,42 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str) -> lis
     return []
 
 
+def _phase_config(phase_contracts: dict[str, Any] | None, target_phase: str) -> dict[str, Any]:
+    if not isinstance(phase_contracts, dict):
+        return {}
+    phases = phase_contracts.get("phases")
+    if not isinstance(phases, dict):
+        return {}
+    config = phases.get(str(target_phase))
+    return config if isinstance(config, dict) else {}
+
+
+def _policy_contract_ref(phase_contracts: dict[str, Any]) -> dict[str, Any]:
+    if not phase_contracts:
+        return {"source": "main_leader_builtin_defaults", "schema_version": None}
+    return {
+        "source": "control/policy/phase_contracts.json",
+        "schema_version": phase_contracts.get("schema_version"),
+        "workflow_name": phase_contracts.get("workflow_name"),
+    }
+
+
+def _contracts_list(phase_contracts: dict[str, Any] | None, key: str) -> list[str]:
+    if not isinstance(phase_contracts, dict):
+        return []
+    value = phase_contracts.get(key)
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item)]
+
+
+def _extend_unique(target: dict[str, Any], key: str, values: Any) -> None:
+    if not isinstance(values, list):
+        return
+    existing = [str(item) for item in target.get(key, []) if str(item)]
+    target[key] = _dedupe_nonempty([*existing, *[str(item) for item in values if str(item)]])
+
+
 def _json_list(value: Any) -> str:
     items = value if isinstance(value, list) else []
     return json.dumps([str(item) for item in items], ensure_ascii=False, default=str)
@@ -478,52 +582,99 @@ def _json_dict(value: Any) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
-def _default_completion_contract(target_phase: str | None = None) -> dict[str, Any]:
-    timeout_policy = deepcopy(PHASE_TIMEOUT_POLICY.get(str(target_phase or ""), DEFAULT_TIMEOUT_POLICY))
-    contract = {
-        "required_outputs": ["report"],
-        "required_artifacts": [],
-        "validation_requirements": [],
-        "success_criteria": [
-            "bridge leader collected a report from the team",
-            "every instruction coverage checklist item is completed, deferred with reason, blocked, or escalated",
-        ],
-        "allowed_partial_result": True,
-        "timeout_policy": timeout_policy,
-    }
-    if str(target_phase or "") == "l4_execute":
+def _default_completion_contract(target_phase: str | None = None, phase_contracts: dict[str, Any] | None = None) -> dict[str, Any]:
+    contract = deepcopy(phase_contracts.get("base_completion_contract")) if isinstance(phase_contracts, dict) and isinstance(phase_contracts.get("base_completion_contract"), dict) else {}
+    if not contract:
+        contract = {
+            "required_outputs": ["report"],
+            "required_artifacts": [],
+            "validation_requirements": [],
+            "success_criteria": [
+                "bridge leader collected a report from the team",
+                "every instruction coverage checklist item is completed, deferred with reason, blocked, or escalated",
+            ],
+            "allowed_partial_result": True,
+            "timeout_policy": deepcopy(DEFAULT_TIMEOUT_POLICY),
+        }
+    config = _phase_config(phase_contracts, str(target_phase or ""))
+    timeout_policy = config.get("timeout_policy") if isinstance(config, dict) else None
+    if isinstance(timeout_policy, dict):
+        contract["timeout_policy"] = deepcopy(timeout_policy)
+    elif str(target_phase or "") in PHASE_TIMEOUT_POLICY:
+        contract["timeout_policy"] = deepcopy(PHASE_TIMEOUT_POLICY[str(target_phase or "")])
+    else:
+        contract.setdefault("timeout_policy", deepcopy(DEFAULT_TIMEOUT_POLICY))
+    additions = config.get("completion_contract_additions") if isinstance(config, dict) else None
+    if isinstance(additions, dict):
+        _extend_unique(contract, "required_artifacts", additions.get("required_artifacts"))
+        _extend_unique(contract, "validation_requirements", additions.get("validation_requirements"))
+        _extend_unique(contract, "success_criteria", additions.get("success_criteria"))
+    elif str(target_phase or "") == "l4_execute":
         contract["required_artifacts"] = ["log_manifest"]
         contract["validation_requirements"] = [
             "generated formal log folders include internal manifests",
             "log manifests include required identity command cwd batchbasis gpu memory and semantic fields",
         ]
         contract["success_criteria"].append("formal execution log folders are not identified by filename alone; each generated log folder has an internal manifest with identity, command, cwd, batchbasis, GPU/memory, and natural-language semantic fields")
+    if str(target_phase or "") == "l4_execute" and isinstance(phase_contracts, dict):
+        manifest_contracts = phase_contracts.get("manifest_contracts")
+        if isinstance(manifest_contracts, dict) and isinstance(manifest_contracts.get("formal_log_manifest_required_fields"), list):
+            contract["manifest_required_fields"] = [str(item) for item in manifest_contracts["formal_log_manifest_required_fields"] if str(item)]
+        execution_policy = phase_contracts.get("execution_policy")
+        if isinstance(execution_policy, dict) and execution_policy:
+            contract["execution_policy"] = deepcopy(execution_policy)
     return contract
 
 
-def _default_report_contract(target_phase: str | None = None) -> dict[str, Any]:
-    contract = {
-        "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution"],
-        "required_evidence": ["runtime event ids", "instruction coverage disposition", "semantic identity resolution"],
-        "artifact_reporting_format": "list",
-        "include_failure_reason": True,
-        "include_next_action_recommendation": True,
-    }
-    if str(target_phase or "") == "l4_execute":
-        contract["required_sections"].append("artifact_manifests")
-        contract["required_evidence"].extend([
-            "log manifest path",
-            "formal execution parameter manifest",
-            "manifest required fields checklist",
-            "batchbasis",
-            "gpu_id",
-            "smoke memory observed when smoke ran",
-            "warmup memory observed when warmup ran",
-            "natural-language model dataset method semantics",
-        ])
-    if str(target_phase or "") == "l3_bridge":
-        contract["required_sections"].append("current_user_intent_context")
-        contract["required_evidence"].append("current user intent confirmed refined superseded blocked or escalated with reason")
+def _default_report_contract(target_phase: str | None = None, phase_contracts: dict[str, Any] | None = None) -> dict[str, Any]:
+    contract = deepcopy(phase_contracts.get("base_report_contract")) if isinstance(phase_contracts, dict) and isinstance(phase_contracts.get("base_report_contract"), dict) else {}
+    if not contract:
+        contract = {
+            "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution"],
+            "required_evidence": ["runtime event ids", "instruction coverage disposition", "semantic identity resolution"],
+            "artifact_reporting_format": "list",
+            "include_failure_reason": True,
+            "include_next_action_recommendation": True,
+        }
+    taxonomy = phase_contracts.get("classification_taxonomy") if isinstance(phase_contracts, dict) else {}
+    if isinstance(taxonomy, dict) and taxonomy:
+        contract.setdefault("classification_taxonomy", deepcopy(taxonomy))
+    config = _phase_config(phase_contracts, str(target_phase or ""))
+    additions = config.get("report_contract_additions") if isinstance(config, dict) else None
+    if isinstance(additions, dict):
+        _extend_unique(contract, "required_sections", additions.get("required_sections"))
+        _extend_unique(contract, "required_evidence", additions.get("required_evidence"))
+    else:
+        if str(target_phase or "") == "l4_execute":
+            contract["required_sections"].append("artifact_manifests")
+            contract["required_evidence"].extend([
+                "log manifest path",
+                "formal execution parameter manifest",
+                "manifest required fields checklist",
+                "batchbasis",
+                "gpu_id",
+                "smoke memory observed when smoke ran",
+                "warmup memory observed when warmup ran",
+                "natural-language model dataset method semantics",
+            ])
+        if str(target_phase or "") == "l3_bridge":
+            contract["required_sections"].append("current_user_intent_context")
+            contract["required_evidence"].append("current user intent confirmed refined superseded blocked or escalated with reason")
+        if str(target_phase or "") == "l2_advisory":
+            contract["required_sections"].append("major_technical_plan_pseudocode")
+            contract["required_evidence"].append("pseudocode flow for each new major technical plan or explicit not_applicable reason")
+    contract["required_sections"] = _dedupe_nonempty([str(item) for item in contract.get("required_sections", [])])
+    contract["required_evidence"] = _dedupe_nonempty([str(item) for item in contract.get("required_evidence", [])])
+    if str(target_phase or "") == "l4_execute" and isinstance(phase_contracts, dict):
+        manifest_fields = []
+        manifest_contracts = phase_contracts.get("manifest_contracts")
+        if isinstance(manifest_contracts, dict) and isinstance(manifest_contracts.get("formal_log_manifest_required_fields"), list):
+            manifest_fields = [str(item) for item in manifest_contracts["formal_log_manifest_required_fields"] if str(item)]
+        if manifest_fields:
+            contract.setdefault("manifest_required_fields", manifest_fields)
+        execution_policy = phase_contracts.get("execution_policy")
+        if isinstance(execution_policy, dict) and execution_policy:
+            contract.setdefault("execution_policy", deepcopy(execution_policy))
     return contract
 
 
@@ -551,13 +702,14 @@ def _derive_instruction_coverage_checklist(source: dict[str, Any], original_inst
     return _dedupe_nonempty(items) or [str(description)]
 
 
-def _semantic_resolution_contract(source: dict[str, Any], original_instruction: str, target_phase: str) -> dict[str, Any]:
+def _semantic_resolution_contract(source: dict[str, Any], original_instruction: str, target_phase: str, phase_contracts: dict[str, Any] | None = None) -> dict[str, Any]:
     supplied = source.get("semantic_resolution_contract")
     if isinstance(supplied, dict):
         contract = deepcopy(supplied)
     else:
         contract = {}
-    required_fields = [
+    configured = phase_contracts.get("semantic_resolution_contract") if isinstance(phase_contracts, dict) else {}
+    required_fields = configured.get("required_identity_fields") if isinstance(configured, dict) and isinstance(configured.get("required_identity_fields"), list) else [
         "model_or_method_identity",
         "checkpoint_identity",
         "dataset_identity",
@@ -571,7 +723,7 @@ def _semantic_resolution_contract(source: dict[str, Any], original_instruction: 
     contract.setdefault("target_phase", target_phase)
     contract.setdefault(
         "resolution_policy",
-        [
+        configured.get("resolution_policy") if isinstance(configured, dict) and isinstance(configured.get("resolution_policy"), list) else [
             "actively resolve identities from the frozen instruction and current repository state",
             "if the user did not request a change, inherit the current active dataset/prompt/config basis and say where it came from",
             "for model or method comparisons, name the concrete checkpoints or checkpoint-selection rule for each side",
@@ -579,9 +731,11 @@ def _semantic_resolution_contract(source: dict[str, Any], original_instruction: 
             "unknown identity fields must be marked unknown, blocked, or escalated with a concrete reason",
         ],
     )
+    taxonomy = phase_contracts.get("classification_taxonomy") if isinstance(phase_contracts, dict) else {}
+    dispositions = taxonomy.get("semantic_disposition") if isinstance(taxonomy, dict) else None
     contract.setdefault(
         "report_disposition_values",
-        ["resolved", "inherited", "unknown", "blocked", "escalated", "not_applicable"],
+        dispositions if isinstance(dispositions, list) and dispositions else ["resolved", "inherited", "unknown", "blocked", "escalated", "not_applicable"],
     )
     return contract
 

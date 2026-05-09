@@ -74,11 +74,12 @@ Control truth priority:
 2. `.claude/control/policy/lifecycle_transition_table.json`
 3. `.claude/control/policy/phase_graph.json`
 4. `.claude/control/policy/approval_matrix.json`
-5. `.claude/control/policy/reconcile_rules.json`
-6. `.claude/control/schemas/workflow_runtime.schema.json`
-7. `.claude/hooks/*.py`
-8. project-level workflow/semantic documents
-9. conversation text
+5. `.claude/control/policy/phase_contracts.json`
+6. `.claude/control/policy/reconcile_rules.json`
+7. `.claude/control/schemas/workflow_runtime.schema.json`
+8. `.claude/hooks/*.py`
+9. project-level workflow/semantic documents
+10. conversation text
 
 Conversation text may explain intent. It is not execution truth.
 
@@ -114,6 +115,7 @@ Each `BridgePacket` is rebuilt for one bridge invocation only.
 
 It must include:
 
+- `policy_contract_ref`
 - `binding`
 - `frozen_semantics`
 - `frozen_scope`
@@ -129,6 +131,8 @@ It must include:
 - `approval_requirements`
 
 One bridge window binds exactly one team and one task. The task may have multiple teammate assignments, but the packet must not describe multiple independent tasks.
+
+Phase/team/tool/report contracts are system-owned in `.claude/control/policy/phase_contracts.json`. Agent prompts may explain role behavior, but packet construction, teammate mapping, allowed tools, semantic-resolution fields, classification taxonomy, execution policy, and formal log manifest required fields should come from that policy file rather than duplicated prose in role prompts.
 
 The task spec must preserve the full user-facing intent, not only a shortened description. Complex instructions should be carried as `original_user_instruction`, `instruction_coverage_checklist`, `current_user_intent_context`, and preserved context fields. Downstream assignments must require every checklist item to be completed, explicitly deferred with a concrete reason, or escalated; reports must include the same coverage disposition. This prevents main-leader from executing only the first or easiest half of a compound request.
 
@@ -220,7 +224,11 @@ For long-running execution work, especially L4 execution/training, the execution
 
 For L4 execute, the intended contract is stronger: if the executor launches an owned long-running process, the bridge window must remain open until the process reaches a terminal state and postrun has audited terminal logs/artifacts. `TeamIdle` is waiting/progress evidence, not permission to delete the team or return a partial bridge result while the owned process is still running. The execute timeout policy is sized for long training runs and should not use the short 900 second bridge-window default.
 
-L4 execute environment and GPU policy are strict. Formal execution commands must run under conda env `mjy`, preferably via `conda run -n mjy ...` or an explicitly recorded equivalent `conda activate mjy` shell context. Do not use `venv`, `.venv`, `virtualenv`, or ad hoc Python environments for formal execute. For formal GPU training or throughput-sensitive runs, unless the user explicitly requested smoke/dry-run/conservative execution, executor must configure the run to exceed 90% of selected GPU total memory after warmup; on typical 80GB GPUs this usually means observed usage above 70GB. Lower formal-run utilization requires explicit conservative approval or hard blocking evidence and must be surfaced as a deviation, not treated as success.
+Manual bridge interrupts are terminal runtime facts, not durable open windows. If a user interrupts a bridge invocation, record `bridge_call_interrupted` and treat `bridge_window_interrupted` as closed for subsequent routing after reading the fresh runtime snapshot.
+
+L4 execute environment and GPU policy are strict. Formal execution commands must run under conda env `mjy`, preferably via `conda run -n mjy ...` or an explicitly recorded equivalent `conda activate mjy` shell context. Do not use `venv`, `.venv`, `virtualenv`, or ad hoc Python environments for formal execute. For formal GPU training or throughput-sensitive runs, unless the user explicitly requested smoke/dry-run/conservative execution, executor must configure the run to exceed 70GB observed memory after warmup on typical 80GB GPUs, or exceed 90% of selected GPU total memory on other GPU sizes. Lower formal-run utilization requires explicit conservative approval or hard blocking evidence and must be surfaced as a deviation, not treated as success.
+
+When one L4 execute bridge/session contains multiple formal stages, such as train followed by value/evaluate/score, the GPU memory target applies separately to each formal stage. A train-stage smoke, batchbasis, or observed memory record does not prove that the later value/eval/generation stage is correctly configured. Executor must record stage-specific memory evidence, and postrun must audit stage-specific pass/deviation/block status.
 
 Executor Bash hooks are soft guardrails, not killers. For executor-owned Bash commands that look like formal GPU training/evaluation, PreToolUse/PostToolUse may write `soft_reminders` into `tool_events.jsonl` and `session_events.jsonl` when GPU memory probes, batch/effective-batch basis, or log manifest evidence is missing. Hooks must not kill a process solely because current memory use is low, and smoke/dry-run/debug commands should receive only smoke-appropriate reminders.
 

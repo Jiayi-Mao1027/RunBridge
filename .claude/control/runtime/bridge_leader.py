@@ -142,6 +142,8 @@ class BridgeLeaderRuntime:
             return bridge_result
         except BridgeExecutionError as exc:
             return self._fail_window(exc)
+        except KeyboardInterrupt as exc:
+            return self._interrupt_window(exc)
         except Exception as exc:
             return self._fail_window(
                 BridgeExecutionError(
@@ -361,6 +363,41 @@ class BridgeLeaderRuntime:
         self._return_bridge_result("bridge_result_returned", bridge_result)
         return bridge_result
 
+    def _interrupt_window(self, exc: KeyboardInterrupt) -> dict[str, Any]:
+        execution = {
+            "reports": [
+                {
+                    "summary": "Bridge window was interrupted by the user before a normal BridgeResult could be completed.",
+                    "failure_reason": "manual_interrupt",
+                    "next_action_recommendation": "Read the runtime snapshot and dispatch the next legal bridge once no other blocker remains.",
+                }
+            ],
+            "artifact_refs": [],
+            "evidence": {
+                "classification": "manual_bridge_interrupt",
+                "event_ids_before_interrupt": list(self.event_ids),
+            },
+            "error_or_null": {"message": "bridge window interrupted by user", "type": exc.__class__.__name__},
+            "cleanup_required": True,
+        }
+        try:
+            self._event(
+                "bridge_call_interrupted",
+                team_id=self.team_id if self.team_id else None,
+                task_id=self.task_id if self.task_id else None,
+                agent_id="runtime.interrupt",
+                agent_type="runtime",
+                tool_name="call_bridge_sdk",
+                payload={
+                    "error_or_null": execution["error_or_null"],
+                    "interrupt_source": "manual_user_interrupt",
+                    "event_ids_before_interrupt": list(self.event_ids),
+                },
+            )
+        except Exception:
+            execution["evidence"]["interrupt_event_persist_failed"] = True
+        return self._bridge_result("failed", "manual_interrupt", execution)
+
     def _bridge_result(self, status: str, failure_stage: str | None, execution: dict[str, Any]) -> dict[str, Any]:
         bind_window_objects = failure_stage != "packet_accept"
         return {
@@ -436,7 +473,7 @@ def _completion_checks(contract: dict[str, Any], execution: dict[str, Any]) -> d
     reports = execution.get("reports", [])
     artifact_refs = execution.get("artifact_refs", [])
     missing_artifacts = _missing_required_artifacts(required_artifacts, artifact_refs)
-    failed_validations = _failed_validation_requirements(validation_requirements, execution)
+    failed_validations = _failed_validation_requirements_for_contract(contract, validation_requirements, execution)
     return {
         "required_outputs_present": not required_outputs or bool(reports),
         "required_artifacts_present": not missing_artifacts,
@@ -478,26 +515,30 @@ def _looks_like_log_manifest(ref: str) -> bool:
 
 
 def _failed_validation_requirements(validation_requirements: Any, execution: dict[str, Any]) -> list[str]:
+    return _failed_validation_requirements_for_contract({}, validation_requirements, execution)
+
+
+def _failed_validation_requirements_for_contract(contract: dict[str, Any], validation_requirements: Any, execution: dict[str, Any]) -> list[str]:
     required = [str(item) for item in validation_requirements] if isinstance(validation_requirements, list) else []
     if not required:
         return []
     if execution.get("validation_passed") is False:
         return required
-    return [item for item in required if not _validation_requirement_satisfied(item, execution)]
+    return [item for item in required if not _validation_requirement_satisfied(item, execution, contract)]
 
 
-def _validation_requirement_satisfied(requirement: str, execution: dict[str, Any]) -> bool:
+def _validation_requirement_satisfied(requirement: str, execution: dict[str, Any], contract: dict[str, Any] | None = None) -> bool:
     lowered = requirement.casefold()
     if "manifest" in lowered:
         refs = execution.get("artifact_refs") if isinstance(execution.get("artifact_refs"), list) else []
         has_manifest_ref = any(_looks_like_log_manifest(str(ref)) for ref in refs)
         if "required" in lowered and "field" in lowered:
-            return has_manifest_ref and _manifest_field_evidence_present(execution)
+            return has_manifest_ref and _manifest_field_evidence_present(execution, contract or {})
         return has_manifest_ref
     return bool(execution.get("validation_passed", True))
 
 
-def _manifest_field_evidence_present(execution: dict[str, Any]) -> bool:
+def _manifest_field_evidence_present(execution: dict[str, Any], contract: dict[str, Any] | None = None) -> bool:
     evidence_blob = json.dumps(
         {
             "reports": execution.get("reports", []),
@@ -506,6 +547,12 @@ def _manifest_field_evidence_present(execution: dict[str, Any]) -> bool:
         ensure_ascii=False,
         default=str,
     ).casefold()
+    required_fields = contract.get("manifest_required_fields") if isinstance(contract, dict) else None
+    if isinstance(required_fields, list) and required_fields:
+        missing = [str(field) for field in required_fields if str(field).casefold() not in evidence_blob]
+        if missing:
+            return False
+        return True
     required_markers = [
         ("manifest required fields", "required fields checklist", "manifest checklist"),
         ("run_id", "run id"),

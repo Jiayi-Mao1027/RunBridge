@@ -103,11 +103,15 @@ L4 execute also treats smoke parameters as evidence, not as the final run shape.
 
 Every generated formal log folder must contain an internal manifest, analogous to checkpoint manifests. The manifest is the durable identity record and should include run/window/task IDs, command, cwd, environment, semantic basis, smoke evidence refs, formal parameters/effective batch size, process refs, log files, expected outputs/checkpoints, timestamps, terminal status, and reuse/dependency notes. File names alone are not sufficient.
 
-L4 execute has strict environment and GPU rules. Formal execution uses conda env `mjy`; use `conda run -n mjy ...` or record an equivalent `conda activate mjy` context, and do not use venv/virtualenv for formal execute. Unless the user explicitly requests smoke/dry-run/conservative execution, formal GPU runs must exceed 90% of selected GPU total memory after warmup. For typical 80GB GPUs, that usually means observed usage above 70GB; lower usage is a deviation or blocker unless backed by explicit approval or hard resource evidence.
+L4 execute has strict environment and GPU rules. Formal execution uses conda env `mjy`; use `conda run -n mjy ...` or record an equivalent `conda activate mjy` context, and do not use venv/virtualenv for formal execute. Unless the user explicitly requests smoke/dry-run/conservative execution, formal GPU runs must exceed 70GB observed memory after warmup on typical 80GB GPUs, or exceed 90% of selected GPU total memory on other GPU sizes; lower usage is a deviation or blocker unless backed by explicit approval or hard resource evidence.
+
+If one execute bridge/session contains multiple formal stages, such as train followed by value/evaluate/score, the GPU memory target applies separately to each formal stage. The executor must not reuse train-stage batch or memory evidence as proof that later stages are configured correctly; each stage needs its own batchbasis, observed memory evidence, and pass/deviation/block classification.
 
 Executor Bash hooks add soft reminders rather than hard process control. Formal-looking executor Bash commands may be annotated in `tool_events.jsonl` with missing GPU probe, batch/effective-batch basis, or log-manifest reminders. Smoke/dry-run/debug commands are not killed for low memory and receive only smoke-appropriate reminders.
 
 The phase is not just a final label. It is a runtime trace of important action intent, action start, action end, denial, failure, partial completion, and orphaning. This allows later audit to distinguish "never attempted" from "attempted and failed" from "started but never returned".
+
+Manual bridge interrupts are terminal runtime facts, not permanent blockers. If the user interrupts a bridge invocation, the runtime records `bridge_call_interrupted` and closes that window as `bridge_window_interrupted`, so later work can resume from the snapshot instead of being blocked by a stale open bridge window.
 
 ## BridgePacket
 
@@ -312,6 +316,8 @@ The bridge MCP exposes:
 .claude/control/runtime/companion_observer.py
 .claude/hooks/*.py                        Claude hook adapters
 .claude/control/policy/*.json             Lifecycle, phase, approval policy
+.claude/control/policy/phase_contracts.json
+                                           System-owned phase/team/tool/report/manifest contracts
 .claude/control/schemas/*.json            Runtime data contracts
 pseudocode/main_workflow.md               High-level intended workflow
 bridge-companion/                         Optional read-only UI/gateway for observer streams

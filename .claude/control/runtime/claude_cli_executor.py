@@ -220,10 +220,27 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
 def simulated_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     packet = execution_input["packet"]
     task_spec = packet.get("task_spec", {})
-    required_artifacts = packet.get("completion_contract", {}).get("required_artifacts")
+    completion_contract = packet.get("completion_contract", {}) if isinstance(packet.get("completion_contract"), dict) else {}
+    required_artifacts = completion_contract.get("required_artifacts")
     artifact_refs = [str(item) for item in required_artifacts] if isinstance(required_artifacts, list) else []
     manifest_required = "log_manifest" in artifact_refs
-    manifest_checklist = {
+    configured_manifest_fields = completion_contract.get("manifest_required_fields")
+    manifest_fields = [str(item) for item in configured_manifest_fields] if isinstance(configured_manifest_fields, list) else []
+    if manifest_required and not manifest_fields:
+        manifest_fields = [
+            "run_id",
+            "bridge_window_id",
+            "task_id",
+            "command",
+            "cwd",
+            "batchbasis",
+            "gpu_id",
+            "memory observed",
+            "model",
+            "dataset",
+            "method",
+        ]
+    manifest_defaults = {
         "run_id": execution_input.get("run_id"),
         "bridge_window_id": execution_input.get("bridge_window_id"),
         "task_id": execution_input.get("task_id"),
@@ -231,10 +248,22 @@ def simulated_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
         "cwd": "simulated cwd",
         "batchbasis": "simulated batch basis",
         "gpu_id": "not_applicable",
+        "gpu_id_or_device_ids": "not_applicable",
         "memory observed": "not_applicable",
+        "smoke_memory_observed": "not_applicable",
+        "warmup_memory_observed": "not_applicable",
+        "formal_memory_observed": "not_applicable",
         "model": "simulated model",
+        "model_or_model_family": "simulated model",
         "dataset": "simulated dataset",
+        "dataset_name_split_source": "simulated dataset",
         "method": "simulated method",
+        "method_or_objective": "simulated method",
+        "terminal_status": "succeeded",
+    }
+    manifest_checklist = {
+        field: manifest_defaults.get(field, "not_applicable: simulated executor")
+        for field in manifest_fields
     } if manifest_required else {}
     return {
         "status": "succeeded",
@@ -398,6 +427,23 @@ def _run_claude_streaming(
 
     try:
         returncode = proc.wait(timeout=timeout)
+    except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+        _emit_sdk_stream_event(
+            project_root,
+            execution_input,
+            "sdk_stream_interrupted",
+            {"message": "claude cli bridge executor interrupted by user"},
+            status="failed",
+            sequence=next_sequence(),
+        )
+        raise
     except subprocess.TimeoutExpired as exc:
         proc.kill()
         stdout_thread.join(timeout=2)

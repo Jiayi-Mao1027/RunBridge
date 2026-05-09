@@ -53,6 +53,7 @@
       "allowed_event_kinds": [
         "pretooluse_denied_by_main_leader",
         "call_bridge_sdk_error",
+        "bridge_call_interrupted",
         "bridge_packet_rejected",
         "team_create_failed",
         "task_create_failed",

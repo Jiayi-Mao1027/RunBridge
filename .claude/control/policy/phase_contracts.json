@@ -1,0 +1,304 @@
+{
+  "schema_version": "0.1.0",
+  "workflow_name": "bridge_window_workflow",
+  "description": "System-owned phase, role, report, and execution contracts used to build BridgePacket fields. Agent prompts may explain role behavior, but these contracts own packet structure.",
+  "tool_sets": {
+    "read_only": ["Read", "Grep", "Glob", "LS"],
+    "research": ["Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch"],
+    "read_check": ["Read", "Grep", "Glob", "LS", "Bash"],
+    "anomaly": ["Read", "Grep", "Glob", "LS", "Bash", "WebSearch", "WebFetch"],
+    "l3_curator": ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"],
+    "write": ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"]
+  },
+  "default_bridge_actions": ["team_create", "task_create", "send_messages", "task_complete", "team_delete"],
+  "default_forbidden_actions": [
+    "destructive filesystem operations outside writable scopes",
+    "external network calls through Bash or project code unless explicitly approved; WebSearch/WebFetch are allowed only when present in allowed_tools and used for task-relevant research",
+    "dependency installation unless explicitly approved",
+    "implementation content edits during L3 artifact curation unless the file is human-facing documentation already in L3 doc scope",
+    "physical deletion of user/project artifacts unless the item is clearly regenerable trash, an empty duplicate, or explicitly approved"
+  ],
+  "classification_taxonomy": {
+    "common": ["execution_layer_fix", "nonblocking_risk", "user_decision", "orchestrator_default", "hard_stop"],
+    "gate": ["ready_to_proceed"],
+    "postrun": ["execution_defect", "method_underperformance", "nonblocking_risk_or_deviation", "suspicious_result_requiring_anomaly_analysis", "acceptable_completion"],
+    "coverage": ["completed", "deferred", "blocked", "escalated"],
+    "semantic_disposition": ["resolved", "inherited", "unknown", "blocked", "escalated", "not_applicable"],
+    "intent_disposition": ["confirmed", "refined", "superseded", "blocked", "escalated"]
+  },
+  "semantic_resolution_contract": {
+    "required_identity_fields": [
+      "model_or_method_identity",
+      "checkpoint_identity",
+      "dataset_identity",
+      "prompt_or_template_identity",
+      "code_config_basis",
+      "metric_or_objective_identity",
+      "inherited_defaults"
+    ],
+    "resolution_policy": [
+      "actively resolve identities from the frozen instruction and current repository state",
+      "if the user did not request a change, inherit the current active dataset/prompt/config basis and say where it came from",
+      "for model or method comparisons, name the concrete checkpoints or checkpoint-selection rule for each side",
+      "do not let L4 implement or execute infer unresolved identities silently",
+      "unknown identity fields must be marked unknown, blocked, or escalated with a concrete reason"
+    ]
+  },
+  "manifest_contracts": {
+    "formal_log_manifest_required_fields": [
+      "run_id",
+      "bridge_window_id",
+      "task_id",
+      "stage_name",
+      "teammate_or_agent_name",
+      "timestamps",
+      "command",
+      "cwd",
+      "environment_evidence",
+      "conda_env_evidence",
+      "checkpoint_path_or_id",
+      "config_paths",
+      "prompt_or_template_path_or_id",
+      "output_checkpoint_log_paths",
+      "batchbasis",
+      "requested_or_upstream_batch_setting",
+      "smoke_derived_basis",
+      "final_per_device_batch_size",
+      "microbatch_size",
+      "gradient_accumulation",
+      "sequence_length",
+      "precision",
+      "effective_batch_size",
+      "adjustment_reason",
+      "gpu_id_or_device_ids",
+      "selected_gpu_total_free_memory",
+      "competing_process_summary",
+      "smoke_memory_observed",
+      "warmup_memory_observed",
+      "formal_memory_observed",
+      "model_or_model_family",
+      "checkpoint_semantic_label",
+      "dataset_name_split_source",
+      "dataset_count",
+      "method_or_objective",
+      "early_stop_behavior",
+      "metric_or_objective_basis",
+      "inherited_defaults",
+      "process_refs",
+      "log_files",
+      "produced_artifacts",
+      "expected_outputs_or_checkpoints",
+      "terminal_status",
+      "failure_reason",
+      "reuse_or_dependency_notes",
+      "residual_uncertainty"
+    ]
+  },
+  "execution_policy": {
+    "formal_conda_env": "mjy",
+    "formal_command_environment_rule": "Formal L4 execute commands must run through conda env mjy, preferably with conda run -n mjy or an explicitly recorded equivalent conda activate mjy context.",
+    "forbidden_formal_environments": ["venv", ".venv", "virtualenv", "system_python_without_recorded_conda_context"],
+    "typical_80gb_gpu_min_observed_gb": 70,
+    "other_gpu_min_observed_fraction": 0.9,
+    "smoke_is_not_formal_basis": true,
+    "multi_stage_memory_evidence_required": true,
+    "long_running_execute_waits_until_terminal": true,
+    "partial_return_allowed_only_after_process_terminal": true,
+    "runtime_estimate_required_before_long_running_launch": true,
+    "executor_prelaunch_requirements": [
+      "confirm the resolved semantic basis before formal execution: model/method, checkpoint, dataset/split, prompt/template, config, metric/objective, and inherited defaults",
+      "probe available GPU memory and competing processes before choosing formal settings",
+      "use bounded smoke or warmup evidence to choose formal batch, microbatch, gradient accumulation, sequence length, precision, and effective batch size",
+      "provide an estimated wall-clock runtime range with basis before launching a long-running process",
+      "record process refs, log paths, expected outputs, and polling/audit plan before returning from launch"
+    ],
+    "formal_stage_contract": [
+      "each formal stage, including train, value, evaluate, score, or export stages, needs its own command, cwd, environment evidence, semantic basis, parameter basis, and observed memory evidence",
+      "do not reuse train-stage batch or memory evidence as proof that a later stage is configured correctly",
+      "do not downgrade to toy, debug, smoke, or conservative settings unless explicitly approved or backed by hard resource evidence",
+      "if the formal target cannot meet memory or semantic requirements, classify the stage as blocked or deviated with evidence instead of silently accepting a weak run"
+    ],
+    "postrun_audit_requirements": [
+      "compare approved or resolved intent against the actual command, config, checkpoint, dataset, prompt/template, metric, and produced artifacts",
+      "audit that formal settings follow smoke or warmup evidence and do not accidentally inherit toy/debug parameters",
+      "audit that every formal log folder has a complete internal manifest, not only a descriptive filename",
+      "inspect terminal logs, process refs, metrics, produced artifacts, and representative outputs or samples when available",
+      "distinguish execution defect, method underperformance, acceptable completion, nonblocking deviation, and anomaly-worthy suspicion"
+    ],
+    "postrun_route_policy": [
+      "route to l4_anomaly when the outcome is contradictory, suspicious, materially under-explained, or cannot be classified from logs/artifacts alone",
+      "route to l4_implement when the issue is a concrete implementation or config defect that should be repaired before another formal run",
+      "route to user decision when the next step changes scope, consumes major resources, or requires a strategic choice"
+    ]
+  },
+  "base_report_contract": {
+    "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution"],
+    "required_evidence": ["runtime event ids", "instruction coverage disposition", "semantic identity resolution"],
+    "artifact_reporting_format": "list",
+    "include_failure_reason": true,
+    "include_next_action_recommendation": true
+  },
+  "base_completion_contract": {
+    "required_outputs": ["report"],
+    "required_artifacts": [],
+    "validation_requirements": [],
+    "success_criteria": [
+      "bridge leader collected a report from the team",
+      "every instruction coverage checklist item is completed, deferred with reason, blocked, or escalated"
+    ],
+    "allowed_partial_result": true,
+    "timeout_policy": {
+      "heartbeat_interval_seconds": 60,
+      "soft_timeout_seconds": 900,
+      "hard_timeout_seconds": 3600,
+      "timeout_action": "ask_main_leader"
+    }
+  },
+  "phases": {
+    "l2_advisory": {
+      "bridge_tools": ["Agent", "Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch"],
+      "ownership_boundary": {"readable_scopes": ["."], "writable_scopes": []},
+      "teammates": [
+        {"teammate_name": "chiefmate-a", "role": "advisory", "allowed_tools": ["Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch"], "responsibilities": ["produce upstream interpretation, assumptions, plan critique, peer challenges, and confidence-loop advisory judgment"]},
+        {"teammate_name": "chiefmate-b", "role": "advisory", "allowed_tools": ["Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch"], "responsibilities": ["produce independent upstream advisory judgment, critique chiefmate-a/chiefmate-c, and challenge weak convergence"]},
+        {"teammate_name": "chiefmate-c", "role": "advisory", "allowed_tools": ["Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch"], "responsibilities": ["produce additional GPT-main peer critique, actively rebut weak peer convergence, challenge chiefmate-a/chiefmate-b, and run confidence-loop validation"]}
+      ],
+      "assignment_instructions": [
+        "L2 three-seat review rule: treat chiefmate-a, chiefmate-b, and chiefmate-c as independent peers; challenge unsupported assumptions, missing alternatives, and weak evidence.",
+        "L2 factual confidence loop: identify material flaws, missing assumptions, brittle dependencies, and evidence gaps until residual uncertainty is explicitly bounded.",
+        "L2 research rule: when a claim depends on current facts, external tool/library behavior, established methodology, or empirical support, use WebSearch/WebFetch where available and prefer primary sources.",
+        "L2 pseudocode rule: include a pseudocode flow for each new major technical plan, or state pseudocode not_applicable with the reason."
+      ],
+      "report_contract_additions": {
+        "required_sections": ["major_technical_plan_pseudocode"],
+        "required_evidence": ["pseudocode flow for each new major technical plan or explicit not_applicable reason"]
+      }
+    },
+    "l3_bridge": {
+      "bridge_tools": ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"],
+      "ownership_boundary": {"readable_scopes": ["."], "writable_scopes": ["."]},
+      "active_surface_policy": [
+        "Before curation, identify the current step, prior completed work, and artifacts needed for the next downstream phase.",
+        "Keep active code, log, checkpoint, data, document, and script surfaces minimum viable.",
+        "Archive or move out stale, duplicate, ambiguous, or non-current material instead of leaving it active with only a label.",
+        "Retain logs with a concrete current-step, audit, comparison, or reuse reason; archive only logs that are clearly obsolete, duplicate, superseded, or unrelated.",
+        "Physical deletion is exceptional and limited to clearly regenerable trash, empty duplicates, or explicitly approved removals.",
+        "L3 may archive or organize files, but must not implement code behavior changes."
+      ],
+      "teammates": [
+        {"teammate_name": "curator", "role": "artifact_curation", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"], "responsibilities": ["clarify active logs, datasets, checkpoints, outputs, archive boundaries, and traceability; use Bash only for bounded filesystem curation"]},
+        {"teammate_name": "preflight-initial", "role": "preflight_audit", "allowed_tools": ["Read", "Grep", "Glob", "LS"], "responsibilities": ["inspect implementation-facing repo/config state and surface required changes before implementation without running commands"]},
+        {"teammate_name": "refresher", "role": "documentation_refresh", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Edit", "Write"], "responsibilities": ["refresh CLAUDE.md and bounded human-facing repository documentation when needed"]}
+      ],
+      "teammate_assignment_instructions": {
+        "curator": [
+          "L3 curator Bash curation rule: Bash is allowed only for non-executing filesystem curation inside packet writable scopes, such as archive directory creation, move, or clearly disposable delete actions. Do not run project code, tests, package managers, training, evaluation, network calls, or arbitrary shell exploration.",
+          "Before recursive move/delete, resolve absolute paths and verify each source/target remains inside writable scope. Prefer native PowerShell filesystem cmdlets with -LiteralPath on Windows.",
+          "Report every move/delete with source path, destination path or deletion basis, and reason."
+        ]
+      },
+      "assignment_instructions": [
+        "L3 semantic identity rule: actively identify model/method/checkpoint/dataset/prompt/config/metric identities, or mark unresolved fields blocked or escalated.",
+        "L3 current-intent bridge rule: confirm, refine, supersede, block, or escalate current_user_intent_context from repo/docs/artifact evidence.",
+        "L3 inheritance rule: when the user did not request a dataset, prompt, split, metric, or config change, identify the current active basis and recommend inheriting it.",
+        "L3 documentation rule: explicitly decide whether CLAUDE.md, README.md, docs/, or other Markdown files need updates for this task."
+      ],
+      "report_contract_additions": {
+        "required_sections": ["current_user_intent_context"],
+        "required_evidence": ["current user intent confirmed refined superseded blocked or escalated with reason"]
+      }
+    },
+    "l4_implement": {
+      "bridge_tools": ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"],
+      "ownership_boundary": {"readable_scopes": ["."], "writable_scopes": ["."]},
+      "active_surface_policy": [
+        "Preserve the minimum viable repository surface while implementing.",
+        "Prefer modifying existing files, use temporary scripts for one-off work, and create long-lived files only with durable reason.",
+        "Do not leave exploratory logs, checkpoints, data extracts, scratch code, or one-off scripts active unless required for the next phase.",
+        "Report every new long-lived file with its reason to remain active."
+      ],
+      "teammates": [
+        {"teammate_name": "implementor", "role": "implement", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"], "responsibilities": ["make approved code/config changes and collect bounded validation evidence"]},
+        {"teammate_name": "rungater", "role": "implementation_gate", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash"], "responsibilities": ["judge post-implementation readiness and recommend proceed, repair, reroute, or stop"]}
+      ],
+      "assignment_instructions": [
+        "Semantic basis rule: implement exactly against resolved semantic identity; do not silently swap checkpoint, dataset, prompt, metric, or objective identity.",
+        "Minimum-viable repository rule: keep the active project surface as small as practical while implementing.",
+        "New long-lived code, script, data, checkpoint, or document files need a concrete durable reason and must be reported explicitly."
+      ],
+      "teammate_assignment_instructions": {
+        "rungater": ["Gate the repository surface as part of readiness and flag active ambiguous logs, checkpoints, data, scripts, documents, or code copies that should be archived before execution."]
+      }
+    },
+    "l4_execute": {
+      "bridge_tools": ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "Write"],
+      "ownership_boundary": {"readable_scopes": ["."], "writable_scopes": ["."]},
+      "timeout_policy": {
+        "heartbeat_interval_seconds": 120,
+        "soft_timeout_seconds": 21600,
+        "hard_timeout_seconds": 86400,
+        "timeout_action": "ask_main_leader",
+        "wait_until_process_complete": true,
+        "partial_return_allowed_only_after_process_terminal": true
+      },
+      "teammates": [
+        {"teammate_name": "executor", "role": "formal_execute", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "responsibilities": ["run the approved workflow through conda env mjy, adapt batch/memory settings to selected GPU capacity, and record exact execution evidence"]},
+        {"teammate_name": "postrun", "role": "postrun_audit", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash"], "responsibilities": ["audit execution artifacts, conda env use, GPU memory utilization, outcome classification, and recommend anomaly routing when needed"]}
+      ],
+      "completion_contract_additions": {
+        "required_artifacts": ["log_manifest"],
+        "validation_requirements": [
+          "generated formal log folders include internal manifests",
+          "log manifests include required identity command cwd batchbasis gpu memory and semantic fields"
+        ],
+        "success_criteria": [
+          "formal execution log folders are not identified by filename alone; each generated log folder has an internal manifest with identity, command, cwd, batchbasis, GPU/memory, and natural-language semantic fields"
+        ]
+      },
+      "report_contract_additions": {
+        "required_sections": ["artifact_manifests"],
+        "required_evidence": [
+          "log manifest path",
+          "formal execution parameter manifest",
+          "manifest required fields checklist",
+          "batchbasis",
+          "gpu_id",
+          "smoke memory observed when smoke ran",
+          "warmup memory observed when warmup ran",
+          "natural-language model dataset method semantics"
+        ]
+      },
+      "teammate_assignment_instructions": {
+        "executor": [
+          "Semantic basis rule: execute exactly the resolved model/method, checkpoint, dataset, prompt/template, config, and metric basis; if unresolved, report blocked rather than guessing.",
+          "Execution environment rule: all formal execute commands must use conda env mjy and record environment evidence.",
+          "Before formal execution, use bounded smoke evidence to choose formal per-device batch, microbatch, gradient accumulation, sequence length, precision, and effective batch size.",
+          "Each formal stage must independently satisfy batch/memory adaptation and record stage-specific memory evidence.",
+          "Every generated formal log folder must contain an internal manifest with the required manifest fields from policy.",
+          "Formal long jobs must be waitable or polled until terminal completion; do not return final or partial while an owned process is still running."
+        ],
+        "postrun": [
+          "Semantic audit rule: verify the actual run used the resolved model/method, checkpoint, dataset, prompt/template, config, and metric basis.",
+          "Log manifest audit rule: verify each generated formal log folder has an internal manifest matching command, environment, semantic basis, formal parameters/effective batch size, process refs, artifacts, and terminal status.",
+          "Postrun must run after the formal execution process has reached terminal state or terminal failure evidence.",
+          "Environment and GPU audit rule: verify conda env mjy and formal GPU utilization threshold evidence."
+        ]
+      }
+    },
+    "l4_anomaly": {
+      "bridge_tools": ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "WebSearch", "WebFetch"],
+      "ownership_boundary": {"readable_scopes": ["."], "writable_scopes": []},
+      "teammates": [
+        {"teammate_name": "anomaly-analyst-a", "role": "anomaly_analysis", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "WebSearch", "WebFetch"], "responsibilities": ["perform complete independent anomaly diagnosis before peer review"]},
+        {"teammate_name": "anomaly-analyst-b", "role": "anomaly_analysis", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "WebSearch", "WebFetch"], "responsibilities": ["perform complete independent anomaly diagnosis before peer review"]},
+        {"teammate_name": "anomaly-analyst-c", "role": "anomaly_analysis", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "WebSearch", "WebFetch"], "responsibilities": ["perform complete independent anomaly diagnosis before peer review, with extra emphasis on rebutting weak peer causal convergence"]}
+      ],
+      "assignment_instructions": [
+        "L4 anomaly no-preassigned-lane rule: each analyst first performs complete independent diagnosis from the full packet context and available evidence.",
+        "L4 anomaly answer-level inspection rule: when analyzing a result or metric change, inspect original answers, outputs, predictions, traces, or result samples when available.",
+        "L4 anomaly research rule: when external methodology, known failure modes, library/runtime behavior, hardware behavior, or empirical claims could materially affect diagnosis, use WebSearch/WebFetch where available and prefer primary sources.",
+        "L4 anomaly convergence rule: peer agreement does not prove causality; state falsifiers, downgraded peer claims, and evidence that would change ranking."
+      ]
+    }
+  }
+}

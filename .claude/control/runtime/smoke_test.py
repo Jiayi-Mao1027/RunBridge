@@ -273,6 +273,74 @@ def run_orphan(control_root: Path, runs_root: Path) -> dict:
     return dispatch(control_root, runs_root, event("orphan_timeout_without_bridge_return", bw, ss, agent_type="runtime", agent_id="orphan_scanner", payload={"last_known_event_ref": "call_bridge_sdk_started"}))
 
 
+def run_manual_interrupt_recovery(control_root: Path, runs_root: Path) -> dict:
+    bw = "bw_manual_interrupt"
+    ss = "sub_manual_interrupt"
+    p = packet(bw, ss)
+    dispatch(control_root, runs_root, event("bridge_call_intended", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_manual_interrupt", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_manual_interrupt", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_manual_interrupt", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("bridge_window_opened", bw, ss, agent_type="bridge-leader", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("bridge_packet_accepted", bw, ss, payload={"packet": p}))
+    dispatch(control_root, runs_root, event("team_create_started", bw, ss, team_id="team_manual_interrupt", tool_name="team_create"))
+    dispatch(control_root, runs_root, event("team_create_succeeded", bw, ss, team_id="team_manual_interrupt", tool_name="team_create", payload={"team_name": "team_manual_interrupt", "teammate_ids": ["mate_1"]}))
+    dispatch(control_root, runs_root, event("task_create_started", bw, ss, team_id="team_manual_interrupt", task_id="task_manual_interrupt", tool_name="task_create"))
+    dispatch(control_root, runs_root, event("task_create_succeeded", bw, ss, team_id="team_manual_interrupt", task_id="task_manual_interrupt", tool_name="task_create"))
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "taskcreated_hook_accepted",
+            bw,
+            ss,
+            team_id="team_manual_interrupt",
+            task_id="task_manual_interrupt",
+            agent_type="hook",
+            agent_id="hook.task_created",
+            payload={
+                "task_subject": "task_bw_manual_interrupt",
+                "task_description": "smoke task created",
+                "task_spec": p["task_spec"],
+                "team_spec": p["team_spec"],
+                "task_team_mapping": p["task_team_mapping"],
+                "teammate_ids": ["mate_1"],
+            },
+        ),
+    )
+    dispatch(control_root, runs_root, event("message_dispatch_started", bw, ss, team_id="team_manual_interrupt", task_id="task_manual_interrupt", tool_name="send_messages"))
+    dispatch(control_root, runs_root, event("message_dispatch_succeeded", bw, ss, team_id="team_manual_interrupt", task_id="task_manual_interrupt", tool_name="send_messages"))
+    interrupted = dispatch(
+        control_root,
+        runs_root,
+        event(
+            "bridge_call_interrupted",
+            bw,
+            ss,
+            team_id="team_manual_interrupt",
+            task_id="task_manual_interrupt",
+            agent_type="runtime",
+            agent_id="runtime.interrupt",
+            tool_name="call_bridge_sdk",
+            payload={"interrupt_source": "manual_user_interrupt"},
+        ),
+    )
+    if interrupted["lifecycle"]["status_index"].get(bw) != "bridge_window_interrupted":
+        raise AssertionError(json.dumps(interrupted["lifecycle"], ensure_ascii=False, indent=2))
+    if bw in interrupted["lifecycle"].get("open_bridge_window_ids", []):
+        raise AssertionError(json.dumps(interrupted["lifecycle"], ensure_ascii=False, indent=2))
+    if "call_bridge_sdk" not in interrupted.get("allowed_actions", []):
+        raise AssertionError(json.dumps(interrupted, ensure_ascii=False, indent=2))
+    decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="next bridge after manual interrupt",
+        target_phase="l4_execute",
+    )
+    return interrupted
+
+
 def run_stuck_dispatch_anomaly(control_root: Path, runs_root: Path) -> dict:
     bw = "bw_stuck_dispatch"
     ss = "sub_stuck_dispatch"
@@ -1041,8 +1109,17 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     }
     if "WebSearch" not in l2_tools or "WebFetch" not in l2_tools:
         raise AssertionError(json.dumps(l2_packet["team_spec"], ensure_ascii=False, indent=2))
+    l2_required_sections = set(l2_packet["report_contract"].get("required_sections", []))
+    l2_required_evidence = set(l2_packet["report_contract"].get("required_evidence", []))
+    if "major_technical_plan_pseudocode" not in l2_required_sections or "pseudocode flow for each new major technical plan or explicit not_applicable reason" not in l2_required_evidence:
+        raise AssertionError(json.dumps(l2_packet["report_contract"], ensure_ascii=False, indent=2))
     l2_assignments = json.dumps(l2_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
-    if "Do I have factual 100% confidence in this strategy?" not in l2_assignments or "chiefmate-c" not in l2_assignments:
+    if (
+        "Do I have factual 100% confidence in this strategy?" not in l2_assignments
+        or "chiefmate-c" not in l2_assignments
+        or "L2 pseudocode rule" not in l2_assignments
+        or "pseudocode: not_applicable" not in l2_assignments
+    ):
         raise AssertionError(l2_assignments)
 
     anomaly_packet = decide_next_bridge_packet(
@@ -1122,6 +1199,8 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         or "Do not return a final or partial bridge report while an owned process is still running" not in execute_assignments
         or "Smoke-shape rule" not in execute_assignments
         or "Batch/memory adaptation rule" not in execute_assignments
+        or "Multi-stage memory rule" not in execute_assignments
+        or "each formal stage must independently satisfy the batch/memory adaptation rule" not in execute_assignments
         or "do not copy user- or upstream-provided batch size" not in execute_assignments
         or "effective batch size" not in execute_assignments
         or "Log manifest rule" not in execute_assignments
@@ -1136,9 +1215,11 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     if (
         "conda environment named mjy" not in execute_assignments
         or "Do not create or use venv" not in execute_assignments
-        or "exceed 90% of the selected GPU's total memory" not in execute_assignments
-        or "above 70GB" not in execute_assignments
+        or "exceeds 70GB on typical 80GB GPUs" not in execute_assignments
+        or "exceeds 90% of selected GPU total memory on other GPU sizes" not in execute_assignments
         or "GPU memory audit rule" not in execute_assignments
+        or "Multi-stage memory audit rule" not in execute_assignments
+        or "A good train-stage memory record does not prove a later value/eval stage satisfied the target" not in execute_assignments
         or "Environment audit rule" not in execute_assignments
         or "Semantic audit rule" not in execute_assignments
         or "Log manifest audit rule" not in execute_assignments
@@ -1796,6 +1877,8 @@ def main() -> None:
         stuck_dispatch = run_stuck_dispatch_anomaly(anomaly_control_root, anomaly_runs_root)
         watchdog_control_root, watchdog_runs_root = build_fixture(runtime_dir / "watchdog")
         execute_watchdog = run_execute_watchdog_alert(watchdog_control_root, watchdog_runs_root)
+        interrupt_control_root, interrupt_runs_root = build_fixture(runtime_dir / "interrupt")
+        manual_interrupt = run_manual_interrupt_recovery(interrupt_control_root, interrupt_runs_root)
         negative_control_root, negative_runs_root = build_fixture(runtime_dir / "negative")
         negative = run_negative_tests(negative_control_root, negative_runs_root)
         cli_executor = run_cli_executor_policy_tests(runtime_dir)
@@ -1811,6 +1894,7 @@ def main() -> None:
             "mcp_helper_status": mcp_helper["lifecycle"]["status_index"]["bw_mcp_helper"],
             "stuck_dispatch_anomaly": stuck_dispatch["runtime_diagnostics"]["orchestration_anomalies"][0]["classification"],
             "execute_watchdog_alert": execute_watchdog["runtime_diagnostics"]["execute_watchdog_alerts"][0]["classification"],
+            "manual_interrupt_status": manual_interrupt["lifecycle"]["status_index"]["bw_manual_interrupt"],
             "sdk_status": sdk["bridge_result_status"],
             "sdk_replay_status": sdk["replay_status"],
             "sdk_failed_status": sdk["failed_status"],
@@ -1835,6 +1919,7 @@ def main() -> None:
         assert summary["mcp_helper_status"] == "bridge_window_orphaned"
         assert summary["stuck_dispatch_anomaly"] == "bridge_orchestration_hang"
         assert summary["execute_watchdog_alert"] == "execute_stale_heartbeat_with_owned_process_refs"
+        assert summary["manual_interrupt_status"] == "bridge_window_interrupted"
         assert summary["sdk_status"] == "succeeded"
         assert summary["sdk_replay_status"] == "bridge_window_returned"
         assert summary["sdk_failed_status"] == "bridge_window_failed"
