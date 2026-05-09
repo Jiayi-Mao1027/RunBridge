@@ -70,6 +70,7 @@
     ["team_waiting", "user_clarification_required", "blocked_for_user_clarification"],
     ["team_waiting", "blocked_for_user_clarification", "blocked_for_user_clarification"],
     ["team_waiting", "wait_timeout_or_process_lost", "team_wait_timeout"],
+    ["team_waiting", "bridge_leader_fails_task", "task_failed"],
     ["team_waiting", "orphan_timeout_without_heartbeat", "bridge_window_orphaned"],
     ["team_waiting", "bridge_call_interrupted", "bridge_window_interrupted"],
     ["blocked_for_user_clarification", "bridge_result_returned_with_user_clarification_request", "paused_for_user_answer"],

@@ -94,6 +94,38 @@
       "residual_uncertainty"
     ]
   },
+  "retry_policies": {
+    "bridge_sdk_call": {
+      "initial_interval_ms": 2000,
+      "backoff_coefficient": 2.0,
+      "maximum_interval_ms": 30000,
+      "maximum_attempts": 3,
+      "non_retryable_error_types": [
+        "PacketBindingMismatch",
+        "TargetRepoBoundaryViolation",
+        "PendingApproval",
+        "FrozenSemanticsMismatch"
+      ]
+    },
+    "teammate_report_missing": {
+      "initial_interval_ms": 5000,
+      "backoff_coefficient": 1.5,
+      "maximum_interval_ms": 60000,
+      "maximum_attempts": 4
+    },
+    "completion_rejected": {
+      "initial_interval_ms": 0,
+      "backoff_coefficient": 1.0,
+      "maximum_interval_ms": 0,
+      "maximum_attempts": 2,
+      "requires_same_packet_boundary": true
+    },
+    "l4_execute_process_poll": {
+      "heartbeat_timeout_ms": 300000,
+      "maximum_attempts": 0,
+      "retry_until_terminal_process_state": true
+    }
+  },
   "execution_policy": {
     "formal_conda_env": "mjy",
     "formal_command_environment_rule": "Formal L4 execute commands must run through conda env mjy, preferably with conda run -n mjy or an explicitly recorded equivalent conda activate mjy context.",

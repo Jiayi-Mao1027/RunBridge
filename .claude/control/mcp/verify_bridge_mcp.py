@@ -14,6 +14,9 @@ REQUIRED_TOOLS = {
     "call_bridge_sdk",
     "dispatch_workflow_event",
     "reconcile_workflow_from_ledger",
+    "list_registered_repos",
+    "list_runs",
+    "read_repo_snapshot",
 }
 
 

@@ -189,6 +189,11 @@ The runtime also writes read-only Bridge Companion observer streams. These are n
 - `completion_checks.jsonl`: completion/checklist item disposition
 - `companion_events.jsonl`: merged observer stream with source backrefs
 
+The runtime also writes native RunBridge durability and replay artifacts:
+
+- `checkpoints.jsonl`, `checkpoints/*.json`, and `latest_checkpoint.json`: compact state checkpoints written after persisted runtime events.
+- `trajectory.jsonl` and `trajectory_index.json`: UI-safe research/execution timeline steps derived from workflow events and real tool events. These include intent/action/observation/state-delta summaries, not hidden chain-of-thought or full unbounded outputs.
+
 Tool observer records are emitted for all Claude Code sessions, not only bridge child sessions. Records include `session_kind`, `run_binding_state`, `session_id`, run/window/team/task IDs when available, `teammate_id`, `agent_type`, `tool_name`, `tool_use_id`, and `status`. If a hook cannot bind a tool event to a run, it writes the safe preview to `.claude/runtime_state/session_observer/` so Companion can still show direct or unbound session activity.
 
 UI must not synthesize low-level actions from reports or artifact refs. It should show `Read` / `Edit` / `Write` / `MultiEdit` / `Bash` / `Grep` / `Glob` / `LS` only when those real hook records exist in `tool_events.jsonl`. The hooks bind teammate child sessions from `SubagentStart` payloads such as `agent_name` / `subagent_name` when present, write that binding to `session_bindings.jsonl`, and rebind later child-session tool events by `session_id` when a tool payload lacks direct run fields. This is what lets real subagent tool calls land in the run-scoped observer stream with run/window/team/task/teammate attribution.
@@ -309,6 +314,12 @@ The bridge MCP exposes:
 .claude/agents/*.md                       Teammate role instructions
 .claude/control/mcp/bridge_server.py      MCP bridge server
 .claude/control/runtime/workflow_runtime.py
+.claude/control/runtime/state_graph.py
+.claude/control/runtime/checkpoint_store.py
+.claude/control/runtime/retry_policy.py
+.claude/control/runtime/trajectory.py
+.claude/control/runtime/output_guardrails.py
+.claude/control/runtime/repo_runtime.py
 .claude/control/runtime/main_leader.py
 .claude/control/runtime/bridge_sdk.py
 .claude/control/runtime/bridge_leader.py
@@ -316,6 +327,7 @@ The bridge MCP exposes:
 .claude/control/runtime/companion_observer.py
 .claude/hooks/*.py                        Claude hook adapters
 .claude/control/policy/*.json             Lifecycle, phase, approval policy
+.claude/control/policy/state_graph.json   Native RunBridge state graph policy
 .claude/control/policy/phase_contracts.json
                                            System-owned phase/team/tool/report/manifest contracts
 .claude/control/schemas/*.json            Runtime data contracts

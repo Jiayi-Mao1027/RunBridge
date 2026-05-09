@@ -1,184 +1,869 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Bridge Companion · Ops Board</title>
+  <title>Bridge Companion</title>
   <style>
     :root {
-      --bg: #070707;
-      --panel: rgba(6, 6, 6, .76);
-      --panel-strong: rgba(4, 4, 4, .9);
-      --line: rgba(183, 126, 68, .28);
-      --line-strong: rgba(204, 145, 78, .46);
-      --ink: #d9c49a;
-      --ink-strong: #f0dcad;
-      --muted: #9f8762;
-      --gold: #c99b58;
-      --paper: rgba(207, 172, 119, .86);
-      --paper-text: #24170f;
-      --danger: #b24a3e;
-      --ok: #91ad72;
+      color-scheme: dark;
+      --bg: #111315;
+      --panel: #191d20;
+      --panel-2: #20262a;
+      --line: #343c42;
+      --line-strong: #4b5961;
+      --text: #e7ecef;
+      --muted: #9aa7ae;
+      --accent: #7db7a2;
+      --accent-2: #d3a15f;
+      --danger: #df7f72;
+      --ok: #90c978;
+      --warn: #d5b46d;
+      --shadow: 0 20px 42px rgba(0, 0, 0, .35);
     }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; overflow: hidden; color: var(--ink); background: var(--bg); font-family: "Times New Roman", "Noto Serif SC", "Songti SC", serif; }
-    body::before { content: ""; position: fixed; inset: 0; background: url("../acb4f3c90af4c527737fda2bd8145c82.png") center / cover no-repeat; opacity: .78; filter: saturate(.92) brightness(.72); }
-    body::after { content: ""; position: fixed; inset: 0; pointer-events: none; background: linear-gradient(90deg, rgba(0,0,0,.74), rgba(0,0,0,.18) 24%, rgba(0,0,0,.22) 72%, rgba(0,0,0,.72)), radial-gradient(circle at 72% 24%, rgba(190,94,66,.13), transparent 20rem); box-shadow: inset 0 0 140px rgba(0,0,0,.92); }
-    .app { position: relative; z-index: 1; height: 100vh; display: grid; grid-template-rows: 96px 1fr; padding: 24px 32px 28px 96px; gap: 18px; }
-    .topbar { display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: start; }
-    .brand h1 { margin: 0; color: var(--ink-strong); font-size: 42px; line-height: 1; font-weight: 400; text-shadow: 0 4px 18px #000; }
-    .brand p { margin: 8px 0 0; color: var(--gold); font-size: 20px; letter-spacing: .16em; }
-    .chips { display: flex; gap: 12px; align-items: start; }
-    .chip { min-width: 170px; padding: 12px 16px; background: rgba(5,5,5,.66); border: 1px solid var(--line); box-shadow: inset 0 0 20px rgba(0,0,0,.82); }
-    .chip .k { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
-    .chip .v { color: var(--ink-strong); font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 210px; }
-    .chip .v.live { color: #a7d487; text-shadow: 0 0 10px rgba(145,173,114,.42); }
-    .chip .v.warn { color: #d69a75; }
-    .layout { min-height: 0; display: grid; grid-template-columns: minmax(520px, 1.1fr) minmax(430px, .95fr) minmax(420px, .85fr); gap: 18px; }
-    .column { min-height: 0; display: grid; gap: 14px; }
-    .left { grid-template-rows: 160px 1fr 140px; }
-    .middle { grid-template-rows: 260px 1fr; }
-    .right { grid-template-rows: minmax(420px, 1fr) 190px; }
-    .panel { min-height: 0; background: var(--panel); border: 1px solid var(--line); box-shadow: inset 0 0 24px rgba(0,0,0,.82), 0 16px 36px rgba(0,0,0,.45); overflow: hidden; }
-    .panel-header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; padding: 14px 16px 10px; border-bottom: 1px solid rgba(183,126,68,.18); }
-    .panel-header h2, .panel-header h3 { margin: 0; color: var(--ink-strong); font-weight: 400; letter-spacing: .06em; }
-    .panel-header h2 { font-size: 24px; }
-    .panel-header h3 { font-size: 20px; }
-    .panel-header .meta { color: var(--muted); font-size: 13px; }
-    .panel-body { padding: 14px 16px; min-height: 0; }
-    .status-card { background: linear-gradient(90deg, rgba(238,205,148,.22), rgba(102,60,26,.10)), var(--paper); color: var(--paper-text); padding: 24px 28px; clip-path: polygon(1% 0, 99% 0, 100% 8%, 99% 92%, 97% 100%, 1.5% 100%, 0 91%, .8% 8%); box-shadow: inset 0 0 32px rgba(67,34,13,.32), 0 16px 30px rgba(0,0,0,.42); }
-    .status-card h2 { margin: 0 0 12px; font-size: 30px; font-weight: 500; }
-    .status-card p { margin: 0; font-size: 18px; line-height: 1.48; font-weight: 700; }
-    .task-title { font-size: 32px; color: var(--ink-strong); text-shadow: 0 4px 16px #000; margin: 0 0 12px; }
-    .task-subtitle { margin: 0; color: var(--muted); font-size: 18px; }
-    .brief-text { color: var(--muted); font-size: 15px; line-height: 1.55; white-space: pre-wrap; overflow: auto; max-height: 180px; padding-right: 8px; }
-    .kv { display: grid; gap: 12px; }
-    .kv .label { color: var(--gold); font-size: 13px; letter-spacing: .08em; margin-bottom: 4px; }
-    .kv .value { color: var(--muted); font-size: 14px; line-height: 1.42; max-height: 74px; overflow: auto; }
-    .team-list { display: grid; gap: 10px; overflow: auto; max-height: 360px; padding-right: 4px; }
-    .teammate { display: grid; grid-template-columns: 132px 1fr; gap: 10px; padding: 10px; background: rgba(0,0,0,.26); border: 1px solid rgba(183,126,68,.16); }
-    .role { color: var(--gold); font-size: 14px; overflow: hidden; text-overflow: ellipsis; }
-    .status { color: var(--muted); font-size: 13px; line-height: 1.36; }
-    .tool-now { color: #a7d487; font-size: 13px; line-height: 1.36; margin-bottom: 4px; }
-    .tool-last { color: var(--ink); font-size: 12px; line-height: 1.35; margin-bottom: 4px; }
-    .file-list { color: var(--muted); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
-    .activity-feed { overflow: auto; padding: 4px 12px 14px 0; max-height: 100%; }
-    .activity-item { display: grid; grid-template-columns: 86px 1fr; gap: 12px; padding: 11px 0 11px 16px; border-left: 1px solid rgba(183,126,68,.22); position: relative; }
-    .activity-item::before { content: ""; position: absolute; left: -4px; top: 17px; width: 7px; height: 7px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 12px rgba(201,155,88,.52); }
-    .activity-time { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .activity-main { min-width: 0; }
-    .activity-title { color: var(--ink-strong); font-size: 15px; margin-bottom: 4px; }
-    .activity-summary { color: var(--muted); font-size: 13px; line-height: 1.36; overflow-wrap: anywhere; }
-    .activity-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
-    .tag { font-size: 11px; color: #d8b579; border: 1px solid rgba(183,126,68,.22); padding: 2px 6px; background: rgba(0,0,0,.24); }
-    .phase-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; padding: 12px; }
-    .phase-step { text-align: center; color: var(--muted); font-size: 12px; }
-    .phase-step .orb { width: 40px; height: 40px; margin: 0 auto 6px; display: grid; place-items: center; border-radius: 50%; border: 1px solid rgba(165,113,67,.58); color: var(--gold); background: radial-gradient(circle, rgba(79,54,35,.48), rgba(2,2,2,.84)); box-shadow: inset 0 0 12px #000; }
-    .phase-step.active { color: var(--ink-strong); }
-    .phase-step.active .orb { border-color: rgba(226,101,73,.92); box-shadow: 0 0 22px var(--red-glow), inset 0 0 12px #000; }
-    .notes { display: grid; grid-template-columns: repeat(3, 1fr); height: 100%; }
-    .note { padding: 14px; border-right: 1px solid rgba(183,126,68,.16); color: var(--muted); font-size: 13px; line-height: 1.38; overflow: hidden; }
-    .note:last-child { border-right: 0; }
-    .note::before { content: "✦"; color: #8b3025; margin-right: .5em; }
-    .actions { display: flex; gap: 10px; padding: 12px 16px; border-top: 1px solid rgba(183,126,68,.18); }
-    .button { border: 1px solid rgba(180,124,68,.36); background: rgba(5,5,5,.72); color: var(--ink-strong); padding: 10px 12px; font-size: 14px; cursor: pointer; }
-    .button:hover { background: rgba(45,25,15,.82); }
-    .detail-drawer { position: fixed; z-index: 20; right: 0; top: 0; width: min(780px, 92vw); height: 100vh; padding: 24px; background: rgba(5,5,5,.95); border-left: 1px solid rgba(185,126,67,.38); color: var(--ink); transform: translateX(102%); transition: transform .22s ease; overflow: auto; box-shadow: -24px 0 80px rgba(0,0,0,.65); }
-    .detail-drawer.open { transform: translateX(0); }
-    .detail-drawer h2 { margin: 0 0 16px; color: var(--ink-strong); font-weight: 400; }
-    .detail-section { border-top: 1px solid rgba(185,126,67,.22); padding-top: 16px; margin-top: 16px; }
-    .detail-section h3 { margin: 0 0 10px; color: var(--gold); font-weight: 400; }
-    pre { white-space: pre-wrap; word-break: break-word; color: var(--muted); font-size: 13px; line-height: 1.45; }
-    .drawer-close { float: right; border: 1px solid rgba(185,126,67,.34); background: rgba(0,0,0,.6); color: var(--ink); padding: 8px 12px; cursor: pointer; }
-    .control { position: fixed; z-index: 21; left: 1rem; bottom: 1rem; display: flex; gap: .5rem; opacity: .24; transition: opacity .18s ease; }
-    .control:hover { opacity: 1; }
-    .control input, .control button { border: 1px solid rgba(180,124,68,.38); background: rgba(5,5,5,.88); color: var(--ink); padding: .55rem .7rem; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .control input { width: 360px; }
-    .control button { cursor: pointer; }
-    .control button.active { color: #a7d487; border-color: rgba(145,173,114,.58); box-shadow: 0 0 12px rgba(145,173,114,.18); }
-    @media (max-width: 1400px) { body { overflow: auto; } .app { min-width: 1400px; min-height: 900px; } }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow: hidden;
+    }
+    button, select {
+      font: inherit;
+      color: var(--text);
+      background: #15191c;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+    button {
+      min-height: 34px;
+      padding: 0 11px;
+      cursor: pointer;
+    }
+    button:hover, select:hover { border-color: var(--line-strong); }
+    button.active { border-color: var(--accent); color: var(--accent); }
+    select {
+      width: 100%;
+      height: 34px;
+      padding: 0 9px;
+    }
+    .app {
+      height: 100vh;
+      display: grid;
+      grid-template-rows: 58px 1fr;
+      gap: 10px;
+      padding: 12px;
+    }
+    .topbar {
+      display: grid;
+      grid-template-columns: 280px 260px 1fr auto;
+      gap: 10px;
+      align-items: center;
+    }
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      min-width: 0;
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 650;
+      letter-spacing: .01em;
+    }
+    .brand span { color: var(--muted); font-size: 12px; }
+    .field label {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+    .chips {
+      display: flex;
+      gap: 8px;
+      min-width: 0;
+      justify-content: flex-end;
+    }
+    .chip {
+      min-width: 110px;
+      max-width: 210px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      background: #15191c;
+      border-radius: 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .chip b { color: var(--muted); font-weight: 500; margin-right: 6px; }
+    .chip.live { border-color: rgba(125, 183, 162, .58); color: var(--accent); }
+    .chip.warn { border-color: rgba(211, 161, 95, .65); color: var(--warn); }
+    .layout {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(260px, .75fr) minmax(520px, 1.35fr) minmax(390px, .95fr);
+      gap: 10px;
+    }
+    .panel {
+      min-height: 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .panel-header {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .panel-header h2 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 650;
+      letter-spacing: .02em;
+    }
+    .meta { color: var(--muted); font-size: 12px; }
+    .panel-body {
+      min-height: 0;
+      overflow: auto;
+      padding: 10px;
+    }
+    .left-stack, .right-stack {
+      min-height: 0;
+      display: grid;
+      gap: 10px;
+    }
+    .left-stack { grid-template-rows: 210px 1fr; }
+    .right-stack { grid-template-rows: minmax(310px, 1fr) minmax(250px, .72fr); }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .summary-card {
+      padding: 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel-2);
+      min-width: 0;
+    }
+    .summary-card .label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin-bottom: 4px;
+    }
+    .summary-card .value {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tree-list, .activity-list, .trajectory-list {
+      display: grid;
+      gap: 8px;
+    }
+    .member, .event, .step {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #15191c;
+      padding: 9px;
+      min-width: 0;
+    }
+    .member.running { border-color: rgba(125, 183, 162, .55); }
+    .member.failed { border-color: rgba(223, 127, 114, .55); }
+    .member-head, .event-head, .step-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .name, .event-title, .step-title {
+      font-weight: 650;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 0 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .badge.running { color: var(--accent); border-color: rgba(125, 183, 162, .55); }
+    .badge.failed, .badge.blocked { color: var(--danger); border-color: rgba(223, 127, 114, .55); }
+    .badge.completed { color: var(--ok); border-color: rgba(144, 201, 120, .5); }
+    .subtext {
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .event {
+      cursor: pointer;
+      transition: border-color .15s ease, background .15s ease;
+    }
+    .event:hover, .event.selected {
+      border-color: var(--accent);
+      background: #17201d;
+    }
+    .event-meta {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 7px;
+    }
+    .raw-link {
+      color: var(--accent-2);
+      border: 0;
+      padding: 0;
+      min-height: 0;
+      background: transparent;
+      text-decoration: underline;
+    }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      background: #15191c;
+    }
+    .tabs button {
+      min-height: 30px;
+      border-radius: 999px;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #c7d0d5;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .brief-box {
+      display: grid;
+      gap: 10px;
+    }
+    .brief-output {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      min-height: 130px;
+      background: #15191c;
+      color: #cbd4d8;
+      white-space: pre-wrap;
+    }
+    .empty {
+      color: var(--muted);
+      padding: 10px;
+      border: 1px dashed var(--line);
+      border-radius: 6px;
+    }
+    @media (max-width: 1180px) {
+      body { overflow: auto; }
+      .app { min-width: 1180px; min-height: 760px; }
+    }
   </style>
 </head>
 <body>
   <main class="app">
     <header class="topbar">
-      <div class="brand"><h1>Bridge Contract</h1><p>远程运行观演层</p></div>
+      <div class="brand">
+        <h1>Bridge Companion</h1>
+        <span>read-only runtime view</span>
+      </div>
+      <div class="field">
+        <label for="repoSelect">Repo</label>
+        <select id="repoSelect" data-testid="repo-select"></select>
+      </div>
+      <div class="field">
+        <label for="runSelect">Run</label>
+        <select id="runSelect" data-testid="run-select"></select>
+      </div>
       <div class="chips">
-        <div class="chip"><div class="k">Run ID</div><div class="v" id="runIdChip">未绑定</div></div>
-        <div class="chip"><div class="k">当前阶段</div><div class="v" id="phaseChip">未知</div></div>
-        <div class="chip"><div class="k">网关状态</div><div class="v" id="gatewayChip">连接中</div></div>
-        <div class="chip"><div class="k">实时跟随</div><div class="v" id="liveChip">未开启</div></div>
+        <div class="chip" id="phaseChip"><b>Phase</b><span>unknown</span></div>
+        <div class="chip" id="lifeChip"><b>State</b><span>unknown</span></div>
+        <div class="chip" id="streamChip"><b>Live</b><span>off</span></div>
+        <button id="latestButton" data-testid="latest-button">Latest</button>
+        <button id="liveButton" data-testid="live-button">Live</button>
       </div>
     </header>
+
     <section class="layout">
-      <section class="column left">
-        <div><h2 class="task-title" id="taskTitle">当前委托：正在绑定最新 run</h2><p class="task-subtitle">主界面展示 packet、队员、事件、工具/文件证据；详情抽屉保留原始卷宗。</p></div>
-        <article class="status-card"><h2 id="statusTitle">正在读取 runtime</h2><p id="factText">正在通过只读网关读取最新 run；如果一直停在这里，请检查 /runs 是否可读。</p></article>
-        <article class="panel"><div class="panel-header"><h3>阶段路线</h3><span class="meta">来自 lifecycle</span></div><nav class="phase-row" aria-label="runtime phase line"><div class="phase-step" data-stage="freeze"><div class="orb">§</div>接取委托</div><div class="phase-step" data-stage="packet"><div class="orb">◈</div>任务包</div><div class="phase-step" data-stage="bridge"><div class="orb">⌂</div>桥接窗口</div><div class="phase-step active" data-stage="waiting"><div class="orb">♜</div>执行/等待</div><div class="phase-step" data-stage="verify"><div class="orb">†</div>完成检查</div><div class="phase-step" data-stage="done"><div class="orb">☉</div>返回结果</div></nav></article>
+      <aside class="left-stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Run Summary</h2>
+            <span class="meta" id="summaryMeta">no run</span>
+          </div>
+          <div class="panel-body">
+            <div class="summary-grid">
+              <div class="summary-card"><div class="label">Repo</div><div class="value" id="repoValue">none</div></div>
+              <div class="summary-card"><div class="label">Run</div><div class="value" id="runValue">none</div></div>
+              <div class="summary-card"><div class="label">Events</div><div class="value" id="eventCountValue">0</div></div>
+              <div class="summary-card"><div class="label">Trajectory</div><div class="value" id="trajectoryCountValue">0</div></div>
+            </div>
+            <div class="subtext" id="taskValue">No task packet recorded.</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Team Tree</h2>
+            <span class="meta">sessions and tools</span>
+          </div>
+          <div class="panel-body">
+            <div class="tree-list" id="teamTree" data-testid="team-tree"></div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Live Activity Stream</h2>
+          <span class="meta" id="activityMeta">0 events</span>
+        </div>
+        <div class="panel-body">
+          <div class="activity-list" id="activityList" data-testid="activity-list"></div>
+        </div>
       </section>
-      <section class="column middle">
-        <article class="panel"><div class="panel-header"><h3>任务包摘要</h3><span class="meta">BridgePacket / task_spec</span></div><div class="panel-body kv"><div><div class="label">目标</div><div class="value" id="packetObjective">等待 BridgePacket / task_spec 数据。</div></div><div><div class="label">完成条件</div><div class="value" id="packetCompletion">尚未读取 completion contract。</div></div><div><div class="label">报告要求</div><div class="value" id="packetReport">尚未读取 report contract。</div></div></div></article>
-        <article class="panel"><div class="panel-header"><h3>桥内活动流</h3><span class="meta" id="activityMeta">runtime events / inbox</span></div><div class="panel-body activity-feed" id="activityFeed"></div></article>
-      </section>
-      <section class="column right">
-        <article class="panel"><div class="panel-header"><h3>当前执行现场</h3><span class="meta">自然语言 · 原始记录在详情</span></div><div class="panel-body"><div class="team-list" id="teamList"></div></div><div class="actions"><button class="button" id="openDetailButton">查看运行卷宗详情</button><button class="button" id="modelBriefButton">刷新模型整理</button></div></article>
-        <article class="panel"><div class="panel-header"><h3>模型整理</h3><span class="meta">事实约束叙事</span></div><div class="panel-body"><div class="brief-text" id="modelBriefText">模型解读尚未生成。它会把 packet、队员状态、事件、报告和未知项整理成自然语言，但不会补写 runtime 未记录的进展。</div></div></article>
-      </section>
+
+      <aside class="right-stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Detail Inspector</h2>
+            <span class="meta" id="detailMeta">rawRef</span>
+          </div>
+          <div>
+            <div class="tabs">
+              <button class="active" data-tab="raw">Raw</button>
+              <button data-tab="trajectory">Trajectory</button>
+              <button data-tab="brief">Model Brief</button>
+            </div>
+            <div class="panel-body" id="detailBody" data-testid="detail-inspector"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Unknowns</h2>
+            <span class="meta">from facts</span>
+          </div>
+          <div class="panel-body">
+            <div id="unknownsList" class="tree-list"></div>
+          </div>
+        </section>
+      </aside>
     </section>
-    <section class="notes"><div class="note" id="unknownNote">如果 report / event 未记录文件名，则当前无法确认具体正在修改哪些文件。</div><div class="note" id="quietNote">尚未收到 completion report。</div><div class="note" id="companionNote">主信息只显示 runtime 已记录的事实，不补写内部进展。</div></section>
   </main>
-  <aside class="detail-drawer" id="detailDrawer"><button class="drawer-close" id="closeDetailButton">关闭</button><h2>运行卷宗详情</h2><div id="detailContent"></div></aside>
-  <section class="control" aria-label="gateway controls"><input id="runIdInput" placeholder="run id" value="" /><button id="loadStatusButton">读取网关</button><button id="latestButton">最新 run</button><button id="liveButton">实时跟随</button><button id="useMockButton">Mock</button></section>
+
   <script>
-    const mockStatus = { runId: "run_demo_20260505_140220", taskTitle: "搭建 DPO 框架", phase: "l4_implement / 实现阶段", lifecycleState: "team_waiting", latestEvent: { eventType: "team_idle_waiting", timestamp: "14:02:20" }, gateway: { state: "mock", label: "Mock 数据" }, packetSummary: { objective: "搭建 DPO 框架。", targetPhase: "l4_implement", completionSummary: "需要返回实现结果、验证证据和 completion report。", reportSummary: "报告应说明改动、证据、风险和未完成项。" }, teammates: [{ role: "bridge-leader", status: "已创建 team/task，等待队员结构化回报。" }, { role: "implementor", status: "runtime 尚未收到明确 report，不能确认文件级动作。" }], activityFeed: [{ timestamp: "14:01:02", actor: "bridge-leader", title: "桥接窗口已开启", eventType: "bridge_window_opened", kind: "event", summary: "Bridge leader 接收任务包并创建执行窗口。" }, { timestamp: "14:01:10", actor: "bridge-leader", title: "执行团队已创建", eventType: "team_create_completed", kind: "event", summary: "执行团队已绑定到本轮 bridge window。" }, { timestamp: "14:01:18", actor: "bridge-leader", title: "任务说明已下发", eventType: "message_dispatch_completed", kind: "message", summary: "任务目标、完成条件和报告要求已发送给队员。" }, { timestamp: "14:02:20", actor: "runtime", title: "等待队员回报", eventType: "team_idle_waiting", kind: "event", summary: "暂未收到新的结构化报告、artifact 或完成信号。" }], unknowns: ["如果 report / event 未记录文件名，则当前无法确认具体正在修改哪些文件。", "尚未收到 completion report。", "尚未收到 artifact。"], internalProgress: { summary: "任务说明已下发，随后进入等待回报。", recentEvents: [], evidence: ["最近 4 条 runtime 事件可读。", "尚未收到 report / artifact，因此不能确认文件级进展。"], reports: [], artifactCount: 0 }, detail: {}, display: { title: "等待执行结果", factText: "任务说明已下发，执行团队正在后台处理。runtime 暂未收到新的结构化报告或 artifact。", explanationText: "这表示任务已经进入 bridge window 内部执行阶段。前台暂时安静，不等于卡死；它只表示当前还没有新的 runtime 事件。", nextStepText: "后续可能收到阶段性报告、artifact、完成检查结果，或超时/失败事件。", companionNote: "小队还没有带回新卷宗。这里不会猜测尚未返回的细节。" } };
-    const stageMap = { leader_freeze: "freeze", bridge_packet_built: "packet", bridge_window_opened: "bridge", bridge_packet_accepted: "bridge", team_create_completed: "bridge", message_dispatch_completed: "waiting", team_waiting: "waiting", artifacts_ready: "verify", task_completion_rejected: "verify", task_completion_completed: "done", bridge_window_returned: "done", bridge_window_partial_returned: "verify", task_failed: "verify" };
-    const REFRESH_INTERVAL_MS = 5000;
-    const LATEST_RUN_CHECK_MS = 10000;
-    const refreshLabel = `${Math.round(REFRESH_INTERVAL_MS / 1000)}s`;
-    const unboundStatus = { runId: "未知", taskTitle: "正在绑定最新 run", phase: "未知阶段", lifecycleState: "unknown", gateway: { state: "connecting", label: "连接中" }, packetSummary: {}, teammates: [], activityFeed: [], unknowns: ["正在读取 /runs。", "如果页面一直停留，请检查当前服务是否为最新 gateway。"], internalProgress: { evidence: [], reports: [], artifactCount: 0 }, detail: {}, display: { title: "正在读取 runtime", factText: "正在通过只读网关读取最新 run；如果一直停在这里，请检查 /runs 是否可读。", companionNote: "没有使用 demo run；当前等待真实 runtime 绑定。" } };
-    let currentStatus = unboundStatus;
-    let liveSource = null;
-    let livePollTimer = null;
-    let latestRunTimer = null;
-    let liveMode = "off";
-    let autoLatest = true;
-    let boundRunId = "";
-    const liveEventsById = new Map();
-    const el = id => document.getElementById(id);
-    const escapeHtml = value => String(value ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
-    function shortPhase(phase) { if (!phase) return "未知"; if (phase.includes("implement")) return "实现阶段"; if (phase.includes("execute")) return "验证阶段"; if (phase.includes("anomaly")) return "异常阶段"; if (phase.includes("bridge")) return "桥接阶段"; return String(phase).split("/").at(-1).trim(); }
-    function renderPacket(packet) { const safe = packet || {}; el("packetObjective").textContent = safe.objective || "尚未读取 task_spec / frozen semantics。"; el("packetCompletion").textContent = safe.completionSummary && safe.completionSummary !== "{}" ? safe.completionSummary : "尚未读取 completion contract。"; el("packetReport").textContent = safe.reportSummary && safe.reportSummary !== "{}" ? safe.reportSummary : "尚未读取 report contract。"; }
-    function displayRoleName(member = {}) { const raw = String(member.displayRole || member.role || member.agent_type || member.id || "执行会话"); const lower = raw.toLowerCase(); if (lower.includes("main-leader") || lower.includes("leader-orchestrator")) return "主控"; if (lower.includes("bridge-leader")) return "桥接负责人"; if (lower.includes("curator") || lower.includes("artifact curation")) return "产物整理队员"; if (lower.includes("preflight") || lower.includes("audit")) return "预检队员"; if (lower.includes("refresher") || lower.includes("documentation")) return "文档刷新队员"; if (lower.includes("formal_execute")) return "执行队员"; if (lower.includes("postrun_audit")) return "复核队员"; if (lower.includes("implementation_gate")) return "验收队员"; if (lower.includes("implement")) return "实现队员"; if (lower.includes("hook")) return "运行记录器"; if (/^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(raw)) return "主控会话"; return raw.replace(/_/g, " "); }
-    function humanizeToolText(text) { const raw = String(text || ""); const lower = raw.toLowerCase(); if (lower.includes("mcp__bridge__call_bridge_sdk")) return lower.includes("completed") ? "桥接窗口已经返回结果。" : "主控正在等待桥接窗口执行并返回结果。"; if (lower.includes("send_messages")) return lower.includes("completed") ? "桥接负责人已经把任务说明发给队员。" : "桥接负责人正在把任务说明发给队员。"; if (lower.includes("team_delete")) return lower.includes("completed") ? "桥接负责人已经清理本轮执行小队。" : "桥接负责人正在清理本轮执行小队。"; if (lower.includes("team_create")) return lower.includes("completed") ? "桥接负责人已经创建执行小队。" : "桥接负责人正在创建执行小队。"; if (lower.includes("task_create")) return lower.includes("completed") ? "桥接负责人已经登记本轮任务。" : "桥接负责人正在登记本轮任务。"; if (lower.includes("mcp__bridge__build_bridge_packet")) return "主控正在整理本轮桥接任务包。"; if (lower.includes("read ·") || lower === "read" || lower.startsWith("read ")) return raw.includes("：") ? raw : "正在读取文件。"; if (lower.includes("edit ·") || lower === "edit" || lower.startsWith("edit ")) return raw.includes("：") ? raw : "正在修改文件。"; if (lower.includes("write ·") || lower === "write" || lower.startsWith("write ")) return raw.includes("：") ? raw : "正在写入文件。"; if (lower.includes("multiedit") || lower.startsWith("multi edit")) return raw.includes("：") ? raw : "正在批量修改文件。"; if (lower.includes("grep ·") || lower === "grep" || lower.startsWith("grep ")) return raw.includes("：") ? raw : "正在搜索代码。"; if (lower.includes("glob ·") || lower === "glob" || lower.startsWith("glob ")) return raw.includes("：") ? raw : "正在匹配文件。"; if (lower.includes("ls ·") || lower === "ls" || lower.startsWith("ls ")) return raw.includes("：") ? raw : "正在列出目录。"; if (lower.includes("bash ·") || lower === "bash" || lower.startsWith("bash ")) return raw.includes("：") ? raw : "正在运行命令。"; if (/^[a-z_ -]+状态[:：]/i.test(raw)) return raw.replace(/^[^:：]+状态[:：]\s*/, ""); return raw; }
-    function readableFallbackStatus(status, role = "这个会话") { const value = String(status || "").toLowerCase(); if (value === "declared") return `${role}已经加入本轮任务，正在等待任务说明或第一条具体操作。`; if (value === "running" || value === "started") return `${role}正在执行，等待工具细节写入记录。`; if (value === "idle" || value === "done") return `${role}当前没有正在运行的工具。`; if (value === "unknown") return `${role}还没有可读的动作记录。`; return humanizeToolText(status) || `${role}还没有可读的动作记录。`; }
-    function renderToolLine(tool, fallback) { if (!tool) return fallback || ""; return humanizeToolText(tool.text || tool.label || fallback || ""); }
-    function renderTeam(teammates) { const list = Array.isArray(teammates) && teammates.length ? teammates.slice(0, 12) : [{ displayRole: "执行现场", currentText: "尚未读到 teammate / session 状态。", nextText: "等待 runtime 写入队员、会话或工具记录。" }]; el("teamList").innerHTML = list.map(member => { const roleName = displayRoleName(member); const current = humanizeToolText(member.currentText) || renderToolLine(member.activeTool, readableFallbackStatus(member.status, roleName)); const last = humanizeToolText(member.lastText) || renderToolLine(member.lastCompletedTool, ""); const next = humanizeToolText(member.nextText) || (member.activeTool ? "接下来会显示这项操作的完成结果、输出摘要或涉及文件。" : "接下来等待新的文件读取、代码修改、命令执行、报告或完成检查。"); const evidence = member.evidenceText || member.activeTool?.evidenceText || member.lastCompletedTool?.evidenceText || ""; const files = Array.isArray(member.fileRefs) && member.fileRefs.length ? member.fileRefs.slice(0, 4).map(file => file.split(/[\\/]/).filter(Boolean).slice(-3).join("/")).join(" · ") : ""; return `<div class="teammate"><div class="role">${escapeHtml(roleName)}<div class="status">${escapeHtml(member.runBindingState ? "已绑定本轮 run" : "")}</div></div><div><div class="tool-now">${escapeHtml(current)}</div>${last && last !== current ? `<div class="tool-last">上一条：${escapeHtml(last)}</div>` : ""}${evidence ? `<div class="tool-last">证据：${escapeHtml(evidence)}</div>` : ""}<div class="tool-last">准备：${escapeHtml(next)}</div>${files ? `<div class="file-list">涉及文件：${escapeHtml(files)}</div>` : ""}</div></div>`; }).join(""); }
-    function activityFromLiveEvent(event) { return { timestamp: event.timestamp, actor: event.actorId || event.agentType || event.streamSource || "runtime", title: event.title || event.eventType, eventType: event.eventType, kind: event.kind || event.streamSource || "event", source: event.source || event.streamSource, summary: event.summary || event.payloadPreview || "无摘要", files: event.refs?.files || [] }; }
-    function mergeLiveEvents(events = []) { for (const event of events) { if (event && event.streamId) liveEventsById.set(event.streamId, event); } while (liveEventsById.size > 400) liveEventsById.delete(liveEventsById.keys().next().value); }
-    function liveActivityFeed(status) { mergeLiveEvents(status.liveEvents || []); const liveFeed = [...liveEventsById.values()].map(activityFromLiveEvent); const fallback = Array.isArray(status.activityFeed) ? status.activityFeed : []; return (liveFeed.length ? liveFeed : fallback).slice(-45); }
-    function renderActivity(status) { const feed = liveActivityFeed(status); el("activityMeta").textContent = `${feed.length} 条可读活动 · SDK/hook live events 优先`; el("activityFeed").innerHTML = (feed.length ? feed : [{ timestamp: "—", actor: "runtime", title: "没有可读内部事件", summary: "当前只能显示等待状态。" }]).map(item => { const title = humanizeToolText(item.title || item.label || item.eventType || "runtime event"); const summary = humanizeToolText(item.summary || "无摘要"); const files = Array.isArray(item.files) ? item.files.slice(0,3).map(file => String(file).split(/[\\/]/).filter(Boolean).slice(-3).join("/")) : []; return `<article class="activity-item"><div class="activity-time">${escapeHtml(item.timestamp || "未知")}</div><div class="activity-main"><div class="activity-title">${escapeHtml(title)}</div><div class="activity-summary">${escapeHtml(summary)}</div><div class="activity-tags"><span class="tag">${escapeHtml(item.kind || "event")}</span><span class="tag">${escapeHtml(displayRoleName({ role: item.actor || "runtime" }))}</span>${item.source ? `<span class="tag">${escapeHtml(item.source)}</span>` : ""}${files.map(file => `<span class="tag">${escapeHtml(file)}</span>`).join("")}</div></div></article>`; }).join(""); }
-    function setLiveChip(text, state = "") { const node = el("liveChip"); node.textContent = text; node.classList.toggle("live", state === "live"); node.classList.toggle("warn", state === "warn"); }
-    function render(status) { currentStatus = status; if (status.runId && status.runId !== "未知") boundRunId = status.runId; const display = { ...unboundStatus.display, ...(status.display || {}) }; const latest = status.latestEvent || { eventType: "unknown", timestamp: "未知" }; const gateway = status.gateway || { state: "unknown", label: "未知" }; const unknowns = Array.isArray(status.unknowns) && status.unknowns.length ? status.unknowns : ["当前没有足够信息确认文件级进展。"]; el("runIdChip").textContent = status.runId || "未知"; el("phaseChip").textContent = shortPhase(status.phase); el("gatewayChip").textContent = gateway.label || gateway.state || "未知"; if (liveMode === "off") setLiveChip(autoLatest ? "自动最新 run" : "未开启", autoLatest ? "live" : ""); el("taskTitle").textContent = "当前委托：" + (status.taskTitle || "未命名任务"); el("statusTitle").textContent = display.title; el("factText").textContent = display.factText; renderPacket(status.packetSummary); renderTeam(status.teammates); renderActivity(status); el("unknownNote").textContent = unknowns[0]; el("quietNote").textContent = unknowns[1] || "没有 runtime 事实时，界面不会补写进展。"; el("companionNote").textContent = display.companionNote || `${latest.eventType || "unknown"} · ${latest.timestamp || "未知"}`; if (liveMode === "off" && status.runId) el("runIdInput").value = status.runId || ""; const active = stageMap[status.lifecycleState] || "waiting"; document.querySelectorAll(".phase-step").forEach(node => node.classList.toggle("active", node.dataset.stage === active)); }
-    function renderDetail() { const detail = currentStatus.detail || {}; const payload = { streamContract: currentStatus.streamContract || detail.streamContract, liveEvents: currentStatus.liveEvents || detail.liveEvents || [...liveEventsById.values()], packet: currentStatus.packetSummary || detail.packet, teammates: currentStatus.teammates || detail.teammates, activeOperations: detail.activeOperations, sessionBindings: detail.sessionBindings || [], sessionEvents: detail.sessionEvents || [], activityFeed: currentStatus.activityFeed || detail.activityFeed, communicationFeed: currentStatus.communicationFeed || detail.communicationFeed, internalProgress: currentStatus.internalProgress, reports: detail.reports || currentStatus.internalProgress?.reports || [], artifacts: detail.artifacts || [], recentEvents: detail.recentEvents || currentStatus.internalProgress?.recentEvents || [], inbox: detail.inbox || [] }; el("detailContent").innerHTML = Object.entries(payload).map(([key, value]) => `<section class="detail-section"><h3>${escapeHtml(key)}</h3><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre></section>`).join(""); }
-    async function getLatestRunId() { const response = await fetch(`/runs?ts=${Date.now()}`, { cache: "no-store" }); if (!response.ok) throw new Error(String(response.status)); const payload = await response.json(); const runs = Array.isArray(payload.runs) ? payload.runs : []; if (!runs.length) console.warn("Bridge Companion /runs returned no runs", payload); return runs[0]?.runId || ""; }
-    async function bindLatestRun({ startStream = false } = {}) { const runId = await getLatestRunId(); if (!runId) { setLiveChip("没有可读 run", "warn"); return; } if (runId === boundRunId && currentStatus.gateway?.state !== "mock") return; el("runIdInput").value = runId; boundRunId = runId; if (startStream) startLive(runId); else await loadFromGateway(runId); }
-    async function loadFromGateway(runIdOverride = "") { const runId = runIdOverride || el("runIdInput").value.trim(); if (!runId) return; try { const response = await fetch(`/runs/${encodeURIComponent(runId)}/status`, { cache: "no-store" }); if (!response.ok) throw new Error(String(response.status)); render(await response.json()); } catch { render({ runId, taskTitle: "未能读取指定 run", phase: "未知阶段", lifecycleState: "unknown", gateway: { state: "disconnected", label: "网关不可读" }, packetSummary: {}, teammates: [], activityFeed: [], internalProgress: { evidence: [], reports: [], artifactCount: 0 }, detail: {}, latestEvent: { eventType: "unknown", timestamp: "未知" }, unknowns: ["当前无法读取本地 runtime 网关。", "任务真实状态未知；这不代表远端任务失败或停止。"], display: { title: "网关不可读", factText: "当前无法读取本地 runtime 网关。任务真实状态未知；这不代表远端任务失败或停止。", companionNote: "通往本地卷宗的映射暂时断开。" } }); } }
-    function stopLive({ keepAuto = autoLatest } = {}) { if (liveSource) { liveSource.close(); liveSource = null; } if (livePollTimer) { clearInterval(livePollTimer); livePollTimer = null; } liveMode = "off"; autoLatest = keepAuto; setLiveChip(autoLatest ? "自动最新 run" : "未开启", autoLatest ? "live" : ""); }
-    async function pollLiveOnce(runId) { const response = await fetch(`/runs/${encodeURIComponent(runId)}/status`, { cache: "no-store" }); if (!response.ok) throw new Error(String(response.status)); render(await response.json()); }
-    function startPolling(runId, reason = "") { if (livePollTimer) clearInterval(livePollTimer); liveMode = "poll"; boundRunId = runId; setLiveChip(reason ? `${refreshLabel} 轮询 · ${reason}` : `${refreshLabel} 轮询`, "live"); pollLiveOnce(runId).catch(() => setLiveChip("轮询不可读", "warn")); livePollTimer = setInterval(() => { pollLiveOnce(runId).then(() => setLiveChip(`${refreshLabel} 轮询`, "live")).catch(() => setLiveChip("轮询不可读", "warn")); }, REFRESH_INTERVAL_MS); }
-    function startLive(runIdOverride = "") { const runId = runIdOverride || el("runIdInput").value.trim(); if (!runId) return; stopLive({ keepAuto: autoLatest }); if (typeof EventSource === "undefined") { startPolling(runId, "fallback"); return; } liveMode = "sse"; boundRunId = runId; setLiveChip("SSE 连接中", "warn"); liveSource = new EventSource(`/runs/${encodeURIComponent(runId)}/stream`); liveSource.addEventListener("companion_event", event => { try { const liveEvent = JSON.parse(event.data); mergeLiveEvents([liveEvent]); if (currentStatus?.runId === runId) renderActivity(currentStatus); setLiveChip(autoLatest ? `事件流 ${refreshLabel} · 自动最新` : `事件流 ${refreshLabel}`, "live"); } catch { setLiveChip("事件流解析失败", "warn"); } }); liveSource.addEventListener("status", event => { try { render(JSON.parse(event.data)); setLiveChip(autoLatest ? `SSE ${refreshLabel} · 自动最新` : `SSE ${refreshLabel}`, "live"); } catch { setLiveChip("SSE 解析失败", "warn"); } }); liveSource.onerror = () => { if (liveSource) liveSource.close(); liveSource = null; startPolling(runId, "SSE fallback"); }; }
-    function startLatestWatcher() { if (latestRunTimer) clearInterval(latestRunTimer); latestRunTimer = setInterval(() => { if (!autoLatest) return; getLatestRunId().then(runId => { if (runId && runId !== boundRunId) { el("runIdInput").value = runId; startLive(runId); } }).catch(() => setLiveChip("最新 run 不可读", "warn")); }, LATEST_RUN_CHECK_MS); }
-    el("loadStatusButton").addEventListener("click", () => { autoLatest = false; stopLive({ keepAuto: false }); loadFromGateway(); });
-    el("latestButton").addEventListener("click", () => { autoLatest = true; bindLatestRun({ startStream: true }).catch(() => setLiveChip("最新 run 不可读", "warn")); });
-    el("liveButton").addEventListener("click", () => { if (liveMode === "off") { autoLatest = false; startLive(); } else stopLive({ keepAuto: false }); });
-    el("useMockButton").addEventListener("click", () => { autoLatest = false; stopLive({ keepAuto: false }); render(mockStatus); });
-    el("openDetailButton").addEventListener("click", () => { renderDetail(); el("detailDrawer").classList.add("open"); });
-    el("closeDetailButton").addEventListener("click", () => el("detailDrawer").classList.remove("open"));
-    el("modelBriefButton").addEventListener("click", async () => { el("modelBriefText").textContent = "正在请求模型基于 runtime facts 生成解读。"; try { const response = await fetch("/brief", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: currentStatus }) }); if (!response.ok) throw new Error(String(response.status)); const brief = await response.json(); el("modelBriefText").textContent = brief.text || "模型没有返回可读解读。"; el("companionNote").textContent = "模型解读已基于当前 runtime facts 更新。"; } catch { el("modelBriefText").textContent = "模型解读失败：请检查 gateway 端 key.json / brief-secret.json 配置或网络连接。"; el("companionNote").textContent = "模型解读失败；主界面仍显示 runtime 原始事实。"; } });
-    render(unboundStatus);
-    el("loadStatusButton").textContent = "读取指定 run";
-    startLatestWatcher();
-    bindLatestRun({ startStream: true }).catch(() => { render({ runId: "未知", taskTitle: "未绑定到 runtime run", phase: "未知阶段", lifecycleState: "unknown", gateway: { state: "disconnected", label: "网关不可读" }, packetSummary: {}, teammates: [], activityFeed: [], internalProgress: { evidence: [], reports: [], artifactCount: 0 }, detail: {}, display: { title: "未绑定最新 run", factText: "启动后未能自动读取最新 run。请确认 gateway 能访问 runs 目录，并重启 gateway 后刷新页面。", companionNote: "没有使用 demo run；当前是未绑定状态。" }, unknowns: ["当前无法读取 /runs。", "请确认 gateway 的 runtime root 配置。"] }); setLiveChip("最新 run 不可读", "warn"); });
+    const state = {
+      repos: [],
+      runs: [],
+      repoKey: "",
+      runId: "",
+      status: null,
+      events: new Map(),
+      rawLookups: new Map(),
+      lastSeq: 0,
+      source: null,
+      selectedEventSeq: null,
+      selectedTab: "raw",
+      briefText: "No model brief requested.",
+      streamConnected: false
+    };
+
+    const $ = id => document.getElementById(id);
+    const escapeHtml = value => String(value ?? "").replace(/[&<>'"]/g, char => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "'": "&#39;",
+      '"': "&quot;"
+    }[char]));
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, { cache: "no-store", ...options });
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      return response.json();
+    }
+
+    function setChip(id, text, mode = "") {
+      const node = $(id);
+      node.querySelector("span").textContent = text || "unknown";
+      node.classList.toggle("live", mode === "live");
+      node.classList.toggle("warn", mode === "warn");
+    }
+
+    function compact(value, max = 140) {
+      const source = value && typeof value === "object" ? JSON.stringify(value) : value;
+      const text = String(source ?? "").replace(/\s+/g, " ").trim();
+      return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+    }
+
+    function eventList() {
+      return [...state.events.values()].sort((a, b) => a.seq - b.seq);
+    }
+
+    function addEvents(events = []) {
+      for (const event of events) {
+        if (!event || typeof event.seq !== "number") continue;
+        if (!state.events.has(event.seq)) state.events.set(event.seq, event);
+        state.lastSeq = Math.max(state.lastSeq, event.seq);
+      }
+      while (state.events.size > 900) {
+        const first = [...state.events.keys()].sort((a, b) => a - b)[0];
+        state.events.delete(first);
+      }
+    }
+
+    async function loadRepos() {
+      const payload = await api("/api/repos");
+      state.repos = Array.isArray(payload.repos) ? payload.repos : [];
+      $("repoSelect").innerHTML = state.repos.length
+        ? state.repos.map(repo => `<option value="${escapeHtml(repo.repoKey)}">${escapeHtml(repo.repoKey)} (${repo.runCount})</option>`).join("")
+        : `<option value="">No repos</option>`;
+      return state.repos;
+    }
+
+    async function selectRepo(repoKey) {
+      state.repoKey = repoKey || "";
+      $("repoSelect").value = state.repoKey;
+      stopStream();
+      state.events.clear();
+      state.rawLookups.clear();
+      state.lastSeq = 0;
+      if (!state.repoKey) {
+        state.runs = [];
+        render();
+        return;
+      }
+      const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs`);
+      state.runs = Array.isArray(payload.runs) ? payload.runs : [];
+      $("runSelect").innerHTML = state.runs.length
+        ? state.runs.map(run => `<option value="${escapeHtml(run.runId)}">${escapeHtml(run.runId)}</option>`).join("")
+        : `<option value="">No runs</option>`;
+      const nextRun = state.runs[0]?.runId || "";
+      await selectRun(nextRun);
+    }
+
+    async function selectLatestRun() {
+      if (!state.repoKey) return;
+      const latest = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/latest`);
+      await selectRun(latest.runId);
+    }
+
+    async function selectRun(runId) {
+      stopStream();
+      state.runId = runId || "";
+      $("runSelect").value = state.runId;
+      state.status = null;
+      state.events.clear();
+      state.rawLookups.clear();
+      state.lastSeq = 0;
+      state.selectedEventSeq = null;
+      if (!state.repoKey || !state.runId) {
+        render();
+        return;
+      }
+      state.status = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`);
+      const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500`);
+      addEvents(payload.events || []);
+      render();
+      startStream();
+    }
+
+    function startStream() {
+      if (!state.repoKey || !state.runId || typeof EventSource === "undefined") return;
+      stopStream();
+      setChip("streamChip", "connecting", "warn");
+      const url = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/stream?after=${state.lastSeq}`;
+      state.source = new EventSource(url);
+      state.source.addEventListener("open", () => {
+        state.streamConnected = true;
+        setChip("streamChip", "SSE", "live");
+      });
+      state.source.addEventListener("companion_event", event => {
+        try {
+          const parsed = JSON.parse(event.data);
+          addEvents([parsed]);
+          render();
+        } catch {
+          setChip("streamChip", "parse error", "warn");
+        }
+      });
+      state.source.addEventListener("gateway_error", event => {
+        setChip("streamChip", "gateway error", "warn");
+        console.warn(event.data);
+      });
+      state.source.onerror = () => {
+        state.streamConnected = false;
+        setChip("streamChip", "reconnecting", "warn");
+      };
+    }
+
+    function stopStream() {
+      if (state.source) {
+        state.source.close();
+        state.source = null;
+      }
+      state.streamConnected = false;
+      setChip("streamChip", "off");
+    }
+
+    function statusClass(status) {
+      const value = String(status || "").toLowerCase();
+      if (value === "running" || value === "started") return "running";
+      if (value === "failed" || value === "blocked") return "failed";
+      if (value === "completed") return "completed";
+      return "";
+    }
+
+    function displayRole(actor = {}) {
+      return actor.displayName || actor.teammateId || actor.role || "runtime";
+    }
+
+    function trajectoryActorLabel(actor) {
+      if (!actor || typeof actor !== "object") return actor || "runtime";
+      return actor.display_name || actor.teammate_id || actor.agent_type || actor.role || actor.session_id || compact(actor, 80);
+    }
+
+    function trajectoryActionLabel(step = {}) {
+      const action = step.action;
+      if (action && typeof action === "object") {
+        return [action.kind, action.tool_name, action.safe_input_preview].filter(Boolean).join(" ") || compact(action, 80);
+      }
+      return action || step.event_type || step.kind || "trajectory";
+    }
+
+    function trajectoryObservationLabel(step = {}) {
+      const observation = step.observation;
+      if (observation && typeof observation === "object") {
+        return [observation.status, observation.exit_code !== undefined ? `exit=${observation.exit_code}` : "", observation.stdout_tail || observation.stderr_tail].filter(Boolean).join(" ");
+      }
+      return observation || step.state_delta || step.summary || "";
+    }
+
+    function displayTitle(event) {
+      if (!event) return "No event selected";
+      if (event.source === "hook_tool_event") {
+        const verb = event.kind === "tool_started" ? "started" : event.kind === "tool_failed" ? "failed" : "completed";
+        return `${event.toolName || "tool"} ${verb}`;
+      }
+      if (event.kind === "assignment_sent") return "assignment sent";
+      if (event.kind === "report_received") return event.source === "artifact" ? "artifact recorded" : "report received";
+      if (event.kind === "completion_passed") return "completion passed";
+      if (event.kind === "completion_rejected") return "completion rejected";
+      if (event.kind === "lifecycle_transition") return "lifecycle transition";
+      if (event.kind === "text_delta") return "text delta";
+      return event.kind || event.source || "event";
+    }
+
+    function displaySummary(event) {
+      if (!event) return "";
+      const target = event.target ? ` target=${event.target}` : "";
+      return compact(`${event.messagePreview || ""}${target}`, 260);
+    }
+
+    function buildMembersFromEvents() {
+      const source = new Map();
+      const baseMembers = Array.isArray(state.status?.teammates) ? state.status.teammates : [];
+      for (const member of baseMembers) {
+        source.set(member.id || member.displayName || member.role, { ...member });
+      }
+      for (const event of eventList()) {
+        const key = event.actor?.teammateId || event.actor?.displayName || event.actor?.role || event.sessionId || "runtime";
+        const member = source.get(key) || {
+          id: key,
+          role: event.actor?.role || key,
+          displayName: displayRole(event.actor),
+          status: "idle",
+          activeTool: null,
+          lastCompletedTool: null,
+          reports: 0
+        };
+        if (event.source === "hook_tool_event") {
+          const tool = {
+            toolName: event.toolName,
+            status: event.status,
+            target: event.target,
+            messagePreview: event.messagePreview,
+            exitCode: event.raw?.exit_code,
+            rawRef: event.rawRef
+          };
+          if (event.kind === "tool_started") {
+            member.status = "running";
+            member.activeTool = tool;
+          } else {
+            member.status = event.kind === "tool_failed" ? "failed" : "idle";
+            member.activeTool = null;
+            member.lastCompletedTool = tool;
+          }
+        }
+        if (event.source === "teammate_report") member.reports = (member.reports || 0) + 1;
+        source.set(key, member);
+      }
+      return [...source.values()];
+    }
+
+    function renderSummary() {
+      const status = state.status || {};
+      const latestLifecycle = [...eventList()].reverse().find(event => event.kind === "lifecycle_transition");
+      $("repoValue").textContent = state.repoKey || "none";
+      $("runValue").textContent = state.runId || "none";
+      $("eventCountValue").textContent = String(state.events.size);
+      $("trajectoryCountValue").textContent = String(status.trajectory?.length || 0);
+      $("taskValue").textContent = status.taskTitle || status.packetSummary?.objective || "No task packet recorded.";
+      $("summaryMeta").textContent = status.gateway?.state || "not connected";
+      setChip("phaseChip", status.phase || "unknown");
+      setChip("lifeChip", latestLifecycle?.messagePreview || status.lifecycleState || "unknown");
+    }
+
+    function renderTeam() {
+      const members = buildMembersFromEvents();
+      $("teamTree").innerHTML = members.length ? members.map(member => {
+        const active = member.activeTool;
+        const last = member.lastCompletedTool;
+        const status = active ? "running" : member.status || "idle";
+        const activeText = active
+          ? `${active.toolName || "tool"} running${active.target ? `: ${compact(active.target, 70)}` : ""}`
+          : "no running tool";
+        const lastText = last
+          ? `${last.toolName || "tool"} ${last.status || "completed"}${last.exitCode !== undefined ? ` exit=${last.exitCode}` : ""}`
+          : "no completed tool recorded";
+        return `
+          <article class="member ${escapeHtml(statusClass(status))}">
+            <div class="member-head">
+              <div class="name">${escapeHtml(member.displayName || member.role || member.id)}</div>
+              <span class="badge ${escapeHtml(statusClass(status))}">${escapeHtml(status)}</span>
+            </div>
+            <div class="subtext">${escapeHtml(activeText)}</div>
+            <div class="subtext">${escapeHtml(lastText)}</div>
+            ${member.reports ? `<div class="subtext">${escapeHtml(member.reports)} report event(s)</div>` : ""}
+          </article>`;
+      }).join("") : `<div class="empty">No team/session binding captured.</div>`;
+    }
+
+    function selectEvent(seq, tab = "raw") {
+      state.selectedEventSeq = seq;
+      state.selectedTab = tab;
+      render();
+    }
+
+    async function openRawRef(seq) {
+      const event = state.events.get(seq);
+      state.selectedEventSeq = seq;
+      state.selectedTab = "raw";
+      render();
+      if (!event?.rawRef || state.rawLookups.has(seq)) return;
+      try {
+        const file = encodeURIComponent(event.rawRef.sourceFile);
+        const offset = encodeURIComponent(event.rawRef.sourceOffset);
+        const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/raw?file=${file}&offset=${offset}`);
+        state.rawLookups.set(seq, payload);
+      } catch (error) {
+        state.rawLookups.set(seq, { error: error.message, rawRef: event.rawRef });
+      }
+      renderDetail();
+    }
+
+    function defaultTabForEvent(event) {
+      if (["completion_check", "process_event", "artifact"].includes(event?.source)) return "trajectory";
+      return state.selectedTab;
+    }
+
+    function renderActivity() {
+      const events = eventList().slice(-250).reverse();
+      $("activityMeta").textContent = `${events.length} visible / latest seq ${state.lastSeq}`;
+      $("activityList").innerHTML = events.length ? events.map(event => {
+        const selected = event.seq === state.selectedEventSeq ? " selected" : "";
+        const badgeClass = statusClass(event.status);
+        const files = Array.isArray(event.fileRefs) ? event.fileRefs.slice(0, 3) : [];
+        return `
+          <article class="event${selected}" data-seq="${event.seq}">
+            <div class="event-head">
+              <div class="event-title">${escapeHtml(displayTitle(event))}</div>
+              <span class="badge ${escapeHtml(badgeClass)}">#${event.seq}</span>
+            </div>
+            <div class="subtext">${escapeHtml(displaySummary(event) || "recorded")}</div>
+            <div class="event-meta">
+              <span class="badge">${escapeHtml(displayRole(event.actor))}</span>
+              <span class="badge">${escapeHtml(event.source)}</span>
+              <span class="badge">${escapeHtml(event.kind)}</span>
+              ${files.map(file => `<span class="badge">${escapeHtml(compact(file, 48))}</span>`).join("")}
+              <button class="raw-link" data-raw="${event.seq}">rawRef</button>
+            </div>
+          </article>`;
+      }).join("") : `<div class="empty">No observer events for this run.</div>`;
+      document.querySelectorAll(".event").forEach(node => {
+        node.addEventListener("click", event => {
+          const seq = Number(node.dataset.seq);
+          if (event.target?.dataset?.raw) {
+            openRawRef(seq);
+          } else {
+            selectEvent(seq, defaultTabForEvent(state.events.get(seq)));
+          }
+        });
+      });
+    }
+
+    function relatedTrajectory(event) {
+      const steps = Array.isArray(state.status?.trajectory) ? state.status.trajectory : [];
+      if (!event || !steps.length) return [];
+      const tokens = [
+        event.bridgeWindowId,
+        event.teamId,
+        event.taskId,
+        event.rawRef?.sourceSequence,
+        ...(event.evidenceRefs || [])
+      ].filter(Boolean).map(String);
+      if (!tokens.length) return steps.slice(-20);
+      return steps.filter(step => {
+        const text = JSON.stringify(step);
+        return tokens.some(token => text.includes(token));
+      }).slice(-40);
+    }
+
+    function renderDetail() {
+      const selected = state.events.get(state.selectedEventSeq) || eventList().at(-1) || null;
+      $("detailMeta").textContent = selected?.rawRef
+        ? `${selected.rawRef.sourceFile}:${selected.rawRef.sourceOffset}`
+        : "rawRef";
+      document.querySelectorAll(".tabs button").forEach(button => {
+        button.classList.toggle("active", button.dataset.tab === state.selectedTab);
+      });
+      if (state.selectedTab === "brief") {
+        $("detailBody").innerHTML = `
+          <div class="brief-box">
+            <button id="briefButton">Generate Brief</button>
+            <div class="brief-output">${escapeHtml(state.briefText)}</div>
+          </div>`;
+        $("briefButton").addEventListener("click", generateBrief);
+        return;
+      }
+      if (state.selectedTab === "trajectory") {
+        const steps = selected ? relatedTrajectory(selected) : (state.status?.trajectory || []);
+        $("detailBody").innerHTML = steps.length ? `
+          <div class="trajectory-list">
+            ${steps.map(step => `
+              <article class="step">
+                <div class="step-head">
+                  <div class="step-title">step ${escapeHtml(step.step_index ?? step.step ?? "?")}: ${escapeHtml(compact(trajectoryActionLabel(step), 100))}</div>
+                  <span class="badge">${escapeHtml(trajectoryActorLabel(step.actor || step.role))}</span>
+                </div>
+                <div class="subtext">${escapeHtml(compact(trajectoryObservationLabel(step), 260))}</div>
+                <pre>${escapeHtml(JSON.stringify(step, null, 2))}</pre>
+              </article>`).join("")}
+          </div>` : `<div class="empty">No trajectory steps matched this selection.</div>`;
+        return;
+      }
+      const rawLookup = selected ? state.rawLookups.get(selected.seq) : null;
+      $("detailBody").innerHTML = selected
+        ? `<pre>${escapeHtml(JSON.stringify({
+            normalized: selected,
+            rawRef: selected.rawRef,
+            rawSourceRecord: rawLookup || "Click rawRef to read the source JSONL line.",
+            raw: selected.raw,
+            relatedTrajectory: relatedTrajectory(selected)
+          }, null, 2))}</pre>`
+        : `<div class="empty">Select an activity item to inspect raw runtime data.</div>`;
+    }
+
+    function renderUnknowns() {
+      const unknowns = Array.isArray(state.status?.unknowns) ? state.status.unknowns : [];
+      $("unknownsList").innerHTML = unknowns.length
+        ? unknowns.map(item => `<div class="member"><div class="subtext">${escapeHtml(item)}</div></div>`).join("")
+        : `<div class="empty">No unknowns recorded.</div>`;
+    }
+
+    function render() {
+      renderSummary();
+      renderTeam();
+      renderActivity();
+      renderDetail();
+      renderUnknowns();
+    }
+
+    async function generateBrief() {
+      state.briefText = "Generating brief from normalized facts...";
+      renderDetail();
+      try {
+        const payload = await api("/api/brief", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            status: state.status,
+            events: eventList().slice(-120),
+            unknowns: state.status?.unknowns || []
+          })
+        });
+        state.briefText = payload.text || "No brief returned.";
+      } catch (error) {
+        state.briefText = `Model brief failed. Main UI state is unchanged.\n\nUnknowns:\n${(state.status?.unknowns || ["none recorded"]).map(item => `- ${item}`).join("\n")}`;
+      }
+      renderDetail();
+    }
+
+    $("repoSelect").addEventListener("change", event => {
+      selectRepo(event.target.value).catch(error => {
+        console.error(error);
+        setChip("streamChip", "repo error", "warn");
+      });
+    });
+    $("runSelect").addEventListener("change", event => {
+      selectRun(event.target.value).catch(error => {
+        console.error(error);
+        setChip("streamChip", "run error", "warn");
+      });
+    });
+    $("latestButton").addEventListener("click", () => {
+      selectLatestRun().catch(error => {
+        console.error(error);
+        setChip("streamChip", "latest error", "warn");
+      });
+    });
+    $("liveButton").addEventListener("click", () => {
+      if (state.source) stopStream();
+      else startStream();
+      $("liveButton").classList.toggle("active", Boolean(state.source));
+    });
+    document.querySelectorAll(".tabs button").forEach(button => {
+      button.addEventListener("click", () => {
+        state.selectedTab = button.dataset.tab;
+        renderDetail();
+      });
+    });
+
+    (async function init() {
+      try {
+        await loadRepos();
+        const firstRepo = state.repos[0]?.repoKey || "";
+        await selectRepo(firstRepo);
+      } catch (error) {
+        console.error(error);
+        setChip("streamChip", "gateway error", "warn");
+        $("activityList").innerHTML = `<div class="empty">Gateway is not readable.</div>`;
+      }
+      render();
+    })();
   </script>
 </body>
 </html>

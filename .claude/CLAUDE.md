@@ -71,15 +71,18 @@ It must not:
 Control truth priority:
 
 1. `.claude/control/runtime/workflow_runtime.py`
-2. `.claude/control/policy/lifecycle_transition_table.json`
-3. `.claude/control/policy/phase_graph.json`
-4. `.claude/control/policy/approval_matrix.json`
-5. `.claude/control/policy/phase_contracts.json`
-6. `.claude/control/policy/reconcile_rules.json`
-7. `.claude/control/schemas/workflow_runtime.schema.json`
-8. `.claude/hooks/*.py`
-9. project-level workflow/semantic documents
-10. conversation text
+2. `.claude/control/runtime/state_graph.py`
+3. `.claude/control/policy/state_graph.json`
+4. `.claude/control/policy/lifecycle_transition_table.json`
+5. `.claude/control/policy/phase_graph.json`
+6. `.claude/control/policy/approval_matrix.json`
+7. `.claude/control/policy/phase_contracts.json`
+8. `.claude/control/policy/reconcile_rules.json`
+9. `.claude/control/runtime/checkpoint_store.py`, `retry_policy.py`, `trajectory.py`, `output_guardrails.py`, and `repo_runtime.py`
+10. `.claude/control/schemas/*.json`
+11. `.claude/hooks/*.py`
+12. project-level workflow/semantic documents
+13. conversation text
 
 Conversation text may explain intent. It is not execution truth.
 
@@ -203,6 +206,8 @@ Execute watchdog alerts are first-class warning facts. If a bridge window is in 
 - phase exit readiness
 
 `RuntimeSnapshot` is intentionally a compact control view, not a transcript, report store, or evidence bundle. It should preserve enough information for main-leader routing and recovery without pulling long reports, full evidence, complete tool streams, or historical binding maps into context. Full details remain in `run_ledger.json`, `event_log.jsonl`, `transitions.jsonl`, `main_leader_inbox.jsonl`, and observer JSONL files referenced by `snapshot_refs`.
+
+RunBridge also maintains native state graph and durable replay artifacts. `state_graph.json` defines graph nodes, lifecycle-event edges, and phase-route edges; `state_graph.py` validates lifecycle/phase policy consistency and can replay `event_log.jsonl` into a compact `RunBridgeState`. `checkpoint_store.py` writes per-event state checkpoints under `checkpoints/` plus `latest_checkpoint.json`. `trajectory.py` writes `trajectory.jsonl` and `trajectory_index.json` as UI-safe intent/action/observation/state-delta summaries. These records must stay bounded and must not contain hidden chain-of-thought, secrets, or full large stdout/stderr.
 
 `NotifyResult` writes items to the main-leader inbox. Blocking/error/warn/info messages are derived from check results, update results, integrity state, bridge results, TeamIdle, timeout, cleanup, and orphan events.
 

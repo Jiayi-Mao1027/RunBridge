@@ -10,6 +10,11 @@ from typing import Any
 from loader import ControlPaths, load_json_file, load_jsonl
 from persist import append_jsonl, atomic_write_json, sanitize_json_value
 from companion_observer import observe_workflow_event
+from checkpoint_store import write_event_checkpoint
+from output_guardrails import validate_bridge_packet as guardrail_validate_bridge_packet
+from output_guardrails import validate_bridge_result, validate_completion_report
+from repo_runtime import ensure_repo_registered, infer_repo_key_from_runs_root, repo_key_for_paths, update_active_run_registry
+from trajectory import record_guardrail_trajectory_step, record_workflow_trajectory_step
 
 
 SCHEMA_VERSION = "0.4.0"
@@ -205,6 +210,7 @@ EVENT_TO_UPDATE_KIND = {
     "semantic_frozen": "record_semantic_frozen",
     "phase_advanced": "advance_phase",
     "route_rerouted": "reroute_phase",
+    "retry_attempt_scheduled": "persist_retry_attempt_scheduled",
     "bridge_call_intended": "record_bridge_call_intent",
     "pretooluse_allowed_by_main_leader": "record_bridge_call_prechecked",
     "pretooluse_denied_by_main_leader": "record_bridge_call_denied",
@@ -243,7 +249,7 @@ EVENT_TO_UPDATE_KIND = {
     "orphan_timeout_without_heartbeat": "persist_bridge_window_orphaned",
 }
 
-CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE = {"session_started", "user_prompt_submitted", "semantic_frozen", "phase_advanced", "route_rerouted"}
+CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE = {"session_started", "user_prompt_submitted", "semantic_frozen", "phase_advanced", "route_rerouted", "retry_attempt_scheduled"}
 
 FAILURE_UPDATE_KINDS = {
     "record_bridge_call_denied",
@@ -472,6 +478,23 @@ def check_event(
     if event.event_kind in {"bridge_call_intended", "pretooluse_allowed_by_main_leader", "call_bridge_sdk_started"}:
         packet = normalized_payload.get("packet")
         reasons.extend(_validate_bridge_packet(packet, event, snapshot))
+        guardrail = guardrail_validate_bridge_packet(packet, snapshot=snapshot)
+        if not guardrail.get("valid"):
+            reasons.append("bridge_packet_guardrail_failed")
+            derived_facts["guardrail_validation"] = guardrail
+
+    if event.event_kind in {
+        "bridge_result_returned",
+        "bridge_result_returned_with_failure",
+        "bridge_result_returned_with_partial",
+        "bridge_result_returned_with_cleanup_required",
+    }:
+        bridge_result = normalized_payload.get("bridge_result")
+        if isinstance(bridge_result, dict):
+            guardrail = validate_bridge_result(bridge_result)
+            if not guardrail.get("valid"):
+                reasons.append("bridge_result_guardrail_failed")
+                derived_facts["guardrail_validation"] = guardrail
 
     if event.event_kind in CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE:
         derived_facts["from_status"] = None
@@ -501,6 +524,10 @@ def check_event(
     if event.event_kind == "completion_contract_satisfied":
         contract = normalized_payload.get("completion_contract") or normalized_payload.get("contract") or {}
         checks = normalized_payload.get("completion_checks") or {}
+        guardrail = validate_completion_report(normalized_payload)
+        if not guardrail.get("valid"):
+            reasons.append("completion_report_guardrail_failed")
+            derived_facts["guardrail_validation"] = guardrail
         if not isinstance(contract, dict) or not contract:
             reasons.append("completion_contract_missing")
         elif not _completion_contract_satisfied(contract, normalized_payload, checks):
@@ -534,6 +561,9 @@ def check_event(
         "bridge_packet_phase_route_not_policy_owned",
         "bridge_packet_l3_write_scope_not_policy_owned",
         "bridge_packet_implement_requires_write_authority",
+        "bridge_packet_guardrail_failed",
+        "bridge_result_guardrail_failed",
+        "completion_report_guardrail_failed",
         "taskcreated_payload_incomplete",
         "taskcreated_team_binding_invalid",
         "taskcreated_mapping_invalid",
@@ -732,6 +762,7 @@ def build_runtime_snapshot(paths: ControlPaths, run_ledger: dict[str, Any]) -> d
             "list_preview_limit": SNAPSHOT_LIST_LIMIT,
         },
         "snapshot_refs": snapshot_refs,
+        "repo_key": repo_key_for_paths(paths.control_root, paths.runtime_runs_root),
         "run_id": run["run_id"],
         "main_session_id": run.get("main_session_id") or run["run_id"],
         "current_phase": current_phase,
@@ -769,6 +800,30 @@ def persist_workflow_result(
     notify_result: NotifyResult,
 ) -> dict[str, str]:
     run_root = paths.run_root(event.run_id)
+    repo_root = (
+        event.payload.get("repo_root")
+        or event.payload.get("project_root")
+        or event.payload.get("cwd")
+        or event.payload.get("repo_cwd")
+    )
+    repo_key = infer_repo_key_from_runs_root(paths.runtime_runs_root) or snapshot.get("repo_key")
+    registry_paths: dict[str, str] = {}
+    try:
+        if repo_root:
+            manifest = ensure_repo_registered(paths.control_root, repo_root, run_id=event.run_id, status="running")
+            registry_paths["repo_manifest"] = str(paths.control_root.parent / "runtime_state" / "projects" / manifest.repo_key / "repo_manifest.json")
+        elif repo_key:
+            update_active_run_registry(
+                paths.control_root,
+                repo_key=str(repo_key),
+                repo_root=None,
+                run_id=event.run_id,
+                status="running",
+            )
+        registry_paths["repo_registry"] = str(paths.control_root.parent / "runtime_state" / "registry" / "repos.json")
+        registry_paths["active_runs_registry"] = str(paths.control_root.parent / "runtime_state" / "registry" / "active_runs.json")
+    except Exception as exc:
+        registry_paths["repo_registry_error"] = f"{exc.__class__.__name__}: {exc}"
     event_path = run_root / "event_log.jsonl"
     check_path = run_root / "check_ledger.jsonl"
     update_path = run_root / "update_ledger.jsonl"
@@ -807,6 +862,21 @@ def persist_workflow_result(
         companion_paths = observe_workflow_event(paths, event, snapshot)
     except Exception as exc:
         companion_paths = {"companion_observer_error": f"{exc.__class__.__name__}: {exc}"}
+    try:
+        checkpoint_paths = write_event_checkpoint(paths, event, snapshot)
+    except Exception as exc:
+        checkpoint_paths = {"checkpoint_error": f"{exc.__class__.__name__}: {exc}"}
+    try:
+        trajectory_paths = record_workflow_trajectory_step(paths, event, snapshot)
+    except Exception as exc:
+        trajectory_paths = {"trajectory_error": f"{exc.__class__.__name__}: {exc}"}
+    guardrail_paths: dict[str, str] = {}
+    validation = check_result.derived_facts.get("guardrail_validation")
+    if isinstance(validation, dict) and not validation.get("valid"):
+        try:
+            guardrail_paths = record_guardrail_trajectory_step(paths, event.run_id, validation, event_ref=f"check_ledger.jsonl:{event.event_id}")
+        except Exception as exc:
+            guardrail_paths = {"guardrail_trajectory_error": f"{exc.__class__.__name__}: {exc}"}
     return {
         "event_log": str(event_path),
         "check_ledger": str(check_path),
@@ -815,7 +885,11 @@ def persist_workflow_result(
         "runtime_snapshot": str(snapshot_path),
         "run_ledger": str(paths.run_ledger_path(event.run_id)),
         "transitions": str(paths.transitions_path(event.run_id)),
+        **registry_paths,
         **companion_paths,
+        **checkpoint_paths,
+        **trajectory_paths,
+        **guardrail_paths,
     }
 
 
@@ -967,6 +1041,8 @@ def _ensure_run_ledger(run: dict[str, Any], event: WorkflowEvent) -> dict[str, A
             "closed_at": None,
         }
     run.setdefault("schema_version", SCHEMA_VERSION)
+    if event.payload.get("repo_key"):
+        run.setdefault("repo_key", event.payload.get("repo_key"))
     run.setdefault("main_session_id", event.main_session_id)
     run.setdefault("workflow_name", "bridge_window_workflow")
     run.setdefault("workflow_version", SCHEMA_VERSION)
@@ -1002,7 +1078,12 @@ def _ensure_workflow_indexes(run: dict[str, Any]) -> None:
 
 def _apply_transition_to_run(run: dict[str, Any], event: WorkflowEvent, to_status: str, transition: dict[str, Any]) -> None:
     _ensure_workflow_indexes(run)
-    bridge_window_id = event.bridge_window_id
+    if event.event_kind == "retry_attempt_scheduled":
+        run.setdefault("retry_context", {"attempts": []})
+        attempts = run["retry_context"].setdefault("attempts", [])
+        attempts.append(deepcopy(event.payload))
+        run["retry_context"]["latest"] = deepcopy(event.payload)
+    bridge_window_id = None if event.event_kind == "retry_attempt_scheduled" else event.bridge_window_id
     if bridge_window_id:
         binding = run["bindings"]["bridge_windows"].setdefault(
             bridge_window_id,

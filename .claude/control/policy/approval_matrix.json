@@ -10,7 +10,8 @@
         "user_prompt_submitted",
         "semantic_frozen",
         "phase_advanced",
-        "route_rerouted"
+        "route_rerouted",
+        "retry_attempt_scheduled"
       ],
       "must_record_transition": true
     },

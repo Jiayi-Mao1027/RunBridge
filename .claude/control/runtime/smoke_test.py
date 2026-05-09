@@ -15,6 +15,7 @@ from claude_cli_executor import _bridge_leader_prompt
 from claude_cli_executor import _ensure_project_agent_files
 from claude_cli_executor import _parse_claude_payload
 from claude_cli_executor import _parse_claude_stdout_envelope
+from claude_cli_executor import _claude_print_stream_json_args
 from claude_cli_executor import _redact_cmd
 from claude_cli_executor import _required_agent_models
 from claude_cli_executor import _run_claude_streaming
@@ -22,6 +23,10 @@ from claude_cli_executor import _sdk_stream_event_paths
 from claude_cli_executor import _settings_args
 from claude_cli_executor import simulated_team_executor
 from main_leader import decide_next_bridge_packet
+from output_guardrails import validate_bridge_result, validate_completion_report
+from repo_runtime import ensure_repo_registered, get_repo_runtime_root, list_registered_repos, resolve_repo_key
+from retry_policy import decide_retry, load_retry_policies, packet_hash
+from state_graph import load_state_graph, replay_run_state, validate_state_graph
 from workflow_runtime import dispatch_workflow_event
 from workflow_runtime import reconcile_workflow_from_ledger
 
@@ -65,8 +70,8 @@ def build_fixture(root: Path) -> tuple[Path, Path]:
             {"name": "l2_advisory", "allowed_next_phases": ["l3_bridge"]},
             {"name": "l3_bridge", "allowed_next_phases": ["l3_bridge", "leader_freeze", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly"]},
             {"name": "l4_implement", "allowed_next_phases": ["l4_execute", "l4_anomaly"]},
-            {"name": "l4_execute", "allowed_next_phases": ["l4_anomaly"]},
-            {"name": "l4_anomaly", "allowed_next_phases": ["l4_implement", "l4_execute"]},
+            {"name": "l4_execute", "allowed_next_phases": ["l4_anomaly", "l4_implement"]},
+            {"name": "l4_anomaly", "allowed_next_phases": ["l3_bridge", "l4_implement", "l4_execute"]},
         ]
     }
     now = _now()
@@ -93,8 +98,14 @@ def build_fixture(root: Path) -> tuple[Path, Path]:
         "closed_at": None,
     }
     _write_json(control_root / "policy" / "phase_graph.json", phase_graph)
-    _write_json(control_root / "policy" / "approval_matrix.json", {"categories": {}})
+    _write_json(control_root / "policy" / "approval_matrix.json", {"categories": {"control_default": {"allowed_event_kinds": ["retry_attempt_scheduled"]}}})
     _write_json(control_root / "policy" / "reconcile_rules.json", {"schema_version": "0.4.0"})
+    source_state_graph = Path(__file__).resolve().parents[1] / "policy" / "state_graph.json"
+    if source_state_graph.exists():
+        _write_json(control_root / "policy" / "state_graph.json", json.loads(source_state_graph.read_text(encoding="utf-8")))
+    source_lifecycle = Path(__file__).resolve().parents[1] / "policy" / "lifecycle_transition_table.json"
+    if source_lifecycle.exists():
+        _write_json(control_root / "policy" / "lifecycle_transition_table.json", json.loads(source_lifecycle.read_text(encoding="utf-8")))
     _write_json(run_root / "run_ledger.json", run_ledger)
     return control_root, runs_root
 
@@ -116,7 +127,7 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
         "team_spec": {
             "team_id_or_null": None,
             "team_name": f"team_{bridge_window_id}",
-            "teammate_specs": [{"teammate_name": "worker", "role": "execute", "allowed_tools": [], "responsibilities": []}],
+            "teammate_specs": [{"teammate_name": "worker", "role": "execute", "allowed_tools": ["Read"], "responsibilities": []}],
             "ownership_boundary": {"readable_scopes": [], "writable_scopes": ["tmp"], "process_ownership_rules": [], "forbidden_actions": []},
         },
         "task_spec": {
@@ -177,7 +188,7 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
             "include_next_action_recommendation": True,
         },
         "allowed_actions": ["team_create", "task_create", "send_messages", "task_complete", "team_delete"],
-        "allowed_tools": [],
+        "allowed_tools": ["Agent", "Read"],
         "approval_requirements": [],
         "created_at": _now(),
         "expires_at": None,
@@ -251,7 +262,7 @@ def run_success(control_root: Path, runs_root: Path) -> dict:
     dispatch(control_root, runs_root, event("completion_contract_satisfied", bw, ss, team_id="team_success", task_id="task_success", agent_type="hook", agent_id="hook.task_completed", payload={"completion_contract": p["completion_contract"], "completion_checks": {"required_outputs_present": True, "required_artifacts_present": True, "validation_passed": True, "missing_outputs": [], "missing_artifacts": [], "failed_validations": [], "notes": []}, "reports": [{"summary": "ok"}], "artifact_refs": ["artifact"]}))
     dispatch(control_root, runs_root, event("team_delete_started", bw, ss, team_id="team_success", task_id="task_success", tool_name="team_delete"))
     dispatch(control_root, runs_root, event("team_delete_succeeded", bw, ss, team_id="team_success", task_id="task_success", tool_name="team_delete"))
-    return dispatch(control_root, runs_root, event("bridge_result_returned", bw, ss, team_id="team_success", task_id="task_success", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", payload={"bridge_result": {"status": "succeeded", "reports": [{"summary": "ok"}], "artifact_refs": ["artifact"]}}))
+    return dispatch(control_root, runs_root, event("bridge_result_returned", bw, ss, team_id="team_success", task_id="task_success", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", payload={"bridge_result": {"status": "succeeded", "reports": [{"summary": "ok"}], "artifact_refs": ["artifact"], "evidence": {"event_ids": ["evt_success"]}, "error_or_null": None, "cleanup_required": False}}))
 
 
 def run_failure(control_root: Path, runs_root: Path) -> dict:
@@ -1404,6 +1415,10 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     if "bridge prompt body" in redacted_cmd or "<prompt:18 chars>" not in redacted_cmd:
         raise AssertionError(json.dumps(redacted_cmd, ensure_ascii=False, indent=2))
 
+    stream_json_args = _claude_print_stream_json_args()
+    if "--output-format" not in stream_json_args or "stream-json" not in stream_json_args or "--verbose" not in stream_json_args:
+        raise AssertionError(json.dumps(stream_json_args, ensure_ascii=False, indent=2))
+
     cli_packet = packet("bw_cli_policy", "sub_cli_policy")
     cli_packet["allowed_tools"] = ["Agent", "Read", "Grep", "Glob", "LS"]
     cli_packet["team_spec"]["teammate_specs"] = [
@@ -1858,6 +1873,155 @@ def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
     return {"hook_observer_rebind": "passed"}
 
 
+def run_state_graph_tests(control_root: Path, runs_root: Path) -> dict:
+    real_control_root = Path(__file__).resolve().parents[1]
+    real_validation = validate_state_graph(real_control_root)
+    if not real_validation.get("valid"):
+        raise AssertionError(json.dumps(real_validation, ensure_ascii=False, indent=2))
+    fixture_validation = validate_state_graph(control_root)
+    if not fixture_validation.get("valid"):
+        raise AssertionError(json.dumps(fixture_validation, ensure_ascii=False, indent=2))
+    state = replay_run_state(control_root, "run_demo", runtime_runs_root=str(runs_root))
+    if state.get("lifecycle_state") != "bridge_window_returned":
+        raise AssertionError(json.dumps(state, ensure_ascii=False, indent=2))
+    graph = load_state_graph(control_root)
+    mermaid = graph.export_mermaid()
+    dot = graph.export_dot()
+    if "flowchart TD" not in mermaid or "digraph RunBridgeStateGraph" not in dot:
+        raise AssertionError(json.dumps({"mermaid": mermaid[:200], "dot": dot[:200]}, ensure_ascii=False, indent=2))
+    (runs_root / "run_demo" / "state_graph.mmd").write_text(mermaid, encoding="utf-8")
+    (runs_root / "run_demo" / "state_graph.dot").write_text(dot, encoding="utf-8")
+    return {"state_graph": "passed", "node_count": real_validation["node_count"], "edge_count": real_validation["edge_count"]}
+
+
+def run_retry_policy_tests(control_root: Path, runs_root: Path) -> dict:
+    policies = load_retry_policies(control_root)
+    p = packet("bw_success", "sub_success")
+    decision = decide_retry(
+        policies,
+        "bridge_sdk_call",
+        attempt=2,
+        error_type="ClaudeCliTimeout",
+        reason={"error_type": "ClaudeCliTimeout"},
+    )
+    event_payload = decision.as_event_payload(
+        repo_key="unscoped_repo",
+        run_id="run_demo",
+        bridge_window_id="bw_success",
+        packet_hash=packet_hash(p),
+    )
+    if not decision.retryable or decision.delay_ms != 4000 or event_payload["attempt"] != 2:
+        raise AssertionError(json.dumps(event_payload, ensure_ascii=False, indent=2))
+    non_retryable = decide_retry(
+        policies,
+        "bridge_sdk_call",
+        attempt=1,
+        error_type="FrozenSemanticsMismatch",
+    )
+    if non_retryable.retryable or non_retryable.next_action != "surface_non_retryable_failure":
+        raise AssertionError(json.dumps(non_retryable.as_event_payload(repo_key="unscoped_repo", run_id="run_demo", bridge_window_id="bw_success", packet_hash=packet_hash(p)), ensure_ascii=False, indent=2))
+    retry_event = event(
+        "retry_attempt_scheduled",
+        "bw_success",
+        "sub_success",
+        team_id="team_success",
+        task_id="task_success",
+        agent_type="runtime",
+        agent_id="runtime.retry",
+        payload=event_payload,
+    )
+    result = dispatch_workflow_event(str(control_root), retry_event, runtime_runs_root=str(runs_root), persist=True)
+    if not result.ok:
+        raise AssertionError(json.dumps(result.check_result, ensure_ascii=False, indent=2))
+    retry_ledger = json.loads((runs_root / "run_demo" / "run_ledger.json").read_text(encoding="utf-8")).get("retry_context", {})
+    if retry_ledger.get("latest", {}).get("attempt") != 2:
+        raise AssertionError(json.dumps(retry_ledger, ensure_ascii=False, indent=2))
+    return {"retry_policy": "passed"}
+
+
+def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
+    invalid = validate_bridge_result({"status": "succeeded", "reports": [], "artifact_refs": [], "cleanup_required": False})
+    if invalid.get("valid") or invalid.get("error_type") != "MissingReport":
+        raise AssertionError(json.dumps(invalid, ensure_ascii=False, indent=2))
+    completion_invalid = validate_completion_report({"completion_checks": {"required_outputs_present": True}, "artifact_refs": []})
+    if completion_invalid.get("valid"):
+        raise AssertionError(json.dumps(completion_invalid, ensure_ascii=False, indent=2))
+    bad_event = event(
+        "bridge_result_returned",
+        "bw_guardrail",
+        "sub_guardrail",
+        agent_type="main-leader",
+        agent_id="main",
+        tool_name="call_bridge_sdk",
+        payload={"bridge_result": {"status": "succeeded", "reports": [], "artifact_refs": [], "cleanup_required": False}},
+    )
+    result = dispatch_workflow_event(str(control_root), bad_event, runtime_runs_root=str(runs_root), persist=True)
+    if result.ok or "bridge_result_guardrail_failed" not in result.check_result.get("reasons", []):
+        raise AssertionError(json.dumps(result.check_result, ensure_ascii=False, indent=2))
+    trajectory = (runs_root / "run_demo" / "trajectory.jsonl").read_text(encoding="utf-8")
+    if "guardrail_validation" not in trajectory and "MissingReport" not in trajectory:
+        raise AssertionError(trajectory[-1000:])
+    return {"guardrails": "passed"}
+
+
+def run_checkpoint_trajectory_tests(runs_root: Path) -> dict:
+    run_root = runs_root / "run_demo"
+    required = [
+        run_root / "checkpoints.jsonl",
+        run_root / "latest_checkpoint.json",
+        run_root / "trajectory.jsonl",
+        run_root / "trajectory_index.json",
+    ]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise AssertionError(json.dumps({"missing": missing}, ensure_ascii=False, indent=2))
+    trajectory_text = (run_root / "trajectory.jsonl").read_text(encoding="utf-8")
+    if "sk-" in trajectory_text or "api_key=" in trajectory_text.lower():
+        raise AssertionError("trajectory contains unredacted secret-looking text")
+    index = json.loads((run_root / "trajectory_index.json").read_text(encoding="utf-8"))
+    if int(index.get("step_count") or 0) <= 0:
+        raise AssertionError(json.dumps(index, ensure_ascii=False, indent=2))
+    return {"checkpoint_trajectory": "passed", "trajectory_steps": index["step_count"]}
+
+
+def run_multi_repo_isolation_tests(root: Path, control_root: Path) -> dict:
+    repo_a = root / "repo_a"
+    repo_b = root / "repo_b"
+    repo_a.mkdir(parents=True, exist_ok=True)
+    repo_b.mkdir(parents=True, exist_ok=True)
+    key_a = resolve_repo_key(repo_a)
+    key_b = resolve_repo_key(repo_b)
+    if key_a == key_b:
+        raise AssertionError("repo keys collided")
+    ensure_repo_registered(control_root, repo_a, run_id="run_same", status="running")
+    ensure_repo_registered(control_root, repo_b, run_id="run_same", status="running")
+    runs_a = get_repo_runtime_root(control_root, key_a)
+    runs_b = get_repo_runtime_root(control_root, key_b)
+    for repo_key, repo_path, runs_root in ((key_a, repo_a, runs_a), (key_b, repo_b, runs_b)):
+        payload = {
+            "run_id": "run_same",
+            "main_session_id": f"main_{repo_path.name}",
+            "agent_id": "hook.session_start",
+            "agent_type": "hook",
+            "event_kind": "session_started",
+            "timestamp": _now(),
+            "payload": {"cwd": str(repo_path), "repo_root": str(repo_path), "repo_key": repo_key},
+        }
+        result = dispatch_workflow_event(str(control_root), payload, runtime_runs_root=str(runs_root), persist=True)
+        if not result.ok:
+            raise AssertionError(json.dumps(result.check_result, ensure_ascii=False, indent=2))
+        if result.runtime_snapshot.get("repo_key") != repo_key:
+            raise AssertionError(json.dumps(result.runtime_snapshot, ensure_ascii=False, indent=2))
+    if not (runs_a / "run_same" / "run_ledger.json").exists() or not (runs_b / "run_same" / "run_ledger.json").exists():
+        raise AssertionError("isolated run ledgers were not written")
+    if runs_a == runs_b:
+        raise AssertionError("repo runtime roots are not isolated")
+    registered = {repo.repo_key for repo in list_registered_repos(control_root)}
+    if key_a not in registered or key_b not in registered:
+        raise AssertionError(json.dumps(sorted(registered), ensure_ascii=False, indent=2))
+    return {"multi_repo_isolation": "passed", "repo_keys": [key_a, key_b]}
+
+
 def main() -> None:
     workspace_tmp = Path.cwd() / ".runtime_smoke_tmp"
     workspace_tmp.mkdir(parents=True, exist_ok=True)
@@ -1869,6 +2033,9 @@ def main() -> None:
         success = run_success(control_root, runs_root)
         if success.get("current_phase") != "l4_execute":
             raise AssertionError(json.dumps({"expected_phase": "l4_execute", "snapshot": success}, ensure_ascii=False, indent=2))
+        state_graph = run_state_graph_tests(control_root, runs_root)
+        retry_policy = run_retry_policy_tests(control_root, runs_root)
+        guardrails = run_guardrail_tests(control_root, runs_root)
         failure = run_failure(control_root, runs_root)
         orphan = run_orphan(control_root, runs_root)
         mcp_helper = run_mcp_lifecycle_helper(control_root, runs_root)
@@ -1883,6 +2050,8 @@ def main() -> None:
         negative = run_negative_tests(negative_control_root, negative_runs_root)
         cli_executor = run_cli_executor_policy_tests(runtime_dir)
         hook_observer = run_hook_observer_rebind_tests(runtime_dir, runs_root)
+        checkpoint_trajectory = run_checkpoint_trajectory_tests(runs_root)
+        multi_repo = run_multi_repo_isolation_tests(runtime_dir, control_root)
         summary = {
             "success_status": success["lifecycle"]["status_index"]["bw_success"],
             "success_phase": success["current_phase"],
@@ -1906,6 +2075,11 @@ def main() -> None:
             "negative_tests": negative["negative_tests"],
             "cli_executor_policy": cli_executor["cli_executor_policy"],
             "hook_observer_rebind": hook_observer["hook_observer_rebind"],
+            "state_graph": state_graph["state_graph"],
+            "retry_policy": retry_policy["retry_policy"],
+            "guardrails": guardrails["guardrails"],
+            "checkpoint_trajectory": checkpoint_trajectory["checkpoint_trajectory"],
+            "multi_repo_isolation": multi_repo["multi_repo_isolation"],
             "open_bridge_window_ids": orphan["lifecycle"]["open_bridge_window_ids"],
             "inbox_exists": (runs_root / "run_demo" / "main_leader_inbox.jsonl").exists(),
             "runtime_dir": str(runtime_dir),
@@ -1928,6 +2102,11 @@ def main() -> None:
         assert summary["sdk_running_partial_status"] == "bridge_window_failed"
         assert summary["sdk_reject_status"] == "bridge_window_failed"
         assert summary["sdk_manifest_status"] == "bridge_window_returned"
+        assert summary["state_graph"] == "passed"
+        assert summary["retry_policy"] == "passed"
+        assert summary["guardrails"] == "passed"
+        assert summary["checkpoint_trajectory"] == "passed"
+        assert summary["multi_repo_isolation"] == "passed"
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     finally:
         shutil.rmtree(runtime_dir, ignore_errors=True)

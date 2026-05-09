@@ -22,6 +22,7 @@ sys.path.insert(0, str(RUNTIME_ROOT))
 
 from bridge_sdk import call_bridge_sdk  # noqa: E402
 from main_leader import decide_next_bridge_packet, read_runtime_snapshot  # noqa: E402
+from repo_runtime import list_registered_repos, list_runs, read_snapshot as read_repo_snapshot  # noqa: E402
 from workflow_runtime import dispatch_workflow_event, reconcile_workflow_from_ledger  # noqa: E402
 
 
@@ -224,6 +225,41 @@ def _tools() -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
         },
+        {
+            "name": "list_registered_repos",
+            "description": "List repo manifests registered under this parent .claude runtime_state registry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "list_runs",
+            "description": "List run summaries for one registered repo_key.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo_key": {"type": "string"}
+                },
+                "required": ["repo_key"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "read_repo_snapshot",
+            "description": "Read a runtime snapshot by explicit repo_key and run_id. Use this for multi-repo-safe snapshot reads.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo_key": {"type": "string"},
+                    "run_id": {"type": "string"}
+                },
+                "required": ["repo_key", "run_id"],
+                "additionalProperties": False,
+            },
+        },
     ]
 
 
@@ -288,6 +324,12 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             runtime_runs_root=runtime_runs_root,
             persist=bool(arguments.get("persist", True)),
         )
+    elif tool_name == "list_registered_repos":
+        result = {"repos": [repo.as_dict() for repo in list_registered_repos(CONTROL_ROOT)]}
+    elif tool_name == "list_runs":
+        result = {"repo_key": str(arguments["repo_key"]), "runs": list_runs(CONTROL_ROOT, str(arguments["repo_key"]))}
+    elif tool_name == "read_repo_snapshot":
+        result = read_repo_snapshot(CONTROL_ROOT, str(arguments["repo_key"]), str(arguments["run_id"]))
     else:
         raise ValueError(f"unknown tool: {tool_name}")
 

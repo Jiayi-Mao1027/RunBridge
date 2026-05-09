@@ -1,71 +1,102 @@
 # Bridge Companion
 
-Bridge Companion 是一个系统外、只读、事实驱动的远程运行观演层。它用于观察 Claude Code Bridge Runtime 的实时 SDK stream、SDK hooks stream，以及用于审计/恢复/补洞的 runstate JSON，把后台执行状态翻译成用户可读的自然语言进度。
+Bridge Companion is a read-only observation UI for the Bridge Runtime. It observes, attributes, presents, recovers after disconnects, and provides audit jumps into raw runtime facts.
 
-它不控制任务，不参与决策，不修改 runtime，不污染系统内 agent 的上下文。视觉可以采用游戏化、像素风、暗黑奇幻任务板等主题，但主信息必须严格来自已观测事实。实时 UI 优先来自 SDK stream / hooks stream；runtime_snapshot、event_log、ledger、observer JSONL 等 runstate 文件只作为 hydration、backfill、审计确认和断线恢复来源。
+It does not create bridge windows, create teams or tasks, modify ledgers, modify frozen semantics, control retries, decide completion, or inject context into agents.
 
-核心原则：
+## Runtime Sources
 
-```text
-视觉可以游戏化，信息不能游戏化。
-```
+Primary live sources:
 
-更具体地说：
+- `sdk_stream_events.jsonl`
+- `tool_events.jsonl`
+- `agent_messages.jsonl`
+- `teammate_reports.jsonl`
+- `process_events.jsonl`
+- `artifacts.jsonl`
+- `completion_checks.jsonl`
+- `trajectory.jsonl`
 
-```text
-像巫师三任务板一样好看，但像运行日志一样诚实。
-```
+Hydration and audit sources:
 
-## 目录
+- `runtime_snapshot.json`
+- `run_ledger.json`
+- `transitions.jsonl`
+- `session_bindings.jsonl`
+- `active_operations.json`
+- `.claude/runtime_state/session_observer/*.jsonl`
 
-```text
-bridge-companion/
-  README.md
-  package.json
-  docs/
-    architecture.md
-    copy-principles.md
-    runtime-status-model.md
-    remote-gateway.md
-    startup.md
-    visual-direction.md
-    interaction-plan.md
-    interaction-rules.md
-    brief-api.md
-  gateway/
-    server.mjs
-  prototype/
-    index.html
-```
+The UI must not synthesize low-level tool actions from reports. `Read`, `Edit`, `Write`, `MultiEdit`, `Bash`, `Grep`, `Glob`, and `LS` cards only come from hook `tool_events.jsonl`.
 
-## 边界
+## Gateway
 
-Bridge Companion 的事实源分层如下：实时主源是 bridge SDK stream 与 SDK hooks stream；补充/审计源是 runtime_snapshot、event_log、main_leader_inbox、bridge result、artifact/report 引用和 observer JSONL。UI 不应把 runstate JSON 当成实时主源。
-
-Bridge Companion 不做这些事：发起 bridge 调用、创建 team/task、向 teammate 发消息、修改 workflow ledger、修改 agent prompt、改写 frozen semantics、把运行事实写回系统上下文。
-
-如果需要智能解释能力，应作为 UI 外挂 API 引入，并且只在 Companion 的解释层工作。该 API 只能基于已提供的 runtime facts 生成解释，不得影响 Bridge Runtime，也不得向系统内 agent 注入上下文。
-
-## 启动
-
-本地查看原型和只读网关：
+Start locally:
 
 ```powershell
 cd C:\Users\admin\Desktop\Structure-config-1\bridge-companion
 node gateway\server.mjs
 ```
 
-打开：
+Open:
 
 ```text
 http://127.0.0.1:8787/
 ```
 
-如果要读取真实 runtime，把 `BRIDGE_RUNTIME_ROOT` 指向 runs 目录：
+Default runtime discovery reads:
 
-```powershell
-$env:BRIDGE_RUNTIME_ROOT="C:\path\to\.claude\runtime_state\projects\<repo-key>\runs"
-node gateway\server.mjs
+```text
+../.claude/runtime_state/projects/<repo-key>/runs/<run-id>/
 ```
 
-远程部署时，通过 Cursor 端口映射或隧道把本地 `127.0.0.1:8787` 暴露给远程 UI。这个 gateway 只有只读接口，不提供控制接口。
+Optional overrides:
+
+- `BRIDGE_RUNTIME_PROJECTS_ROOT`: path to `.claude/runtime_state/projects`
+- `BRIDGE_RUNTIME_ROOT` or `BRIDGE_RUNTIME_RUNS_ROOT`: compatibility path; if it points at a single repo `runs` directory, the gateway derives the projects root from it
+- `BRIDGE_SESSION_OBSERVER_ROOT`: path to `.claude/runtime_state/session_observer`
+- `BRIDGE_COMPANION_PORT`: default `8787`
+- `BRIDGE_COMPANION_STREAM_INTERVAL_MS`: default `750`
+
+## Read-Only API
+
+```text
+GET /api/repos
+GET /api/repos/:repoKey
+GET /api/repos/:repoKey/runs
+GET /api/repos/:repoKey/runs/latest
+GET /api/repos/:repoKey/runs/:runId/status
+GET /api/repos/:repoKey/runs/:runId/snapshot
+GET /api/repos/:repoKey/runs/:runId/events?after=<seq>&limit=500
+GET /api/repos/:repoKey/runs/:runId/stream?after=<seq>
+GET /api/repos/:repoKey/runs/:runId/raw?file=<jsonl>&offset=<line>
+GET /api/session-observer/events?after=<seq>&limit=500
+GET /api/session-observer/stream?after=<seq>
+POST /api/brief
+```
+
+`/api/brief` is an optional explanation layer. It accepts normalized facts and unknowns, returns display copy, and never writes runtime state.
+
+## Event Contract
+
+Run event streams emit normalized events with:
+
+- `seq`
+- `ts`
+- `repoKey`
+- `runId`
+- `bridgeWindowId`
+- `teamId`
+- `taskId`
+- `sessionId`
+- `source`
+- `kind`
+- `actor`
+- `messagePreview`
+- `toolName`
+- `status`
+- `target`
+- `fileRefs`
+- `evidenceRefs`
+- `rawRef`
+
+`seq` is gateway-local and supports reconnect backfill through `after=<seq>` and SSE `Last-Event-ID`. `rawRef` points to the source JSONL file and line offset so every visible item can be audited.

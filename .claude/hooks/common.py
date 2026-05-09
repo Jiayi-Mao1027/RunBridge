@@ -221,6 +221,13 @@ def observer_binding(
     packet = packet if isinstance(packet, dict) else {}
     binding = packet.get("binding") if isinstance(packet.get("binding"), dict) else {}
     active = read_active_run(payload)
+    project_root = Path(
+        os.environ.get("BRIDGE_PROJECT_ROOT")
+        or payload.get("project_root")
+        or payload.get("cwd")
+        or os.getcwd()
+    ).expanduser().resolve()
+    repo_key = project_state_key(project_root)
     session_id = session_id_from_payload(payload, tool_input)
     session_binding = read_latest_session_binding(session_id) if session_id else {}
     run_id = detect_run_id({**payload, "tool_input": tool_input, "packet": packet}) or ""
@@ -274,6 +281,7 @@ def observer_binding(
             session_kind = "bridge_teammate"
     return {
         "session_kind": session_kind,
+        "repo_key": repo_key,
         "run_binding_state": run_binding_state,
         "session_id": session_id,
         "run_id": run_id or None,
@@ -641,6 +649,7 @@ def emit_observer_record(kind: str, payload: dict[str, Any]) -> None:
     if kind == "tool_events":
         update_active_operation(payload)
         maybe_emit_session_binding(payload)
+        emit_tool_trajectory_record(payload)
 
 
 def maybe_emit_session_binding(payload: dict[str, Any]) -> None:
@@ -650,6 +659,7 @@ def maybe_emit_session_binding(payload: dict[str, Any]) -> None:
     record = {
         "timestamp": payload.get("timestamp") or now_iso(),
         "session_id": session_id,
+        "repo_key": payload.get("repo_key"),
         "run_id": payload.get("run_id"),
         "bridge_window_id": payload.get("bridge_window_id"),
         "team_id": payload.get("team_id"),
@@ -664,6 +674,81 @@ def maybe_emit_session_binding(payload: dict[str, Any]) -> None:
     if record["run_id"]:
         emit_companion_event("session_bindings", record)
     emit_session_observer_event("session_bindings", record)
+
+
+def emit_tool_trajectory_record(payload: dict[str, Any]) -> None:
+    run_id = payload.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        return
+    run_root = runtime_runs_root() / run_id.strip()
+    trajectory_path = run_root / "trajectory.jsonl"
+    step_index = next_jsonl_sequence(trajectory_path)
+    action_preview_source = payload.get("safe_input_preview") or payload.get("command_preview") or payload.get("summary") or ""
+    if isinstance(action_preview_source, dict):
+        action_preview = json.dumps(action_preview_source, ensure_ascii=False, separators=(",", ":"), default=str)
+    else:
+        action_preview = str(action_preview_source)
+    record = {
+        "trajectory_id": f"traj_{step_index:06d}",
+        "step_index": step_index,
+        "timestamp": payload.get("timestamp") or now_iso(),
+        "repo_key": payload.get("repo_key") or project_state_key(Path(os.environ.get("BRIDGE_PROJECT_ROOT") or os.getcwd()).resolve()),
+        "run_id": run_id.strip(),
+        "phase": payload.get("phase"),
+        "bridge_window_id": payload.get("bridge_window_id"),
+        "team_id": payload.get("team_id"),
+        "task_id": payload.get("task_id"),
+        "actor": {
+            "session_id": payload.get("session_id"),
+            "agent_type": payload.get("agent_type"),
+            "teammate_id": payload.get("teammate_id"),
+        },
+        "intent": {
+            "local_goal": payload.get("summary") or f"{payload.get('tool_name') or 'tool'} use",
+            "contract_item_refs": [],
+        },
+        "action": {
+            "kind": "tool_use",
+            "tool_name": payload.get("tool_name"),
+            "safe_input_preview": redact_observer_text(action_preview)[:1200],
+            "file_refs": payload.get("file_refs", []),
+        },
+        "observation": {
+            "status": payload.get("status"),
+            "exit_code": payload.get("exit_code"),
+            "stdout_tail": redact_observer_text(str(payload.get("stdout_tail") or ""))[:1200] or None,
+            "stderr_tail": redact_observer_text(str(payload.get("stderr_tail") or ""))[:1200] or None,
+            "artifact_refs": [],
+            "process_refs": payload.get("spawned_processes", []) if isinstance(payload.get("spawned_processes"), list) else [],
+        },
+        "state_delta": {
+            "opened_process_refs": payload.get("spawned_processes", []) if isinstance(payload.get("spawned_processes"), list) else [],
+            "completed_checklist_items": [],
+            "new_blockers": [{"tool_name": payload.get("tool_name"), "error_or_null": payload.get("error_or_null")}] if str(payload.get("status") or "").lower() == "failed" else [],
+        },
+        "raw_refs": {
+            "tool_event_ref": f"tool_events.jsonl:{payload.get('sequence') or payload.get('monotonic_index') or step_index}",
+            "sdk_stream_ref": None,
+            "ledger_ref": None,
+        },
+    }
+    append_jsonl(trajectory_path, record)
+    write_json(
+        run_root / "trajectory_index.json",
+        {
+            "schema_version": "0.1.0",
+            "updated_at": now_iso(),
+            "repo_key": record["repo_key"],
+            "run_id": run_id.strip(),
+            "step_count": step_index,
+            "latest_step": {
+                "trajectory_id": record["trajectory_id"],
+                "step_index": step_index,
+                "timestamp": record["timestamp"],
+                "action_kind": "tool_use",
+            },
+        },
+    )
 
 
 def update_active_operation(payload: dict[str, Any]) -> None:

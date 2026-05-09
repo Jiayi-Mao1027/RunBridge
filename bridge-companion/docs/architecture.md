@@ -1,109 +1,129 @@
 # Bridge Companion Architecture
 
-## 1. Product Definition
+Bridge Companion is outside the Bridge Runtime control loop. It is a read-only observation layer with five responsibilities:
 
-Bridge Companion is an external, read-only observation layer for the Claude Code Bridge Runtime. Its realtime foreground experience is stream-first: bridge SDK stream and SDK hooks stream are the primary live sources, while runtime snapshots, event ledgers, inbox notifications, reports, and artifact references are audit, hydration, recovery, and backfill sources.
+- observe runtime streams
+- attribute activity to repo, run, bridge window, team, task, teammate, and session
+- present current activity and history
+- recover after disconnects by backfilling from JSONL files
+- jump to raw runtime facts for audit
 
-It is not a controller. It does not create bridge windows, create teams, dispatch tasks, approve routes, modify ledgers, or inject context into any runtime agent.
+It is forbidden to:
 
-The design boundary is:
+- create bridge windows
+- create teams or tasks
+- write ledgers or snapshots
+- modify frozen semantics
+- control retry or routing
+- decide task completion
+- inject context into system agents
 
-```text
-视觉可以游戏化，信息不能游戏化。
-```
-
-The UI may use a dark fantasy task board, pixel characters, parchment cards, animated routes, themed icons, and companion notes. The authoritative status text must remain factual, precise, and derived from runtime data.
-
-## 2. Isolation Boundary
-
-Bridge Companion lives in its own folder:
-
-```text
-bridge-companion/
-```
-
-It must not modify or import runtime control code directly as a control dependency. It should consume exported data through one of these read-only mechanisms:
+## Data Flow
 
 ```text
-bridge SDK stream tap
-SDK hooks stream tap
-read-only HTTP adapter for hydration/backfill
-read-only websocket/SSE event stream
-runtime snapshot file reader for audit/recovery
-mock data during prototype development
+.claude/runtime_state/projects/<repo-key>/runs/<run-id>/*.jsonl
+  -> gateway source readers
+  -> normalized CompanionEvent
+  -> REST backfill and SSE live stream
+  -> UI reducer
+  -> team tree, activity stream, detail inspector, trajectory tab
 ```
 
-The original agent system remains the source of execution truth. Bridge Companion only observes.
-
-## 3. Non-Goals
-
-Bridge Companion must not become a second leader, bridge controller, task dispatcher, approval surface, or agent prompt layer.
-
-It must not write to these areas:
+Global unbound or direct-session activity is read from:
 
 ```text
-.claude/control/
-.claude/agents/
-.claude/hooks/
-.claude/runtime_state/
+.claude/runtime_state/session_observer/*.jsonl
 ```
 
-It must not add context to implementor, bridge-leader, leader-orchestrator, or any teammate agent. If an intelligent explanation layer is added, it should be a UI-side API that receives already-normalized facts and returns constrained explanations only for display.
+The gateway never calls Bridge MCP tools and never writes runtime files.
 
-## 4. Data Flow
+## Multi-Repo Layout
 
-Recommended flow:
+The gateway discovers repositories from:
 
 ```text
-bridge SDK stream + SDK hooks stream
-  -> companion live event bus
-  -> UI reducer / actor cards / activity timeline
-  -> derived status model
-  -> fact copy / explanation copy / companion note
-  -> themed UI
-
-runstate JSON / ledgers / snapshots
-  -> hydration, backfill, audit confirmation, recovery only
+.claude/runtime_state/projects/
 ```
 
-The UI should not directly invent prose from raw logs. A status model should first determine what is known, what is unknown, what is waiting, what failed, and what lifecycle transitions are possible.
+Each child directory is treated as one `repoKey`; each `repoKey/runs/<run-id>` directory is one run.
 
-## 5. Three-Layer Copy Model
+`latest` is calculated per repo by sorting runs on snapshot, ledger, or directory mtime. It is not global across all repos.
 
-Every status surface should distinguish three layers.
+## Normalized Event Sources
 
-The fact layer is authoritative and must come from observed system facts. Live activity facts come first from SDK stream and hooks stream. Runtime state confirms lifecycle, completion, audit, recovery, and backfill facts. Example: current phase, latest SDK message, active tool event, lifecycle state, wait reason, completion report presence, artifact presence, failure event.
+| Source file | Companion source | Display rule |
+| --- | --- | --- |
+| `sdk_stream_events.jsonl` | `sdk_stream` | assistant text or SDK stream message only |
+| `tool_events.jsonl` | `hook_tool_event` | only source of tool started/completed/failed cards |
+| `agent_messages.jsonl` | `agent_message` | assignment cards |
+| `teammate_reports.jsonl` | `teammate_report` | report cards |
+| `process_events.jsonl` | `process_event` | process state cards |
+| `artifacts.jsonl` | `artifact` | artifact cards |
+| `completion_checks.jsonl` | `completion_check` | completion status cards |
+| `transitions.jsonl` | `runtime_snapshot` | lifecycle transitions |
+| `trajectory.jsonl` | `runtime_snapshot` | trajectory steps and audit context |
 
-The explanation layer translates facts into user-readable language. It may explain that waiting does not necessarily mean stuck, but it may not claim file-level progress unless a report or event says so.
+The UI does not invent discussion text. If a run has tool events but no SDK text, agent message, or report text, the UI shows that only tool activity was captured.
 
-The atmosphere layer is optional. It may use themed language such as “同伴札记” or “小队还没有带回新卷宗,” but it must remain visibly secondary and must not introduce new facts.
+## Transport
 
-## 6. Optional Intelligence API
+REST endpoints provide discovery, hydration, backfill, and raw-record lookup.
 
-If extra intelligence is needed, add it as a UI-side explanation API, not as an agent-system participant.
-
-Safe scope:
+SSE endpoints provide live read-only updates:
 
 ```text
-input: normalized runtime facts, unknowns, allowed next events, report excerpts
-output: concise explanation copy and user-facing summary
+GET /api/repos/:repoKey/runs/:runId/stream?after=<seq>
+GET /api/session-observer/stream?after=<seq>
 ```
 
-Forbidden scope:
+The browser reconnects with `Last-Event-ID`; the explicit `after` query is also supported. Events are deduplicated by gateway `seq`.
 
-```text
-controlling workflow
-calling bridge tools
-modifying runtime files
-changing frozen semantics
-sending instructions to system agents
-claiming hidden internal progress
-```
+## UI Structure
 
-The API prompt should include a strict contract: only use provided facts, list unknowns, do not infer file-level or code-level progress unless explicitly present, do not rename agent roles in authoritative copy, and keep themed text limited to the companion note layer.
+The prototype uses three panes:
 
-## 7. Prototype Strategy
+- Repo / run / team tree
+- Live activity stream
+- Detail inspector with raw, trajectory, and model brief tabs
 
-The prototype in this folder uses static mock data. This is intentional. The first milestone is to prove the UI grammar, copy boundaries, and status mapping without touching the existing Bridge Runtime.
+The team tree combines `session_bindings.jsonl`, `active_operations.json`, and hook tool events. A teammate running Bash is shown as running only when hook tool events or active operations say so. A report alone is displayed as a report, not as a fabricated tool action.
 
-Later milestones should add a read-only live adapter that consumes bridge SDK stream and SDK hooks stream directly. A runtime_snapshot.json / event_log.jsonl adapter is still useful, but only for cold-start hydration, missed-event backfill, audit confirmation, and recovery after stream disconnects.
+## Trajectory
+
+When `trajectory.jsonl` exists, the trajectory tab shows:
+
+- step index
+- actor
+- action
+- observation
+- state delta
+- evidence refs
+- raw refs
+
+Selecting a completion, process, artifact, or tool event filters related trajectory steps by run/window/task IDs and evidence refs.
+
+## Model Brief
+
+The optional model brief endpoint is display-only.
+
+Input:
+
+- normalized events
+- snapshot/status data
+- unknowns
+
+Output:
+
+- explanatory copy
+- unknowns
+
+Forbidden:
+
+- status decisions
+- retry decisions
+- route decisions
+- completion decisions
+- runtime writes
+- agent instructions
+
+If the brief fails, the main UI state remains unchanged.

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from output_guardrails import validate_bridge_result
 from persist import append_jsonl, sanitize_json_value
 
 
@@ -98,8 +99,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
             "bridge-leader",
             "--model",
             bridge_model,
-            "--output-format",
-            "stream-json",
+            *_claude_print_stream_json_args(),
             "--include-hook-events",
             "--json-schema",
             json.dumps(BRIDGE_RESULT_SCHEMA, separators=(",", ":")),
@@ -1135,6 +1135,11 @@ def _claude_command_prefix() -> list[str]:
     return [str(path)]
 
 
+def _claude_print_stream_json_args() -> list[str]:
+    # Claude CLI requires --verbose when print mode uses stream-json output.
+    return ["--output-format", "stream-json", "--verbose"]
+
+
 def _command_too_long_for_windows(cmd: list[str]) -> int | None:
     if os.name != "nt":
         return None
@@ -1449,6 +1454,19 @@ def _normalize_bridge_payload(payload: dict[str, Any], stdout: str, stderr: str)
 
     if "cleanup_required" not in payload:
         payload["cleanup_required"] = False
+
+    validation = validate_bridge_result(payload)
+    if not validation.get("valid"):
+        return _failure(
+            message="claude cli bridge executor returned structurally invalid bridge result",
+            error_type=str(validation.get("error_type") or "BridgeResultGuardrailFailed"),
+            evidence={
+                "stdout": stdout[-4000:],
+                "stderr": stderr[-4000:],
+                "payload": payload,
+                "guardrail_validation": validation,
+            },
+        )
 
     return payload
 
