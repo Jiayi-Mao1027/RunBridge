@@ -11,7 +11,8 @@
         "semantic_frozen",
         "phase_advanced",
         "route_rerouted",
-        "retry_attempt_scheduled"
+        "retry_attempt_scheduled",
+        "enter_anomaly"
       ],
       "must_record_transition": true
     },

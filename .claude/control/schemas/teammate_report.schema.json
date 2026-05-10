@@ -3,7 +3,7 @@
   "$id": "teammate-report.schema.json",
   "title": "TeammateReport",
   "type": "object",
-  "required": ["summary"],
+  "required": ["summary", "instruction_coverage"],
   "properties": {
     "summary": {"type": "string"},
     "progress_state": {"type": "string"},

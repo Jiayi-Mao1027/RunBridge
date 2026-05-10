@@ -13,7 +13,8 @@ from companion_observer import observe_workflow_event
 from checkpoint_store import write_event_checkpoint
 from output_guardrails import validate_bridge_packet as guardrail_validate_bridge_packet
 from output_guardrails import validate_bridge_result, validate_completion_report
-from repo_runtime import ensure_repo_registered, infer_repo_key_from_runs_root, repo_key_for_paths, update_active_run_registry
+from repo_runtime import ensure_repo_registered, get_repo_runtime_root, infer_repo_key_from_runs_root, repo_key_for_paths, update_active_run_registry
+from retry_policy import decide_retry, load_retry_policies, packet_hash as retry_packet_hash
 from trajectory import record_guardrail_trajectory_step, record_workflow_trajectory_step
 
 
@@ -211,6 +212,7 @@ EVENT_TO_UPDATE_KIND = {
     "phase_advanced": "advance_phase",
     "route_rerouted": "reroute_phase",
     "retry_attempt_scheduled": "persist_retry_attempt_scheduled",
+    "enter_anomaly": "persist_enter_anomaly",
     "bridge_call_intended": "record_bridge_call_intent",
     "pretooluse_allowed_by_main_leader": "record_bridge_call_prechecked",
     "pretooluse_denied_by_main_leader": "record_bridge_call_denied",
@@ -249,7 +251,7 @@ EVENT_TO_UPDATE_KIND = {
     "orphan_timeout_without_heartbeat": "persist_bridge_window_orphaned",
 }
 
-CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE = {"session_started", "user_prompt_submitted", "semantic_frozen", "phase_advanced", "route_rerouted", "retry_attempt_scheduled"}
+CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE = {"session_started", "user_prompt_submitted", "semantic_frozen", "phase_advanced", "route_rerouted", "retry_attempt_scheduled", "enter_anomaly"}
 
 FAILURE_UPDATE_KINDS = {
     "record_bridge_call_denied",
@@ -375,8 +377,21 @@ def dispatch_workflow_event(
     event_payload: dict[str, Any],
     *,
     runtime_runs_root: str | Path | None = None,
+    repo_key: str | None = None,
     persist: bool = False,
 ) -> WorkflowDispatchResult:
+    event_repo_key = repo_key or event_payload.get("repo_key")
+    payload_obj = event_payload.get("payload") if isinstance(event_payload.get("payload"), dict) else {}
+    if not event_repo_key:
+        event_repo_key = payload_obj.get("repo_key")
+    if event_repo_key:
+        event_payload = deepcopy(event_payload)
+        event_payload.setdefault("repo_key", str(event_repo_key))
+        payload_copy = deepcopy(payload_obj)
+        payload_copy.setdefault("repo_key", str(event_repo_key))
+        event_payload["payload"] = payload_copy
+        if runtime_runs_root is None:
+            runtime_runs_root = get_repo_runtime_root(control_root, str(event_repo_key))
     paths = ControlPaths.from_root(control_root, runtime_runs_root)
     run_id = str(event_payload.get("run_id") or "").strip()
     existing_run = load_json_file(paths.run_ledger_path(run_id), default={}) or {}
@@ -388,7 +403,7 @@ def dispatch_workflow_event(
     snapshot_before = build_runtime_snapshot(paths, run_ledger)
     lifecycle_transitions = load_lifecycle_transitions(paths)
     allowed_policy_events = load_allowed_policy_events(paths)
-    check_result = check_event(event, snapshot_before, lifecycle_transitions, allowed_policy_events)
+    check_result = check_event(event, snapshot_before, lifecycle_transitions, allowed_policy_events, control_root=paths.control_root)
     update_kind = EVENT_TO_UPDATE_KIND.get(event.event_kind, "generic_runtime_update")
 
     should_apply_update = check_result.decision == "allow" or _denied_failure_update_is_recordable(check_result, update_kind)
@@ -416,6 +431,10 @@ def dispatch_workflow_event(
         )
         run_ledger = run_after
 
+    auto_recovery_plan = _build_auto_recovery_plan(paths, event, check_result, snapshot_after, run_ledger)
+    if auto_recovery_plan:
+        check_result.derived_facts["auto_recovery"] = _compact_auto_recovery_plan(auto_recovery_plan)
+
     notify_result = notify(event, snapshot_after, check_result, update_result)
     written_paths: dict[str, str] = {}
     if persist:
@@ -428,6 +447,8 @@ def dispatch_workflow_event(
             update_result=update_result,
             notify_result=notify_result,
         )
+        if auto_recovery_plan:
+            written_paths.update(_dispatch_auto_recovery_plan(control_root, auto_recovery_plan, persist=persist))
 
     return WorkflowDispatchResult(
         ok=check_result.ok and update_result.ok,
@@ -442,11 +463,222 @@ def dispatch_workflow_event(
     )
 
 
+def _build_auto_recovery_plan(
+    paths: ControlPaths,
+    event: WorkflowEvent,
+    check_result: CheckResult,
+    snapshot: dict[str, Any],
+    run_ledger: dict[str, Any],
+) -> dict[str, Any]:
+    if event.event_kind in {"retry_attempt_scheduled", "enter_anomaly"}:
+        return {}
+    retry_scope = _retry_scope_for_failure(event, check_result, snapshot)
+    if not retry_scope:
+        return {}
+    packet_hash = _packet_hash_for_retry(event, run_ledger)
+    attempt = _next_retry_attempt(run_ledger, event, retry_scope, packet_hash)
+    error_type = _retry_error_type(event, check_result)
+    reason = {
+        "source_event_id": event.event_id,
+        "source_event_kind": event.event_kind,
+        "check_decision": check_result.decision,
+        "check_reasons": list(check_result.reasons),
+    }
+    guardrail = check_result.derived_facts.get("guardrail_validation")
+    if isinstance(guardrail, dict):
+        reason["guardrail_validation"] = deepcopy(guardrail)
+    decision = decide_retry(
+        load_retry_policies(paths.control_root),
+        retry_scope,
+        attempt=attempt,
+        error_type=error_type,
+        reason=reason,
+    )
+    repo_key = str(snapshot.get("repo_key") or repo_key_for_paths(paths.control_root, paths.runtime_runs_root))
+    retry_payload = decision.as_event_payload(
+        repo_key=repo_key,
+        run_id=event.run_id,
+        bridge_window_id=event.bridge_window_id,
+        packet_hash=packet_hash,
+    )
+    retry_payload.update(
+        {
+            "source_event_id": event.event_id,
+            "source_event_kind": event.event_kind,
+            "same_packet_boundary_required": bool(decision.policy.get("requires_same_packet_boundary", False)),
+        }
+    )
+    plan: dict[str, Any] = {
+        "repo_key": repo_key,
+        "runtime_runs_root": str(paths.runtime_runs_root),
+        "retry_decision": retry_payload,
+        "source_event_id": event.event_id,
+        "source_event_kind": event.event_kind,
+        "dispatch_event": None,
+        "next_action": decision.next_action,
+    }
+    if decision.retryable:
+        plan["dispatch_event"] = _runtime_recovery_event(event, "retry_attempt_scheduled", retry_payload)
+    elif decision.exhausted:
+        anomaly_payload = {
+            **retry_payload,
+            "target_phase": "l4_anomaly",
+            "anomaly_reason": "retry_exhausted",
+            "next_action": "enter_anomaly",
+        }
+        plan["dispatch_event"] = _runtime_recovery_event(event, "enter_anomaly", anomaly_payload)
+        plan["next_action"] = "enter_anomaly"
+    return plan
+
+
+def _dispatch_auto_recovery_plan(control_root: str | Path, plan: dict[str, Any], *, persist: bool) -> dict[str, str]:
+    event_payload = plan.get("dispatch_event") if isinstance(plan.get("dispatch_event"), dict) else None
+    if not event_payload:
+        return {"auto_recovery_next_action": str(plan.get("next_action") or "surface_non_retryable_failure")}
+    try:
+        result = dispatch_workflow_event(
+            control_root,
+            event_payload,
+            runtime_runs_root=plan.get("runtime_runs_root"),
+            persist=persist,
+        )
+    except Exception as exc:
+        return {"auto_recovery_error": f"{exc.__class__.__name__}: {exc}"}
+    return {
+        "auto_recovery_event_kind": result.event_kind,
+        "auto_recovery_event_id": result.event_id,
+        "auto_recovery_ok": str(result.ok).lower(),
+    }
+
+
+def _compact_auto_recovery_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    decision = plan.get("retry_decision") if isinstance(plan.get("retry_decision"), dict) else {}
+    dispatch_event = plan.get("dispatch_event") if isinstance(plan.get("dispatch_event"), dict) else {}
+    return {
+        "retry_scope": decision.get("retry_scope"),
+        "attempt": decision.get("attempt"),
+        "max_attempts": decision.get("max_attempts"),
+        "retryable": decision.get("retryable"),
+        "exhausted": decision.get("exhausted"),
+        "delay_ms": decision.get("delay_ms"),
+        "packet_hash": decision.get("packet_hash"),
+        "next_action": plan.get("next_action"),
+        "dispatch_event_kind": dispatch_event.get("event_kind"),
+    }
+
+
+def _runtime_recovery_event(event: WorkflowEvent, event_kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": event.run_id,
+        "main_session_id": event.main_session_id,
+        "sub_session_id": event.sub_session_id,
+        "bridge_window_id": event.bridge_window_id,
+        "team_id": event.team_id,
+        "task_id": event.task_id,
+        "agent_id": "runtime.retry",
+        "agent_type": "runtime",
+        "tool_name": event.tool_name,
+        "tool_use_id": event.tool_use_id,
+        "event_kind": event_kind,
+        "timestamp": _now_iso(),
+        "parent_event_id": event.event_id,
+        "correlation_id": event.correlation_id or event.event_id,
+        "payload": payload,
+    }
+
+
+def _retry_scope_for_failure(event: WorkflowEvent, check_result: CheckResult, snapshot: dict[str, Any]) -> str | None:
+    if event.event_kind == "completion_contract_rejected":
+        return "completion_rejected"
+    if event.event_kind == "wait_timeout_or_process_lost":
+        payload_refs = event.payload.get("owned_process_refs") if isinstance(event.payload.get("owned_process_refs"), list) else []
+        if snapshot.get("current_phase") == "l4_execute" or payload_refs:
+            return "l4_execute_process_poll"
+        return "teammate_report_missing"
+    if event.event_kind in {"call_bridge_sdk_error", "team_create_failed", "task_create_failed", "message_dispatch_failed"}:
+        return "bridge_sdk_call"
+    if event.event_kind in {"bridge_result_returned", "bridge_result_returned_with_partial", "bridge_result_returned_with_cleanup_required"}:
+        if "bridge_result_guardrail_failed" in check_result.reasons:
+            return "completion_rejected"
+    if event.event_kind == "completion_contract_satisfied" and not check_result.ok:
+        if any(reason.startswith("completion_") for reason in check_result.reasons):
+            return "completion_rejected"
+    if "completion_report_guardrail_failed" in check_result.reasons or "bridge_result_guardrail_failed" in check_result.reasons:
+        return "completion_rejected"
+    if "bridge_packet_guardrail_failed" in check_result.reasons:
+        return "bridge_sdk_call"
+    return None
+
+
+def _retry_error_type(event: WorkflowEvent, check_result: CheckResult) -> str:
+    guardrail = check_result.derived_facts.get("guardrail_validation")
+    if isinstance(guardrail, dict) and guardrail.get("error_type"):
+        return str(guardrail.get("error_type"))
+    error = event.payload.get("error_or_null")
+    if isinstance(error, dict):
+        for key in ("error_type", "type", "code"):
+            if error.get(key):
+                return str(error.get(key))
+        if error.get("message"):
+            return str(error.get("message")).split(":", 1)[0][:80] or "RuntimeError"
+    if check_result.reasons:
+        return str(check_result.reasons[0])
+    return event.event_kind or "RuntimeError"
+
+
+def _packet_hash_for_retry(event: WorkflowEvent, run_ledger: dict[str, Any]) -> str | None:
+    packet = _packet_from_event(event)
+    if isinstance(packet, dict):
+        return retry_packet_hash(packet)
+    for record in reversed(run_ledger.get("recent_events", []) if isinstance(run_ledger.get("recent_events"), list) else []):
+        if not isinstance(record, dict):
+            continue
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else None
+        if packet:
+            return retry_packet_hash(packet)
+    for transition in reversed(run_ledger.get("workflow_transitions", []) if isinstance(run_ledger.get("workflow_transitions"), list) else []):
+        if not isinstance(transition, dict):
+            continue
+        payload = transition.get("payload") if isinstance(transition.get("payload"), dict) else {}
+        packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else None
+        if packet:
+            return retry_packet_hash(packet)
+    return None
+
+
+def _next_retry_attempt(run_ledger: dict[str, Any], event: WorkflowEvent, retry_scope: str, packet_hash: str | None) -> int:
+    current_attempt = _positive_int_or_none(event.payload.get("attempt")) or 1
+    latest_attempt = current_attempt
+    retry_context = run_ledger.get("retry_context") if isinstance(run_ledger.get("retry_context"), dict) else {}
+    attempts = retry_context.get("attempts") if isinstance(retry_context.get("attempts"), list) else []
+    for attempt_record in attempts:
+        if not isinstance(attempt_record, dict):
+            continue
+        if attempt_record.get("retry_scope") != retry_scope:
+            continue
+        if event.bridge_window_id and attempt_record.get("bridge_window_id") != event.bridge_window_id:
+            continue
+        if packet_hash and attempt_record.get("packet_hash") not in {None, packet_hash}:
+            continue
+        latest_attempt = max(latest_attempt, _positive_int_or_none(attempt_record.get("attempt")) or 0)
+    return max(2, latest_attempt + 1)
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
 def check_event(
     event: WorkflowEvent,
     snapshot: dict[str, Any],
     lifecycle_transitions: dict[str | None, dict[str, str]] | None = None,
     allowed_policy_events: set[str] | None = None,
+    control_root: str | Path | None = None,
 ) -> CheckResult:
     reasons: list[str] = []
     normalized_payload = deepcopy(event.payload)
@@ -478,7 +710,7 @@ def check_event(
     if event.event_kind in {"bridge_call_intended", "pretooluse_allowed_by_main_leader", "call_bridge_sdk_started"}:
         packet = normalized_payload.get("packet")
         reasons.extend(_validate_bridge_packet(packet, event, snapshot))
-        guardrail = guardrail_validate_bridge_packet(packet, snapshot=snapshot)
+        guardrail = guardrail_validate_bridge_packet(packet, snapshot=snapshot, control_root=control_root)
         if not guardrail.get("valid"):
             reasons.append("bridge_packet_guardrail_failed")
             derived_facts["guardrail_validation"] = guardrail
@@ -491,7 +723,7 @@ def check_event(
     }:
         bridge_result = normalized_payload.get("bridge_result")
         if isinstance(bridge_result, dict):
-            guardrail = validate_bridge_result(bridge_result)
+            guardrail = validate_bridge_result(bridge_result, control_root=control_root)
             if not guardrail.get("valid"):
                 reasons.append("bridge_result_guardrail_failed")
                 derived_facts["guardrail_validation"] = guardrail
@@ -524,7 +756,7 @@ def check_event(
     if event.event_kind == "completion_contract_satisfied":
         contract = normalized_payload.get("completion_contract") or normalized_payload.get("contract") or {}
         checks = normalized_payload.get("completion_checks") or {}
-        guardrail = validate_completion_report(normalized_payload)
+        guardrail = validate_completion_report(normalized_payload, control_root=control_root)
         if not guardrail.get("valid"):
             reasons.append("completion_report_guardrail_failed")
             derived_facts["guardrail_validation"] = guardrail
@@ -631,6 +863,15 @@ def update_runtime(
             run["route"]["target_phase"] = event.payload.get("target_phase")
         run["route"]["is_stale"] = False
         run["route"]["decided_by_event_id"] = event.event_id
+    elif event.event_kind == "enter_anomaly":
+        target_phase = str(event.payload.get("target_phase") or "l4_anomaly")
+        run.setdefault("route", {"current_route": [], "target_phase": None, "is_stale": False, "decided_by_event_id": None})
+        current_phase = str(run.get("current_phase") or "leader_freeze")
+        run["route"]["current_route"] = [current_phase, target_phase] if current_phase != target_phase else [target_phase]
+        run["route"]["target_phase"] = target_phase
+        run["route"]["is_stale"] = False
+        run["route"]["decided_by_event_id"] = event.event_id
+        run["current_phase"] = target_phase
     elif event.event_kind in {"pretooluse_allowed_by_main_leader", "call_bridge_sdk_started"}:
         _record_bridge_packet_route(run, event)
 
@@ -704,6 +945,8 @@ def notify(event: WorkflowEvent, snapshot: dict[str, Any], check_result: CheckRe
         "team_idle_waiting": ("info", "team_waiting", "continue_waiting_or_poll_according_to_timeout_policy"),
         "wait_timeout_or_process_lost": ("error", "team_wait_timeout", "collect_partial_evidence_then_decide_retry_or_fail"),
         "completion_contract_rejected": ("warn", "task_completion_rejected", "continue_waiting_retry_collection_or_fail_task"),
+        "retry_attempt_scheduled": ("info", "retry_attempt_scheduled", "retry_same_packet_or_repair_after_delay"),
+        "enter_anomaly": ("blocking", "enter_anomaly", "route_to_l4_anomaly_from_retry_or_recovery_exhaustion"),
         "user_clarification_required": ("blocking", "blocked_for_user_clarification", "return_question_to_main_leader_and_pause_for_user_answer"),
         "blocked_for_user_clarification": ("blocking", "blocked_for_user_clarification", "return_question_to_main_leader_and_pause_for_user_answer"),
         "bridge_result_returned_with_user_clarification_request": ("blocking", "paused_for_user_answer", "ask_user_for_clarification_then_record_user_answer_received"),
@@ -762,7 +1005,7 @@ def build_runtime_snapshot(paths: ControlPaths, run_ledger: dict[str, Any]) -> d
             "list_preview_limit": SNAPSHOT_LIST_LIMIT,
         },
         "snapshot_refs": snapshot_refs,
-        "repo_key": repo_key_for_paths(paths.control_root, paths.runtime_runs_root),
+        "repo_key": run.get("repo_key") or repo_key_for_paths(paths.control_root, paths.runtime_runs_root),
         "run_id": run["run_id"],
         "main_session_id": run.get("main_session_id") or run["run_id"],
         "current_phase": current_phase,
@@ -902,9 +1145,12 @@ def reconcile_workflow_from_ledger(
     control_root: str | Path,
     run_id: str,
     *,
+    repo_key: str | None = None,
     runtime_runs_root: str | Path | None = None,
     persist: bool = False,
 ) -> dict[str, Any]:
+    if repo_key and runtime_runs_root is None:
+        runtime_runs_root = get_repo_runtime_root(control_root, repo_key)
     paths = ControlPaths.from_root(control_root, runtime_runs_root)
     current_run = load_json_file(paths.run_ledger_path(run_id), default={}) or {}
     event_records = load_jsonl(paths.run_root(run_id) / "event_log.jsonl")
@@ -940,7 +1186,7 @@ def reconcile_workflow_from_ledger(
     for raw_event in event_records:
         event = WorkflowEvent.from_payload(raw_event, replay_run)
         snapshot_before = build_runtime_snapshot(paths, replay_run)
-        check_result = check_event(event, snapshot_before, lifecycle_transitions, allowed_policy_events)
+        check_result = check_event(event, snapshot_before, lifecycle_transitions, allowed_policy_events, control_root=paths.control_root)
         update_kind = EVENT_TO_UPDATE_KIND.get(event.event_kind, "generic_runtime_update")
         should_apply = check_result.decision == "allow" or _denied_failure_update_is_recordable(check_result, update_kind)
         if should_apply:

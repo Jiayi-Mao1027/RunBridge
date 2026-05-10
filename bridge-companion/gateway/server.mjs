@@ -1,6 +1,7 @@
 import http from "node:http";
 import https from "node:https";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,9 @@ const PROJECTS_ROOT = resolveProjectsRoot();
 const SESSION_OBSERVER_ROOT = process.env.BRIDGE_SESSION_OBSERVER_ROOT
   ? path.resolve(process.env.BRIDGE_SESSION_OBSERVER_ROOT)
   : path.join(path.dirname(PROJECTS_ROOT), "session_observer");
+const REGISTRY_ROOT = process.env.BRIDGE_RUNTIME_REGISTRY_ROOT
+  ? path.resolve(process.env.BRIDGE_RUNTIME_REGISTRY_ROOT)
+  : path.join(path.dirname(PROJECTS_ROOT), "registry");
 
 const DEFAULT_BRIEF_BASE_URL = "https://api.deepseek.com";
 const DEFAULT_BRIEF_MODEL = "deepseek-v4-pro";
@@ -147,9 +151,22 @@ async function readJsonlWithMeta(filePath, sourceFile) {
   }
   const records = [];
   const lines = text.split(/\r?\n/);
+  let sourceByteOffset = 0;
+  let charOffset = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (!line.trim()) continue;
+    const eol =
+      text.slice(charOffset + line.length, charOffset + line.length + 2) === "\r\n"
+        ? "\r\n"
+        : text[charOffset + line.length] === "\n"
+          ? "\n"
+          : "";
+    const lineByteLength = Buffer.byteLength(line);
+    if (!line.trim()) {
+      sourceByteOffset += lineByteLength + Buffer.byteLength(eol);
+      charOffset += line.length + eol.length;
+      continue;
+    }
     let record;
     try {
       record = JSON.parse(line);
@@ -158,15 +175,102 @@ async function readJsonlWithMeta(filePath, sourceFile) {
     }
     const sourceOffset = index + 1;
     const sourceSequence = Number(record?.sequence || record?.monotonic_index || sourceOffset);
-    records.push({ record, sourceFile, sourceOffset, sourceSequence });
+    records.push({ record, sourceFile, sourceOffset, sourceSequence, sourceByteOffset });
+    sourceByteOffset += lineByteLength + Buffer.byteLength(eol);
+    charOffset += line.length + eol.length;
   }
   return records;
 }
 
+async function lineCountAndSize(filePath) {
+  try {
+    const text = await readFile(filePath, "utf8");
+    const lines = text.split(/\r?\n/).filter(line => line.trim());
+    return { byteOffset: Buffer.byteLength(text), lineOffset: lines.length };
+  } catch {
+    return { byteOffset: 0, lineOffset: 0 };
+  }
+}
+
+async function readJsonlTail(cursor) {
+  const stats = await stat(cursor.filePath).catch(() => null);
+  if (!stats) return [];
+  if (stats.size < cursor.byteOffset) {
+    cursor.byteOffset = 0;
+    cursor.lineOffset = 0;
+    cursor.partial = "";
+  }
+  if (stats.size === cursor.byteOffset) return [];
+
+  const byteLength = stats.size - cursor.byteOffset;
+  const handle = await open(cursor.filePath, "r");
+  try {
+    const buffer = Buffer.alloc(byteLength);
+    await handle.read(buffer, 0, byteLength, cursor.byteOffset);
+    cursor.byteOffset = stats.size;
+    const text = cursor.partial + buffer.toString("utf8");
+    const complete = text.endsWith("\n") || text.endsWith("\r");
+    const lines = text.split(/\r?\n/);
+    cursor.partial = complete ? "" : lines.pop() || "";
+    const records = [];
+    for (const line of lines) {
+      if (!line.trim()) {
+        cursor.lineOffset += 1;
+        continue;
+      }
+      cursor.lineOffset += 1;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        record = { raw: line };
+      }
+      records.push({
+        record,
+        sourceFile: cursor.sourceFile,
+        sourceOffset: cursor.lineOffset,
+        sourceSequence: Number(record?.sequence || record?.monotonic_index || cursor.lineOffset),
+        sourceByteOffset: null
+      });
+    }
+    return records;
+  } finally {
+    await handle.close();
+  }
+}
+
 async function listRepos() {
-  if (!(await exists(PROJECTS_ROOT))) return [];
+  const registry = await loadRegistry();
+  if (!(await exists(PROJECTS_ROOT)) && !registry.repos.length) return [];
+  const byKey = new Map();
+
+  for (const item of registry.repos) {
+    const repoKey = item.repoKey;
+    const runs = await listRuns(repoKey);
+    const active = registry.activeRuns.get(repoKey) || {};
+    const latestRun =
+      runs.find(run => run.runId === active.latestRunId) ||
+      runs[0] ||
+      null;
+    byKey.set(repoKey, {
+      repoKey,
+      displayName: item.displayName || repoKey,
+      repoRoot: item.repoRoot || "",
+      git: item.git || {},
+      isActive: Boolean(item.isActive || active.status === "running" || active.activeRunIds?.length),
+      activeRunIds: active.activeRunIds || [],
+      activeRunStatus: active.status || null,
+      runCount: runs.length,
+      latestRun,
+      updatedAt: active.lastSeenAt || item.lastSeenAt || latestRun?.updatedAt || item.updatedAt || null,
+      registrySource: "registry"
+    });
+  }
+
+  if (!(await exists(PROJECTS_ROOT))) {
+    return [...byKey.values()].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  }
   const entries = await readdir(PROJECTS_ROOT, { withFileTypes: true });
-  const repos = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const repoKey = entry.name;
@@ -174,29 +278,66 @@ async function listRepos() {
     const runs = await listRuns(repoKey);
     const latestRun = runs[0] || null;
     const stats = await stat(repoPath).catch(() => null);
-    repos.push({
+    const existing = byKey.get(repoKey) || {};
+    byKey.set(repoKey, {
+      ...existing,
       repoKey,
+      displayName: existing.displayName || repoKey,
       runCount: runs.length,
-      latestRun,
-      updatedAt: latestRun?.updatedAt || stats?.mtime?.toISOString() || null
+      latestRun: existing.latestRun || latestRun,
+      updatedAt: existing.updatedAt || latestRun?.updatedAt || stats?.mtime?.toISOString() || null,
+      registrySource: existing.registrySource || "scan"
     });
   }
-  return repos.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  return [...byKey.values()].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
 }
 
 async function repoInfo(repoKey) {
   const repo = repoDir(repoKey);
-  if (!repo || !(await exists(repo))) return null;
-  const runs = await listRuns(repoKey);
-  const stats = await stat(repo).catch(() => null);
+  const registry = await loadRegistry();
+  const registryRepo = registry.repos.find(item => item.repoKey === repoKey) || {};
+  const active = registry.activeRuns.get(repoKey) || {};
+  const repoExists = repo ? await exists(repo) : false;
+  if (!repoExists && !registryRepo.repoKey) return null;
+  const runs = repoExists ? await listRuns(repoKey) : [];
+  const stats = repoExists ? await stat(repo).catch(() => null) : null;
   return {
     repoKey,
+    displayName: registryRepo.displayName || repoKey,
+    repoRoot: registryRepo.repoRoot || "",
+    git: registryRepo.git || {},
+    isActive: Boolean(registryRepo.isActive || active.status === "running" || active.activeRunIds?.length),
+    activeRunIds: active.activeRunIds || [],
+    activeRunStatus: active.status || null,
     runtimePath: repo,
-    runsPath: path.join(repo, "runs"),
+    runsPath: repo ? path.join(repo, "runs") : null,
     runCount: runs.length,
-    latestRun: runs[0] || null,
-    updatedAt: runs[0]?.updatedAt || stats?.mtime?.toISOString() || null
+    latestRun: runs.find(run => run.runId === active.latestRunId) || runs[0] || null,
+    updatedAt: active.lastSeenAt || registryRepo.lastSeenAt || runs[0]?.updatedAt || stats?.mtime?.toISOString() || null,
+    registrySource: registryRepo.repoKey ? "registry" : "scan"
   };
+}
+
+async function loadRegistry() {
+  const reposPayload = await readJsonIfExists(path.join(REGISTRY_ROOT, "repos.json"), null);
+  const activePayload = await readJsonIfExists(path.join(REGISTRY_ROOT, "active_runs.json"), null);
+  const repos = Object.entries(reposPayload?.repos || {}).map(([key, value]) => ({
+    repoKey: value.repo_key || key,
+    repoRoot: value.repo_root || "",
+    displayName: value.display_name || value.repo_key || key,
+    git: value.git || {},
+    isActive: value.is_active,
+    createdAt: value.created_at || null,
+    lastSeenAt: value.last_seen_at || null,
+    updatedAt: reposPayload?.updated_at || null
+  }));
+  const activeRuns = new Map(Object.entries(activePayload?.repos || {}).map(([key, value]) => [key, {
+    latestRunId: value.latest_run_id || null,
+    activeRunIds: Array.isArray(value.active_run_ids) ? value.active_run_ids : [],
+    status: value.status || null,
+    lastSeenAt: value.last_seen_at || activePayload?.updated_at || null
+  }]));
+  return { repos, activeRuns, updatedAt: reposPayload?.updated_at || activePayload?.updated_at || null };
 }
 
 async function listRuns(repoKey) {
@@ -204,6 +345,8 @@ async function listRuns(repoKey) {
   if (!repo) return [];
   const runsRoot = path.join(repo, "runs");
   if (!(await exists(runsRoot))) return [];
+  const registry = await loadRegistry();
+  const active = registry.activeRuns.get(repoKey) || {};
   const entries = await readdir(runsRoot, { withFileTypes: true });
   const runs = [];
   for (const entry of entries) {
@@ -226,7 +369,16 @@ async function listRuns(repoKey) {
       hasTrajectory: await exists(path.join(runPath, "trajectory.jsonl"))
     });
   }
-  return runs.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  return runs.sort((a, b) => {
+    if (active.latestRunId) {
+      if (a.runId === active.latestRunId) return -1;
+      if (b.runId === active.latestRunId) return 1;
+    }
+    const aActive = active.activeRunIds?.includes(a.runId) ? 1 : 0;
+    const bActive = active.activeRunIds?.includes(b.runId) ? 1 : 0;
+    if (aActive !== bActive) return bActive - aActive;
+    return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+  });
 }
 
 function latestLifecycleState(snapshot) {
@@ -350,7 +502,16 @@ function sourceAndKind(sourceFile, record) {
     };
   }
   if (sourceFile === "sdk_stream_events.jsonl") {
-    if (eventType.includes("assistant_text") || record.message_preview) {
+    if (eventType === "sdk_stream_tool_use") {
+      return { source: "sdk_stream", kind: "sdk_tool_declared" };
+    }
+    if (eventType === "sdk_stream_tool_result") {
+      return { source: "sdk_stream", kind: "sdk_tool_result" };
+    }
+    if (eventType.includes("content_block_delta") || eventType === "sdk_stream_delta") {
+      return { source: "sdk_stream", kind: sdkRecordHasTextDelta(record) ? "text_delta" : "sdk_delta" };
+    }
+    if (eventType.includes("assistant_text")) {
       return { source: "sdk_stream", kind: "text_delta" };
     }
     return { source: "sdk_stream", kind: "assistant_message" };
@@ -387,6 +548,38 @@ function sourceAndKind(sourceFile, record) {
   return { source: "runtime_snapshot", kind: "lifecycle_transition" };
 }
 
+function sdkRecordHasTextDelta(record) {
+  return Boolean(
+    record.text_delta ||
+    record.delta_text ||
+    record.delta?.text ||
+    record.delta?.type === "text_delta" ||
+    record.content_block_delta?.text ||
+    record.message_preview && String(record.event_type || "").includes("assistant_text")
+  );
+}
+
+function sdkTextDelta(record, sourceFile) {
+  if (sourceFile !== "sdk_stream_events.jsonl") return undefined;
+  return compactText(
+    record.text_delta ||
+    record.delta_text ||
+    record.delta?.text ||
+    record.content_block_delta?.text ||
+    (String(record.event_type || "").includes("assistant_text") ? record.message_preview : "")
+  );
+}
+
+function sdkToolInputDelta(record, sourceFile) {
+  if (sourceFile !== "sdk_stream_events.jsonl") return undefined;
+  const value =
+    record.input_json_delta ||
+    record.tool_input_json_delta ||
+    record.delta?.partial_json ||
+    record.content_block_delta?.partial_json;
+  return value === undefined ? undefined : compactText(value);
+}
+
 function messageFor(sourceFile, record) {
   if (sourceFile === "tool_events.jsonl") {
     return compactText(
@@ -407,30 +600,55 @@ function messageFor(sourceFile, record) {
   return compactText(JSON.stringify(record).slice(0, 700));
 }
 
+function stableEventId(repoKey, runId, sourceFile, sourceOffset, sourceSequence) {
+  const digest = createHash("sha1")
+    .update([repoKey, runId, sourceFile, sourceOffset, sourceSequence || ""].join("\u001f"))
+    .digest("hex")
+    .slice(0, 20);
+  return `ev_${digest}`;
+}
+
 function normalizeRunRecord(repoKey, runId, item) {
   const record = item.record || {};
+  const actualRepoKey = record.repoKey || record.repo_key || repoKey;
+  const actualRunId = record.runId || record.run_id || runId;
   const rawRef = {
     sourceFile: item.sourceFile,
     sourceOffset: item.sourceOffset,
-    sourceSequence: item.sourceSequence
+    sourceSequence: item.sourceSequence,
+    sourceByteOffset: item.sourceByteOffset ?? undefined
   };
   const { source, kind } = sourceAndKind(item.sourceFile, record);
   const status = normalizeStatus(record.status || record.state || record.lifecycle_status);
+  const eventId = stableEventId(actualRepoKey, actualRunId, item.sourceFile, item.sourceOffset, item.sourceSequence);
+  const textDelta = sdkTextDelta(record, item.sourceFile);
   const event = {
     seq: 0,
+    eventId,
+    cursor: {
+      sourceFile: item.sourceFile,
+      sourceOffset: item.sourceOffset,
+      sourceSequence: item.sourceSequence,
+      sourceByteOffset: item.sourceByteOffset ?? undefined
+    },
     ts: record.timestamp || record.created_at || record.started_at || record.completed_at || null,
-    repoKey,
-    runId,
+    repoKey: actualRepoKey,
+    runId: actualRunId,
     bridgeWindowId: record.bridge_window_id || record.bridgeWindowId || undefined,
     teamId: record.team_id || record.teamId || undefined,
     taskId: record.task_id || record.taskId || undefined,
     sessionId: record.session_id || record.sessionId || undefined,
     source,
     kind,
+    lane: laneFor(source, kind, status),
+    streamEventType: record.event_type || record.eventType || record.type || undefined,
     actor: actorFrom(record),
-    textDelta: source === "sdk_stream" && kind === "text_delta" ? messageFor(item.sourceFile, record) : undefined,
+    textDelta: textDelta || undefined,
+    toolInputDelta: sdkToolInputDelta(record, item.sourceFile),
     messagePreview: messageFor(item.sourceFile, record),
-    toolName: source === "hook_tool_event" ? record.tool_name : undefined,
+    toolName: source === "hook_tool_event" ? record.tool_name : record.tool_name || undefined,
+    sdkToolName: source === "sdk_stream" ? record.tool_name || undefined : undefined,
+    toolId: record.tool_id || record.tool_use_id || undefined,
     status,
     target:
       record.target ||
@@ -450,6 +668,16 @@ function normalizeRunRecord(repoKey, runId, item) {
     event.messagePreview = compactText(record.action || record.observation || event.messagePreview);
   }
   return event;
+}
+
+function laneFor(source, kind, status) {
+  if (String(status || "").toLowerCase() === "failed" || String(kind || "").includes("failed")) return "failures";
+  if (source === "hook_tool_event") return "tools";
+  if (source === "sdk_stream" || source === "agent_message") return "discussion";
+  if (source === "teammate_report" || source === "artifact") return "reports";
+  if (source === "process_event") return "processes";
+  if (source === "completion_check") return "completion";
+  return "all";
 }
 
 function sourceFileOrder(sourceFile) {
@@ -474,6 +702,41 @@ function assignSequences(events) {
     ...event,
     seq: index + 1
   }));
+}
+
+function sourceCursorsFor(events) {
+  const cursors = {};
+  for (const event of events || []) {
+    const sourceFile = event.rawRef?.sourceFile;
+    const sourceOffset = Number(event.rawRef?.sourceOffset || 0);
+    if (!sourceFile || !sourceOffset) continue;
+    cursors[sourceFile] = Math.max(Number(cursors[sourceFile] || 0), sourceOffset);
+  }
+  return cursors;
+}
+
+function parseSourceCursor(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    try {
+      const decoded = Buffer.from(String(value), "base64url").toString("utf8");
+      const parsed = JSON.parse(decoded);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function eventAfterSourceCursor(event, cursor) {
+  if (!cursor) return true;
+  const sourceFile = event.rawRef?.sourceFile;
+  if (!sourceFile) return true;
+  const seenOffset = Number(cursor[sourceFile] || 0);
+  return Number(event.rawRef?.sourceOffset || 0) > seenOffset;
 }
 
 async function loadRunEvents(repoKey, runId) {
@@ -504,14 +767,26 @@ async function loadSessionObserverEvents() {
 
 function filterEvents(events, query) {
   const after = Number(query.get("after") || 0);
+  const afterId = query.get("afterId") || query.get("after_id") || "";
+  const sourceCursor = parseSourceCursor(query.get("afterCursor") || query.get("after_cursor") || "");
   const limit = Math.min(
     MAX_EVENT_LIMIT,
     Math.max(1, Number(query.get("limit") || DEFAULT_EVENT_LIMIT))
   );
-  const filtered = events.filter(event => event.seq > after).slice(0, limit);
+  let filtered;
+  if (sourceCursor) {
+    filtered = events.filter(event => eventAfterSourceCursor(event, sourceCursor)).slice(0, limit);
+  } else if (afterId) {
+    const index = events.findIndex(event => event.eventId === afterId);
+    filtered = (index >= 0 ? events.slice(index + 1) : events).slice(0, limit);
+  } else {
+    filtered = events.filter(event => event.seq > after).slice(0, limit);
+  }
   return {
     events: filtered,
     latestSeq: events.reduce((max, event) => Math.max(max, event.seq), after),
+    latestEventId: events.at(-1)?.eventId || null,
+    sourceCursors: sourceCursorsFor(events),
     count: filtered.length
   };
 }
@@ -913,6 +1188,33 @@ function writeSseEvent(res, eventName, data, id = null) {
   res.write("\n");
 }
 
+async function createTailer(rootDir, files) {
+  const cursors = [];
+  for (const sourceFile of files) {
+    const filePath = path.join(rootDir, sourceFile);
+    const { byteOffset, lineOffset } = await lineCountAndSize(filePath);
+    cursors.push({
+      sourceFile,
+      filePath,
+      byteOffset,
+      lineOffset,
+      partial: ""
+    });
+  }
+  return cursors;
+}
+
+async function readTailerEvents(tailer, repoKey, runId) {
+  const events = [];
+  for (const cursor of tailer) {
+    const records = await readJsonlTail(cursor);
+    for (const item of records) {
+      events.push(normalizeRunRecord(repoKey, runId, item));
+    }
+  }
+  return assignSequences(events);
+}
+
 async function streamRun(req, res, repoKey, runId, query) {
   res.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -920,17 +1222,40 @@ async function streamRun(req, res, repoKey, runId, query) {
     "connection": "keep-alive",
     "access-control-allow-origin": "*"
   });
-  let lastSeq = Number(query.get("after") || req.headers["last-event-id"] || 0);
-  const writeLive = async () => {
-    const events = await loadRunEvents(repoKey, runId);
-    const next = events.filter(event => event.seq > lastSeq).slice(0, DEFAULT_EVENT_LIMIT);
+  const dir = runDir(repoKey, runId);
+  let sourceCursor = parseSourceCursor(query.get("afterCursor") || query.get("after_cursor") || "");
+  let lastSeq = Number(query.get("after") || 0);
+  let lastEventId = query.get("afterId") || query.get("after_id") || req.headers["last-event-id"] || "";
+  const emitted = new Set();
+  const writeEvents = events => {
+    const next = events.filter(event => {
+      if (emitted.has(event.eventId)) return false;
+      if (sourceCursor && !eventAfterSourceCursor(event, sourceCursor)) return false;
+      if (!sourceCursor && lastEventId) {
+        const afterIndex = events.findIndex(item => item.eventId === lastEventId);
+        if (afterIndex >= 0 && event.seq <= events[afterIndex].seq) return false;
+      }
+      if (!sourceCursor && !lastEventId && event.seq <= lastSeq) return false;
+      return true;
+    }).slice(0, DEFAULT_EVENT_LIMIT);
     for (const event of next) {
       lastSeq = Math.max(lastSeq, event.seq);
-      writeSseEvent(res, "companion_event", event, event.seq);
+      lastEventId = event.eventId;
+      emitted.add(event.eventId);
+      writeSseEvent(res, "companion_event", event, event.eventId);
     }
-    if (!next.length) res.write(`: heartbeat ${Date.now()}\n\n`);
+    sourceCursor = { ...(sourceCursor || {}), ...sourceCursorsFor(next) };
+    return next.length;
   };
-  await writeLive();
+
+  const tailer = dir ? await createTailer(dir, runSourceFiles) : [];
+  const initialEvents = await loadRunEvents(repoKey, runId);
+  writeEvents(initialEvents);
+  const writeLive = async () => {
+    const nextEvents = await readTailerEvents(tailer, repoKey, runId);
+    const count = writeEvents(nextEvents);
+    if (!count) res.write(`: heartbeat ${Date.now()}\n\n`);
+  };
   const timer = setInterval(() => {
     writeLive().catch(error => {
       writeSseEvent(res, "gateway_error", { message: error.message }, null);
@@ -946,17 +1271,38 @@ async function streamSessionObserver(req, res, query) {
     "connection": "keep-alive",
     "access-control-allow-origin": "*"
   });
-  let lastSeq = Number(query.get("after") || req.headers["last-event-id"] || 0);
-  const writeLive = async () => {
-    const events = await loadSessionObserverEvents();
-    const next = events.filter(event => event.seq > lastSeq).slice(0, DEFAULT_EVENT_LIMIT);
+  let sourceCursor = parseSourceCursor(query.get("afterCursor") || query.get("after_cursor") || "");
+  let lastSeq = Number(query.get("after") || 0);
+  let lastEventId = query.get("afterId") || query.get("after_id") || req.headers["last-event-id"] || "";
+  const emitted = new Set();
+  const writeEvents = events => {
+    const next = events.filter(event => {
+      if (emitted.has(event.eventId)) return false;
+      if (sourceCursor && !eventAfterSourceCursor(event, sourceCursor)) return false;
+      if (!sourceCursor && lastEventId) {
+        const afterIndex = events.findIndex(item => item.eventId === lastEventId);
+        if (afterIndex >= 0 && event.seq <= events[afterIndex].seq) return false;
+      }
+      if (!sourceCursor && !lastEventId && event.seq <= lastSeq) return false;
+      return true;
+    }).slice(0, DEFAULT_EVENT_LIMIT);
     for (const event of next) {
       lastSeq = Math.max(lastSeq, event.seq);
-      writeSseEvent(res, "companion_event", event, event.seq);
+      lastEventId = event.eventId;
+      emitted.add(event.eventId);
+      writeSseEvent(res, "companion_event", event, event.eventId);
     }
-    if (!next.length) res.write(`: heartbeat ${Date.now()}\n\n`);
+    sourceCursor = { ...(sourceCursor || {}), ...sourceCursorsFor(next) };
+    return next.length;
   };
-  await writeLive();
+  const tailer = await createTailer(SESSION_OBSERVER_ROOT, sessionObserverFiles);
+  const initialEvents = await loadSessionObserverEvents();
+  writeEvents(initialEvents);
+  const writeLive = async () => {
+    const nextEvents = await readTailerEvents(tailer, "session_observer", "unbound");
+    const count = writeEvents(nextEvents);
+    if (!count) res.write(`: heartbeat ${Date.now()}\n\n`);
+  };
   const timer = setInterval(() => {
     writeLive().catch(error => {
       writeSseEvent(res, "gateway_error", { message: error.message }, null);
@@ -992,6 +1338,8 @@ async function handleApi(req, res, url) {
       ok: true,
       projectsRoot: PROJECTS_ROOT,
       projectsRootExists: await exists(PROJECTS_ROOT),
+      registryRoot: REGISTRY_ROOT,
+      registryRootExists: await exists(REGISTRY_ROOT),
       sessionObserverRoot: SESSION_OBSERVER_ROOT,
       streamIntervalMs: STREAM_INTERVAL_MS,
       readOnly: true

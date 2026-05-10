@@ -246,7 +246,13 @@
       border-bottom: 1px solid var(--line);
       background: #15191c;
     }
-    .tabs button {
+    .lane-tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .tabs button, .lane-tabs button {
       min-height: 30px;
       border-radius: 999px;
     }
@@ -341,6 +347,15 @@
           <span class="meta" id="activityMeta">0 events</span>
         </div>
         <div class="panel-body">
+          <div class="lane-tabs" id="laneTabs" aria-label="activity filters">
+            <button class="active" data-lane="all">All</button>
+            <button data-lane="tools">Tools</button>
+            <button data-lane="discussion">Discussion</button>
+            <button data-lane="reports">Reports</button>
+            <button data-lane="processes">Processes</button>
+            <button data-lane="completion">Completion</button>
+            <button data-lane="failures">Failures</button>
+          </div>
           <div class="activity-list" id="activityList" data-testid="activity-list"></div>
         </div>
       </section>
@@ -383,10 +398,16 @@
       status: null,
       events: new Map(),
       rawLookups: new Map(),
+      discussionBuffers: new Map(),
+      toolInputBuffers: new Map(),
       lastSeq: 0,
+      lastEventId: "",
+      sourceCursors: {},
       source: null,
       selectedEventSeq: null,
+      selectedEventId: "",
       selectedTab: "raw",
+      laneFilter: "all",
       briefText: "No model brief requested.",
       streamConnected: false
     };
@@ -420,18 +441,60 @@
     }
 
     function eventList() {
-      return [...state.events.values()].sort((a, b) => a.seq - b.seq);
+      return [...state.events.values()].sort((a, b) => {
+        const at = Date.parse(a.ts || "") || 0;
+        const bt = Date.parse(b.ts || "") || 0;
+        if (at !== bt) return at - bt;
+        return String(a.eventId || a.seq).localeCompare(String(b.eventId || b.seq));
+      });
     }
 
     function addEvents(events = []) {
       for (const event of events) {
-        if (!event || typeof event.seq !== "number") continue;
-        if (!state.events.has(event.seq)) state.events.set(event.seq, event);
-        state.lastSeq = Math.max(state.lastSeq, event.seq);
+        if (!event) continue;
+        accumulateStreamEvent(event);
+        const id = event.eventId || String(event.seq);
+        if (!state.events.has(id)) state.events.set(id, event);
+        if (typeof event.seq === "number") state.lastSeq = Math.max(state.lastSeq, event.seq);
+        if (event.eventId) state.lastEventId = event.eventId;
+        const sourceFile = event.rawRef?.sourceFile;
+        const sourceOffset = Number(event.rawRef?.sourceOffset || 0);
+        if (sourceFile && sourceOffset) {
+          state.sourceCursors[sourceFile] = Math.max(Number(state.sourceCursors[sourceFile] || 0), sourceOffset);
+        }
       }
       while (state.events.size > 900) {
-        const first = [...state.events.keys()].sort((a, b) => a - b)[0];
+        const first = eventList()[0]?.eventId || eventList()[0]?.seq;
         state.events.delete(first);
+      }
+    }
+
+    function streamKey(event, suffix = "text") {
+      return [
+        event.repoKey || state.repoKey,
+        event.runId || state.runId,
+        event.bridgeWindowId || "",
+        event.teamId || "",
+        event.taskId || "",
+        event.sessionId || "",
+        event.actor?.teammateId || event.actor?.displayName || event.actor?.role || "",
+        suffix
+      ].join("|");
+    }
+
+    function accumulateStreamEvent(event) {
+      if (event.source !== "sdk_stream") return;
+      if (event.textDelta) {
+        const key = streamKey(event, "discussion");
+        const next = `${state.discussionBuffers.get(key) || ""}${event.textDelta}`;
+        state.discussionBuffers.set(key, next);
+        event.accumulatedText = compact(next, 2000);
+      }
+      if (event.toolInputDelta) {
+        const key = streamKey(event, `tool:${event.toolId || event.sdkToolName || event.toolName || "unknown"}`);
+        const next = `${state.toolInputBuffers.get(key) || ""}${event.toolInputDelta}`;
+        state.toolInputBuffers.set(key, next);
+        event.accumulatedToolInput = compact(next, 2000);
       }
     }
 
@@ -450,7 +513,11 @@
       stopStream();
       state.events.clear();
       state.rawLookups.clear();
+      state.discussionBuffers.clear();
+      state.toolInputBuffers.clear();
       state.lastSeq = 0;
+      state.lastEventId = "";
+      state.sourceCursors = {};
       if (!state.repoKey) {
         state.runs = [];
         render();
@@ -461,7 +528,11 @@
       $("runSelect").innerHTML = state.runs.length
         ? state.runs.map(run => `<option value="${escapeHtml(run.runId)}">${escapeHtml(run.runId)}</option>`).join("")
         : `<option value="">No runs</option>`;
-      const nextRun = state.runs[0]?.runId || "";
+      let nextRun = state.runs[0]?.runId || "";
+      try {
+        const latest = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/latest`);
+        nextRun = latest.runId || nextRun;
+      } catch {}
       await selectRun(nextRun);
     }
 
@@ -478,8 +549,13 @@
       state.status = null;
       state.events.clear();
       state.rawLookups.clear();
+      state.discussionBuffers.clear();
+      state.toolInputBuffers.clear();
       state.lastSeq = 0;
+      state.lastEventId = "";
+      state.sourceCursors = {};
       state.selectedEventSeq = null;
+      state.selectedEventId = "";
       if (!state.repoKey || !state.runId) {
         render();
         return;
@@ -495,7 +571,8 @@
       if (!state.repoKey || !state.runId || typeof EventSource === "undefined") return;
       stopStream();
       setChip("streamChip", "connecting", "warn");
-      const url = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/stream?after=${state.lastSeq}`;
+      const cursor = encodeURIComponent(JSON.stringify(state.sourceCursors || {}));
+      const url = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/stream?afterCursor=${cursor}&afterId=${encodeURIComponent(state.lastEventId || "")}`;
       state.source = new EventSource(url);
       state.source.addEventListener("open", () => {
         state.streamConnected = true;
@@ -568,6 +645,9 @@
         const verb = event.kind === "tool_started" ? "started" : event.kind === "tool_failed" ? "failed" : "completed";
         return `${event.toolName || "tool"} ${verb}`;
       }
+      if (event.kind === "sdk_tool_declared") return `SDK tool declared: ${event.sdkToolName || event.toolName || "tool"}`;
+      if (event.kind === "sdk_tool_result") return `SDK tool result: ${event.sdkToolName || event.toolName || "tool"}`;
+      if (event.kind === "sdk_delta") return "SDK stream delta";
       if (event.kind === "assignment_sent") return "assignment sent";
       if (event.kind === "report_received") return event.source === "artifact" ? "artifact recorded" : "report received";
       if (event.kind === "completion_passed") return "completion passed";
@@ -580,7 +660,29 @@
     function displaySummary(event) {
       if (!event) return "";
       const target = event.target ? ` target=${event.target}` : "";
-      return compact(`${event.messagePreview || ""}${target}`, 260);
+      const delta = event.accumulatedText || event.textDelta ? `${event.accumulatedText || event.textDelta} ` : "";
+      const inputDelta = event.accumulatedToolInput || event.toolInputDelta ? ` input_delta=${event.accumulatedToolInput || event.toolInputDelta}` : "";
+      return compact(`${delta}${event.messagePreview || ""}${target}${inputDelta}`, 260);
+    }
+
+    function eventLane(event) {
+      if (!event) return "all";
+      if (event.status === "failed" || event.status === "blocked" || String(event.kind || "").includes("failed")) return "failures";
+      return event.lane || (
+        event.source === "hook_tool_event" ? "tools" :
+        event.source === "sdk_stream" || event.source === "agent_message" ? "discussion" :
+        event.source === "teammate_report" || event.source === "artifact" ? "reports" :
+        event.source === "process_event" ? "processes" :
+        event.source === "completion_check" ? "completion" :
+        "all"
+      );
+    }
+
+    function isDiscussionEvent(event) {
+      if (!event) return false;
+      if (event.source === "agent_message" || event.source === "teammate_report") return true;
+      if (event.source !== "sdk_stream") return false;
+      return ["text_delta", "assistant_message", "sdk_delta", "sdk_tool_declared", "sdk_tool_result"].includes(event.kind);
     }
 
     function buildMembersFromEvents() {
@@ -598,7 +700,10 @@
           status: "idle",
           activeTool: null,
           lastCompletedTool: null,
-          reports: 0
+          reports: 0,
+          lastDiscussion: null,
+          lastReport: null,
+          currentBlocker: null
         };
         if (event.source === "hook_tool_event") {
           const tool = {
@@ -618,7 +723,23 @@
             member.lastCompletedTool = tool;
           }
         }
-        if (event.source === "teammate_report") member.reports = (member.reports || 0) + 1;
+        if (isDiscussionEvent(event)) {
+          member.lastDiscussion = {
+            kind: event.kind,
+            text: event.accumulatedText || event.textDelta || event.messagePreview,
+            rawRef: event.rawRef
+          };
+        }
+        if (event.source === "teammate_report") {
+          member.reports = (member.reports || 0) + 1;
+          member.lastReport = {
+            text: event.messagePreview || "report received",
+            rawRef: event.rawRef
+          };
+        }
+        if (event.status === "failed" || event.status === "blocked" || String(event.kind || "").includes("failed")) {
+          member.currentBlocker = event.messagePreview || event.kind || event.status;
+        }
         source.set(key, member);
       }
       return [...source.values()];
@@ -649,6 +770,15 @@
         const lastText = last
           ? `${last.toolName || "tool"} ${last.status || "completed"}${last.exitCode !== undefined ? ` exit=${last.exitCode}` : ""}`
           : "no completed tool recorded";
+        const discussionText = member.lastDiscussion?.text
+          ? `discussion: ${compact(member.lastDiscussion.text, 110)}`
+          : "no discussion text captured";
+        const reportText = member.lastReport?.text
+          ? `last report: ${compact(member.lastReport.text, 110)}`
+          : "no report text captured";
+        const blockerText = member.currentBlocker
+          ? `<div class="subtext">blocker: ${escapeHtml(compact(member.currentBlocker, 110))}</div>`
+          : "";
         return `
           <article class="member ${escapeHtml(statusClass(status))}">
             <div class="member-head">
@@ -657,6 +787,9 @@
             </div>
             <div class="subtext">${escapeHtml(activeText)}</div>
             <div class="subtext">${escapeHtml(lastText)}</div>
+            <div class="subtext">${escapeHtml(discussionText)}</div>
+            <div class="subtext">${escapeHtml(reportText)}</div>
+            ${blockerText}
             ${member.reports ? `<div class="subtext">${escapeHtml(member.reports)} report event(s)</div>` : ""}
           </article>`;
       }).join("") : `<div class="empty">No team/session binding captured.</div>`;
@@ -664,23 +797,26 @@
 
     function selectEvent(seq, tab = "raw") {
       state.selectedEventSeq = seq;
+      const event = [...state.events.values()].find(item => item.seq === seq || item.eventId === seq);
+      state.selectedEventId = event?.eventId || String(seq || "");
       state.selectedTab = tab;
       render();
     }
 
-    async function openRawRef(seq) {
-      const event = state.events.get(seq);
-      state.selectedEventSeq = seq;
+    async function openRawRef(id) {
+      const event = state.events.get(id) || [...state.events.values()].find(item => item.seq === id || item.eventId === id);
+      state.selectedEventSeq = event?.seq ?? null;
+      state.selectedEventId = event?.eventId || String(id || "");
       state.selectedTab = "raw";
       render();
-      if (!event?.rawRef || state.rawLookups.has(seq)) return;
+      if (!event?.rawRef || state.rawLookups.has(state.selectedEventId)) return;
       try {
         const file = encodeURIComponent(event.rawRef.sourceFile);
         const offset = encodeURIComponent(event.rawRef.sourceOffset);
         const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/raw?file=${file}&offset=${offset}`);
-        state.rawLookups.set(seq, payload);
+        state.rawLookups.set(state.selectedEventId, payload);
       } catch (error) {
-        state.rawLookups.set(seq, { error: error.message, rawRef: event.rawRef });
+        state.rawLookups.set(state.selectedEventId, { error: error.message, rawRef: event.rawRef });
       }
       renderDetail();
     }
@@ -691,14 +827,22 @@
     }
 
     function renderActivity() {
-      const events = eventList().slice(-250).reverse();
+      const lane = state.laneFilter || "all";
+      const events = eventList()
+        .filter(event => lane === "all" || eventLane(event) === lane)
+        .slice(-250)
+        .reverse();
       $("activityMeta").textContent = `${events.length} visible / latest seq ${state.lastSeq}`;
+      document.querySelectorAll("#laneTabs button").forEach(button => {
+        button.classList.toggle("active", button.dataset.lane === lane);
+      });
       $("activityList").innerHTML = events.length ? events.map(event => {
-        const selected = event.seq === state.selectedEventSeq ? " selected" : "";
+        const eventId = event.eventId || String(event.seq);
+        const selected = eventId === state.selectedEventId || event.seq === state.selectedEventSeq ? " selected" : "";
         const badgeClass = statusClass(event.status);
         const files = Array.isArray(event.fileRefs) ? event.fileRefs.slice(0, 3) : [];
         return `
-          <article class="event${selected}" data-seq="${event.seq}">
+          <article class="event${selected}" data-event-id="${escapeHtml(eventId)}" data-seq="${event.seq}">
             <div class="event-head">
               <div class="event-title">${escapeHtml(displayTitle(event))}</div>
               <span class="badge ${escapeHtml(badgeClass)}">#${event.seq}</span>
@@ -708,18 +852,20 @@
               <span class="badge">${escapeHtml(displayRole(event.actor))}</span>
               <span class="badge">${escapeHtml(event.source)}</span>
               <span class="badge">${escapeHtml(event.kind)}</span>
+              <span class="badge">${escapeHtml(eventLane(event))}</span>
               ${files.map(file => `<span class="badge">${escapeHtml(compact(file, 48))}</span>`).join("")}
-              <button class="raw-link" data-raw="${event.seq}">rawRef</button>
+              <button class="raw-link" data-raw="${escapeHtml(eventId)}">rawRef</button>
             </div>
           </article>`;
       }).join("") : `<div class="empty">No observer events for this run.</div>`;
       document.querySelectorAll(".event").forEach(node => {
         node.addEventListener("click", event => {
-          const seq = Number(node.dataset.seq);
+          const eventId = node.dataset.eventId;
+          const selected = state.events.get(eventId);
           if (event.target?.dataset?.raw) {
-            openRawRef(seq);
+            openRawRef(eventId);
           } else {
-            selectEvent(seq, defaultTabForEvent(state.events.get(seq)));
+            selectEvent(eventId, defaultTabForEvent(selected));
           }
         });
       });
@@ -743,7 +889,11 @@
     }
 
     function renderDetail() {
-      const selected = state.events.get(state.selectedEventSeq) || eventList().at(-1) || null;
+      const selected =
+        state.events.get(state.selectedEventId) ||
+        [...state.events.values()].find(event => event.seq === state.selectedEventSeq) ||
+        eventList().at(-1) ||
+        null;
       $("detailMeta").textContent = selected?.rawRef
         ? `${selected.rawRef.sourceFile}:${selected.rawRef.sourceOffset}`
         : "rawRef";
@@ -775,7 +925,7 @@
           </div>` : `<div class="empty">No trajectory steps matched this selection.</div>`;
         return;
       }
-      const rawLookup = selected ? state.rawLookups.get(selected.seq) : null;
+      const rawLookup = selected ? state.rawLookups.get(selected.eventId || String(selected.seq)) : null;
       $("detailBody").innerHTML = selected
         ? `<pre>${escapeHtml(JSON.stringify({
             normalized: selected,
@@ -849,6 +999,12 @@
       button.addEventListener("click", () => {
         state.selectedTab = button.dataset.tab;
         renderDetail();
+      });
+    });
+    document.querySelectorAll("#laneTabs button").forEach(button => {
+      button.addEventListener("click", () => {
+        state.laneFilter = button.dataset.lane || "all";
+        renderActivity();
       });
     });
 

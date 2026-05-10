@@ -22,7 +22,7 @@ sys.path.insert(0, str(RUNTIME_ROOT))
 
 from bridge_sdk import call_bridge_sdk  # noqa: E402
 from main_leader import decide_next_bridge_packet, read_runtime_snapshot  # noqa: E402
-from repo_runtime import list_registered_repos, list_runs, read_snapshot as read_repo_snapshot  # noqa: E402
+from repo_runtime import get_repo_runtime_root, list_registered_repos, list_runs, read_snapshot as read_repo_snapshot  # noqa: E402
 from workflow_runtime import dispatch_workflow_event, reconcile_workflow_from_ledger  # noqa: E402
 
 
@@ -165,6 +165,7 @@ def _tools() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string"},
+                    "repo_key": {"type": "string"},
                 },
                 "required": [],
                 "additionalProperties": False,
@@ -177,6 +178,7 @@ def _tools() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string"},
+                    "repo_key": {"type": "string"},
                     "main_session_id": {"type": "string"},
                     "user_instruction": {"type": "string"},
                     "task_spec": {"type": "object"},
@@ -206,6 +208,7 @@ def _tools() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "event": {"type": "object"},
+                    "repo_key": {"type": "string"},
                     "persist": {"type": "boolean"},
                 },
                 "required": ["event"],
@@ -219,6 +222,7 @@ def _tools() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string"},
+                    "repo_key": {"type": "string"},
                     "persist": {"type": "boolean"},
                 },
                 "required": [],
@@ -266,7 +270,12 @@ def _tools() -> list[dict[str, Any]]:
 def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     runtime_runs_root = _effective_runtime_runs_root(arguments)
     if tool_name == "read_runtime_snapshot":
-        result = read_runtime_snapshot(CONTROL_ROOT, _resolve_run_id(arguments, runtime_runs_root, require_active=False), runtime_runs_root=runtime_runs_root)
+        result = read_runtime_snapshot(
+            CONTROL_ROOT,
+            _resolve_run_id(arguments, runtime_runs_root, require_active=False),
+            repo_key=arguments.get("repo_key"),
+            runtime_runs_root=runtime_runs_root,
+        )
     elif tool_name == "build_bridge_packet":
         arguments = _repair_bridge_packet_arguments(arguments)
         run_id = _resolve_run_id(arguments, runtime_runs_root, require_active=True)
@@ -274,6 +283,7 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         packet = decide_next_bridge_packet(
             CONTROL_ROOT,
             run_id,
+            repo_key=arguments.get("repo_key"),
             runtime_runs_root=runtime_runs_root,
             main_session_id=arguments.get("main_session_id"),
             user_instruction=arguments.get("user_instruction"),
@@ -303,6 +313,7 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         dispatch_result = dispatch_workflow_event(
             CONTROL_ROOT,
             arguments["event"],
+            repo_key=arguments.get("repo_key"),
             runtime_runs_root=runtime_runs_root,
             persist=bool(arguments.get("persist", True)),
         )
@@ -321,6 +332,7 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         result = reconcile_workflow_from_ledger(
             CONTROL_ROOT,
             _resolve_run_id(arguments, runtime_runs_root, require_active=True),
+            repo_key=arguments.get("repo_key"),
             runtime_runs_root=runtime_runs_root,
             persist=bool(arguments.get("persist", True)),
         )
@@ -353,6 +365,8 @@ def _default_runtime_runs_root() -> str:
 
 
 def _effective_runtime_runs_root(arguments: dict[str, Any]) -> str:
+    if arguments.get("repo_key"):
+        return str(get_repo_runtime_root(CONTROL_ROOT, str(arguments["repo_key"])))
     if os.environ.get("BRIDGE_ALLOW_RUNTIME_RUNS_ROOT_OVERRIDE") == "1" and arguments.get("runtime_runs_root"):
         return str(arguments["runtime_runs_root"])
     return _default_runtime_runs_root()
@@ -489,7 +503,7 @@ def _resolve_run_id(
 
 
 def _freeze_semantics_if_needed(arguments: dict[str, Any], run_id: str, runtime_runs_root: str | Path) -> None:
-    snapshot = read_runtime_snapshot(CONTROL_ROOT, run_id, runtime_runs_root=runtime_runs_root)
+    snapshot = read_runtime_snapshot(CONTROL_ROOT, run_id, repo_key=arguments.get("repo_key"), runtime_runs_root=runtime_runs_root)
     semantic = snapshot.get("semantic", {}) if isinstance(snapshot.get("semantic"), dict) else {}
     if semantic.get("frozen") is not None and not semantic.get("requires_refresh"):
         return
@@ -502,11 +516,12 @@ def _freeze_semantics_if_needed(arguments: dict[str, Any], run_id: str, runtime_
         "event_kind": "semantic_frozen",
         "timestamp": _now_iso(),
         "payload": {
+            "repo_key": arguments.get("repo_key"),
             "frozen_semantics": frozen,
             "reason": "build_bridge_packet requires current frozen semantics before bridge dispatch",
         },
     }
-    result = dispatch_workflow_event(CONTROL_ROOT, event, runtime_runs_root=runtime_runs_root, persist=True)
+    result = dispatch_workflow_event(CONTROL_ROOT, event, repo_key=arguments.get("repo_key"), runtime_runs_root=runtime_runs_root, persist=True)
     if not result.ok:
         raise ValueError(f"semantic_frozen rejected by runtime: {result.check_result.get('reasons')}")
 

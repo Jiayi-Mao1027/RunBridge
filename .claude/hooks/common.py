@@ -733,8 +733,24 @@ def emit_tool_trajectory_record(payload: dict[str, Any]) -> None:
         },
     }
     append_jsonl(trajectory_path, record)
-    write_json(
-        run_root / "trajectory_index.json",
+    index_path = run_root / "trajectory_index.json"
+    existing_index: dict[str, Any] = {}
+    if index_path.exists():
+        try:
+            loaded = json.loads(index_path.read_text(encoding="utf-8"))
+            existing_index = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            existing_index = {}
+    process_producers = existing_index.get("process_producers") if isinstance(existing_index.get("process_producers"), dict) else {}
+    for process_ref in record["observation"]["process_refs"]:
+        key = None
+        if isinstance(process_ref, dict):
+            key = process_ref.get("process_ref") or process_ref.get("process_id") or process_ref.get("pid") or process_ref.get("log_path")
+        elif process_ref:
+            key = process_ref
+        if key:
+            process_producers[str(key)] = record["trajectory_id"]
+    existing_index.update(
         {
             "schema_version": "0.1.0",
             "updated_at": now_iso(),
@@ -747,7 +763,12 @@ def emit_tool_trajectory_record(payload: dict[str, Any]) -> None:
                 "timestamp": record["timestamp"],
                 "action_kind": "tool_use",
             },
-        },
+            "process_producers": process_producers,
+        }
+    )
+    write_json(
+        index_path,
+        existing_index,
     )
 
 

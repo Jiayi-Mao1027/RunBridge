@@ -23,7 +23,7 @@ from claude_cli_executor import _sdk_stream_event_paths
 from claude_cli_executor import _settings_args
 from claude_cli_executor import simulated_team_executor
 from main_leader import decide_next_bridge_packet
-from output_guardrails import validate_bridge_result, validate_completion_report
+from output_guardrails import validate_bridge_result, validate_completion_report, validate_teammate_report
 from repo_runtime import ensure_repo_registered, get_repo_runtime_root, list_registered_repos, resolve_repo_key
 from retry_policy import decide_retry, load_retry_policies, packet_hash
 from state_graph import load_state_graph, replay_run_state, validate_state_graph
@@ -98,7 +98,7 @@ def build_fixture(root: Path) -> tuple[Path, Path]:
         "closed_at": None,
     }
     _write_json(control_root / "policy" / "phase_graph.json", phase_graph)
-    _write_json(control_root / "policy" / "approval_matrix.json", {"categories": {"control_default": {"allowed_event_kinds": ["retry_attempt_scheduled"]}}})
+    _write_json(control_root / "policy" / "approval_matrix.json", {"categories": {"control_default": {"allowed_event_kinds": ["retry_attempt_scheduled", "enter_anomaly"]}}})
     _write_json(control_root / "policy" / "reconcile_rules.json", {"schema_version": "0.4.0"})
     source_state_graph = Path(__file__).resolve().parents[1] / "policy" / "state_graph.json"
     if source_state_graph.exists():
@@ -106,6 +106,10 @@ def build_fixture(root: Path) -> tuple[Path, Path]:
     source_lifecycle = Path(__file__).resolve().parents[1] / "policy" / "lifecycle_transition_table.json"
     if source_lifecycle.exists():
         _write_json(control_root / "policy" / "lifecycle_transition_table.json", json.loads(source_lifecycle.read_text(encoding="utf-8")))
+    source_schemas = Path(__file__).resolve().parents[1] / "schemas"
+    if source_schemas.exists():
+        for schema_path in source_schemas.glob("*.schema.json"):
+            _write_json(control_root / "schemas" / schema_path.name, json.loads(schema_path.read_text(encoding="utf-8")))
     _write_json(run_root / "run_ledger.json", run_ledger)
     return control_root, runs_root
 
@@ -214,6 +218,14 @@ def event(kind: str, bridge_window_id: str, sub_session_id: str, **kwargs: objec
     }
 
 
+def report(summary: str = "ok", *, item: str = "smoke checklist") -> dict:
+    return {
+        "summary": summary,
+        "instruction_coverage": {item: "completed"},
+        "evidence_refs": [f"event:{item.replace(' ', '_')}"],
+    }
+
+
 def dispatch(control_root: Path, runs_root: Path, payload: dict) -> dict:
     result = dispatch_workflow_event(str(control_root), payload, runtime_runs_root=str(runs_root), persist=True)
     if not result.ok:
@@ -259,10 +271,10 @@ def run_success(control_root: Path, runs_root: Path) -> dict:
     dispatch(control_root, runs_root, event("message_dispatch_succeeded", bw, ss, team_id="team_success", task_id="task_success", tool_name="send_messages"))
     dispatch(control_root, runs_root, event("team_idle_waiting", bw, ss, team_id="team_success", task_id="task_success", agent_type="hook", agent_id="hook.team_idle", payload={"wait_reason": "process_running", "owned_process_refs": []}))
     dispatch(control_root, runs_root, event("artifacts_ready", bw, ss, team_id="team_success", task_id="task_success", tool_name="task_complete"))
-    dispatch(control_root, runs_root, event("completion_contract_satisfied", bw, ss, team_id="team_success", task_id="task_success", agent_type="hook", agent_id="hook.task_completed", payload={"completion_contract": p["completion_contract"], "completion_checks": {"required_outputs_present": True, "required_artifacts_present": True, "validation_passed": True, "missing_outputs": [], "missing_artifacts": [], "failed_validations": [], "notes": []}, "reports": [{"summary": "ok"}], "artifact_refs": ["artifact"]}))
+    dispatch(control_root, runs_root, event("completion_contract_satisfied", bw, ss, team_id="team_success", task_id="task_success", agent_type="hook", agent_id="hook.task_completed", payload={"completion_contract": p["completion_contract"], "completion_checks": {"required_outputs_present": True, "required_artifacts_present": True, "validation_passed": True, "missing_outputs": [], "missing_artifacts": [], "failed_validations": [], "notes": []}, "completion_evidence": {"trajectory_refs": ["trajectory.jsonl:1"]}, "reports": [report()], "artifact_refs": ["artifact"]}))
     dispatch(control_root, runs_root, event("team_delete_started", bw, ss, team_id="team_success", task_id="task_success", tool_name="team_delete"))
     dispatch(control_root, runs_root, event("team_delete_succeeded", bw, ss, team_id="team_success", task_id="task_success", tool_name="team_delete"))
-    return dispatch(control_root, runs_root, event("bridge_result_returned", bw, ss, team_id="team_success", task_id="task_success", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", payload={"bridge_result": {"status": "succeeded", "reports": [{"summary": "ok"}], "artifact_refs": ["artifact"], "evidence": {"event_ids": ["evt_success"]}, "error_or_null": None, "cleanup_required": False}}))
+    return dispatch(control_root, runs_root, event("bridge_result_returned", bw, ss, team_id="team_success", task_id="task_success", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", payload={"bridge_result": {"status": "succeeded", "reports": [report()], "artifact_refs": ["artifact"], "evidence": {"event_ids": ["evt_success"], "trajectory_refs": ["trajectory.jsonl:1"]}, "error_or_null": None, "cleanup_required": False}}))
 
 
 def run_failure(control_root: Path, runs_root: Path) -> dict:
@@ -671,7 +683,7 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         partial_packet,
         runtime_runs_root=str(runs_root),
         persist=True,
-        team_executor=lambda _: {"status": "partial", "reports": [{"summary": "partial"}], "evidence": {"reason": "intentional partial"}},
+        team_executor=lambda _: {"status": "partial", "reports": [report("partial")], "evidence": {"reason": "intentional partial"}},
     )
     if partial_result.get("status") != "partial_or_failed":
         raise AssertionError(json.dumps(partial_result, ensure_ascii=False, indent=2))
@@ -703,7 +715,7 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
             "waiting": True,
             "wait_reason": "process_running",
             "owned_process_refs": [{"pid": 12345, "status": "running", "log_path": "train.log"}],
-            "reports": [{"summary": "training still running"}],
+            "reports": [report("training still running")],
             "artifact_refs": [],
             "evidence": {"process_status": "running"},
         },
@@ -733,7 +745,7 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         persist=True,
         team_executor=lambda _: {
             "status": "succeeded",
-            "reports": [{"summary": "missing required artifact"}],
+            "reports": [report("missing required artifact")],
             "artifact_refs": [],
             "evidence": {"classification": "intentional missing artifact"},
             "error_or_null": None,
@@ -762,6 +774,8 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
             "reports": [
                 {
                     "summary": "manifest present",
+                    "instruction_coverage": {"manifest": "completed"},
+                    "evidence_refs": ["logs/runs/demo/artifact_manifest.json"],
                     "manifest required fields checklist": {
                         "run_id": "present",
                         "bridge_window_id": "present",
@@ -1333,7 +1347,7 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
             "result": json.dumps(
                 {
                     "status": "succeeded",
-                    "reports": [{"summary": "ok"}],
+                    "reports": [report()],
                     "artifact_refs": [],
                     "evidence": {"completion_contract": "satisfied"},
                     "error_or_null": None,
@@ -1356,9 +1370,9 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
                     "result": json.dumps(
                         {
                             "status": "succeeded",
-                            "reports": [{"summary": "ndjson ok"}],
+                            "reports": [report("ndjson ok")],
                             "artifact_refs": [],
-                            "evidence": {},
+                            "evidence": {"completion_contract": "satisfied"},
                             "error_or_null": None,
                             "cleanup_required": False,
                         }
@@ -1521,7 +1535,7 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         "import json, sys\n"
         "print(json.dumps({'type':'assistant','content':[{'type':'text','text':'hello token=abc123 sk-demoSECRET12345'}]}), flush=True)\n"
         "print(json.dumps({'type':'tool_use','id':'toolu_1','name':'Read','input':{'file_path':'README.md','limit':10}}), flush=True)\n"
-        "print(json.dumps({'type':'result','subtype':'success','result': json.dumps({'status':'succeeded','reports':[{'summary':'ok'}],'artifact_refs':[],'evidence':{},'error_or_null':None,'cleanup_required':False})}), flush=True)\n"
+        "print(json.dumps({'type':'result','subtype':'success','result': json.dumps({'status':'succeeded','reports':[{'summary':'ok','instruction_coverage':{'smoke checklist':'completed'},'evidence_refs':['event:smoke_checklist']}],'artifact_refs':[],'evidence':{'completion_contract':'satisfied'},'error_or_null':None,'cleanup_required':False})}), flush=True)\n"
         "print('warning password=abc123', file=sys.stderr, flush=True)\n"
     )
     stream_proc = _run_claude_streaming(
@@ -1884,7 +1898,22 @@ def run_state_graph_tests(control_root: Path, runs_root: Path) -> dict:
     state = replay_run_state(control_root, "run_demo", runtime_runs_root=str(runs_root))
     if state.get("lifecycle_state") != "bridge_window_returned":
         raise AssertionError(json.dumps(state, ensure_ascii=False, indent=2))
+    if state.get("graph_node") != "return_bridge_result":
+        raise AssertionError(json.dumps(state, ensure_ascii=False, indent=2))
     graph = load_state_graph(control_root)
+    rejected_state = graph.replay_events(
+        control_root,
+        [
+            event("bridge_call_intended", "bw_reject_path", "sub_reject_path"),
+            event("bridge_window_opened", "bw_reject_path", "sub_reject_path"),
+            event("bridge_packet_rejected", "bw_reject_path", "sub_reject_path"),
+            event("bridge_result_returned", "bw_reject_path", "sub_reject_path"),
+        ],
+        runtime_runs_root=str(runs_root),
+        run_id="run_demo",
+    )
+    if rejected_state.get("graph_node") != "return_bridge_result":
+        raise AssertionError(json.dumps(rejected_state, ensure_ascii=False, indent=2))
     mermaid = graph.export_mermaid()
     dot = graph.export_dot()
     if "flowchart TD" not in mermaid or "digraph RunBridgeStateGraph" not in dot:
@@ -1936,13 +1965,39 @@ def run_retry_policy_tests(control_root: Path, runs_root: Path) -> dict:
     retry_ledger = json.loads((runs_root / "run_demo" / "run_ledger.json").read_text(encoding="utf-8")).get("retry_context", {})
     if retry_ledger.get("latest", {}).get("attempt") != 2:
         raise AssertionError(json.dumps(retry_ledger, ensure_ascii=False, indent=2))
+    bw = "bw_auto_retry"
+    ss = "sub_auto_retry"
+    auto_packet = packet(bw, ss)
+    dispatch(control_root, runs_root, event("bridge_call_intended", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_auto_retry", payload={"packet": auto_packet}))
+    dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_auto_retry", payload={"packet": auto_packet}))
+    auto_result = dispatch_workflow_event(
+        str(control_root),
+        event("call_bridge_sdk_error", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_auto_retry", payload={"packet": auto_packet, "error_or_null": {"type": "ClaudeCliTimeout", "message": "timeout"}}),
+        runtime_runs_root=str(runs_root),
+        persist=True,
+    )
+    auto_plan = auto_result.check_result.get("derived_facts", {}).get("auto_recovery", {})
+    if auto_plan.get("dispatch_event_kind") != "retry_attempt_scheduled":
+        raise AssertionError(json.dumps(auto_result.check_result, ensure_ascii=False, indent=2))
+    retry_events = [
+        item for item in _read_jsonl(runs_root / "run_demo" / "event_log.jsonl")
+        if item.get("event_kind") == "retry_attempt_scheduled" and item.get("bridge_window_id") == bw
+    ]
+    if not retry_events or retry_events[-1].get("payload", {}).get("attempt") != 2:
+        raise AssertionError(json.dumps(retry_events, ensure_ascii=False, indent=2))
     return {"retry_policy": "passed"}
 
 
 def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     invalid = validate_bridge_result({"status": "succeeded", "reports": [], "artifact_refs": [], "cleanup_required": False})
-    if invalid.get("valid") or invalid.get("error_type") != "MissingReport":
+    if invalid.get("valid") or invalid.get("error_type") not in {"SchemaValidationFailed", "MissingReport"}:
         raise AssertionError(json.dumps(invalid, ensure_ascii=False, indent=2))
+    strict_ok = validate_teammate_report(report(), strict=True)
+    if not strict_ok.get("valid"):
+        raise AssertionError(json.dumps(strict_ok, ensure_ascii=False, indent=2))
+    strict_bad = validate_teammate_report({"summary": "bad", "instruction_coverage": {"completed": "item"}}, strict=True)
+    if strict_bad.get("valid") or strict_bad.get("error_type") != "InvalidCoverageDisposition":
+        raise AssertionError(json.dumps(strict_bad, ensure_ascii=False, indent=2))
     completion_invalid = validate_completion_report({"completion_checks": {"required_outputs_present": True}, "artifact_refs": []})
     if completion_invalid.get("valid"):
         raise AssertionError(json.dumps(completion_invalid, ensure_ascii=False, indent=2))
@@ -1958,8 +2013,11 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     result = dispatch_workflow_event(str(control_root), bad_event, runtime_runs_root=str(runs_root), persist=True)
     if result.ok or "bridge_result_guardrail_failed" not in result.check_result.get("reasons", []):
         raise AssertionError(json.dumps(result.check_result, ensure_ascii=False, indent=2))
+    auto_repair = result.check_result.get("derived_facts", {}).get("auto_recovery", {})
+    if auto_repair.get("dispatch_event_kind") != "retry_attempt_scheduled" or auto_repair.get("retry_scope") != "completion_rejected":
+        raise AssertionError(json.dumps(result.check_result, ensure_ascii=False, indent=2))
     trajectory = (runs_root / "run_demo" / "trajectory.jsonl").read_text(encoding="utf-8")
-    if "guardrail_validation" not in trajectory and "MissingReport" not in trajectory:
+    if "guardrail_validation" not in trajectory and "SchemaValidationFailed" not in trajectory and "MissingReport" not in trajectory:
         raise AssertionError(trajectory[-1000:])
     return {"guardrails": "passed"}
 
@@ -1980,6 +2038,12 @@ def run_checkpoint_trajectory_tests(runs_root: Path) -> dict:
         raise AssertionError("trajectory contains unredacted secret-looking text")
     index = json.loads((run_root / "trajectory_index.json").read_text(encoding="utf-8"))
     if int(index.get("step_count") or 0) <= 0:
+        raise AssertionError(json.dumps(index, ensure_ascii=False, indent=2))
+    latest_checkpoint = json.loads((run_root / "latest_checkpoint.json").read_text(encoding="utf-8"))
+    graph_node = (latest_checkpoint.get("state") or {}).get("graph_node") if isinstance(latest_checkpoint.get("state"), dict) else None
+    if graph_node in {None, "read_runtime_truth"}:
+        raise AssertionError(json.dumps(latest_checkpoint, ensure_ascii=False, indent=2))
+    if not isinstance(index.get("completion_checks"), list):
         raise AssertionError(json.dumps(index, ensure_ascii=False, indent=2))
     return {"checkpoint_trajectory": "passed", "trajectory_steps": index["step_count"]}
 
@@ -2016,6 +2080,22 @@ def run_multi_repo_isolation_tests(root: Path, control_root: Path) -> dict:
         raise AssertionError("isolated run ledgers were not written")
     if runs_a == runs_b:
         raise AssertionError("repo runtime roots are not isolated")
+    explicit = dispatch_workflow_event(
+        str(control_root),
+        {
+            "run_id": "run_explicit_repo_key",
+            "main_session_id": "main_explicit_repo_key",
+            "agent_id": "hook.session_start",
+            "agent_type": "hook",
+            "event_kind": "session_started",
+            "timestamp": _now(),
+            "payload": {"repo_root": str(repo_a)},
+        },
+        repo_key=key_a,
+        persist=True,
+    )
+    if explicit.runtime_snapshot.get("repo_key") != key_a or not (runs_a / "run_explicit_repo_key" / "event_log.jsonl").exists():
+        raise AssertionError(json.dumps(explicit.runtime_snapshot, ensure_ascii=False, indent=2))
     registered = {repo.repo_key for repo in list_registered_repos(control_root)}
     if key_a not in registered or key_b not in registered:
         raise AssertionError(json.dumps(sorted(registered), ensure_ascii=False, indent=2))

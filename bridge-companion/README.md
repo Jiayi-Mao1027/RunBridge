@@ -52,6 +52,7 @@ Default runtime discovery reads:
 Optional overrides:
 
 - `BRIDGE_RUNTIME_PROJECTS_ROOT`: path to `.claude/runtime_state/projects`
+- `BRIDGE_RUNTIME_REGISTRY_ROOT`: path to `.claude/runtime_state/registry`
 - `BRIDGE_RUNTIME_ROOT` or `BRIDGE_RUNTIME_RUNS_ROOT`: compatibility path; if it points at a single repo `runs` directory, the gateway derives the projects root from it
 - `BRIDGE_SESSION_OBSERVER_ROOT`: path to `.claude/runtime_state/session_observer`
 - `BRIDGE_COMPANION_PORT`: default `8787`
@@ -66,11 +67,11 @@ GET /api/repos/:repoKey/runs
 GET /api/repos/:repoKey/runs/latest
 GET /api/repos/:repoKey/runs/:runId/status
 GET /api/repos/:repoKey/runs/:runId/snapshot
-GET /api/repos/:repoKey/runs/:runId/events?after=<seq>&limit=500
-GET /api/repos/:repoKey/runs/:runId/stream?after=<seq>
+GET /api/repos/:repoKey/runs/:runId/events?after=<seq>&afterId=<eventId>&afterCursor=<json>&limit=500
+GET /api/repos/:repoKey/runs/:runId/stream?after=<seq>&afterId=<eventId>&afterCursor=<json>
 GET /api/repos/:repoKey/runs/:runId/raw?file=<jsonl>&offset=<line>
-GET /api/session-observer/events?after=<seq>&limit=500
-GET /api/session-observer/stream?after=<seq>
+GET /api/session-observer/events?after=<seq>&afterId=<eventId>&afterCursor=<json>&limit=500
+GET /api/session-observer/stream?after=<seq>&afterId=<eventId>&afterCursor=<json>
 POST /api/brief
 ```
 
@@ -81,6 +82,8 @@ POST /api/brief
 Run event streams emit normalized events with:
 
 - `seq`
+- `eventId`
+- `cursor`
 - `ts`
 - `repoKey`
 - `runId`
@@ -90,13 +93,21 @@ Run event streams emit normalized events with:
 - `sessionId`
 - `source`
 - `kind`
+- `lane`
 - `actor`
+- `textDelta`
+- `toolInputDelta`
 - `messagePreview`
 - `toolName`
+- `sdkToolName`
 - `status`
 - `target`
 - `fileRefs`
 - `evidenceRefs`
 - `rawRef`
 
-`seq` is gateway-local and supports reconnect backfill through `after=<seq>` and SSE `Last-Event-ID`. `rawRef` points to the source JSONL file and line offset so every visible item can be audited.
+`eventId` is stable for a source JSONL line and is used for UI dedupe. `seq` is only a display/back-compat ordinal. Reconnect should prefer `afterCursor`, which is a map of `sourceFile -> lineOffset`; `Last-Event-ID` / `afterId` are also accepted.
+
+The SSE path uses a per-source JSONL tailer after the initial backfill. It tracks byte and line cursors per source file, so new observer lines can reach the UI without repeatedly re-reading whole long logs.
+
+SDK stream events are displayed in the discussion lane. SDK `tool_use` / `tool_result` / `input_json_delta` events are never rendered as real Read/Edit/Bash cards; those cards still require hook `tool_events.jsonl`.

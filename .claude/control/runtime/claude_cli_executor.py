@@ -271,6 +271,8 @@ def simulated_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
             {
                 "summary": f"Simulated completion for {task_spec.get('task_subject') or execution_input['task_id']}",
                 "task_description": task_spec.get("task_description"),
+                "instruction_coverage": {"simulated completion": "completed"},
+                "evidence_refs": [f"task:{execution_input['task_id']}"],
                 **({"manifest required fields checklist": manifest_checklist} if manifest_required else {}),
             }
         ],

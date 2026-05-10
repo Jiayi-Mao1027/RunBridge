@@ -49,7 +49,7 @@ def record_workflow_trajectory_step(paths: ControlPaths, event: Any, snapshot: d
                 "artifact_refs": payload.get("artifact_refs", []),
                 "process_refs": payload.get("owned_process_refs", []),
             },
-            "state_delta": _workflow_state_delta(str(getattr(event, "event_kind", "")), payload),
+            "state_delta": _workflow_state_delta(paths.run_root(run_id), str(getattr(event, "event_kind", "")), payload),
             "raw_refs": {
                 "tool_event_ref": None,
                 "sdk_stream_ref": None,
@@ -160,6 +160,27 @@ def append_trajectory_step(run_root: str | Path, step: dict[str, Any]) -> dict[s
     record = sanitize_json_value(record)
     append_jsonl(path, record)
     index = _read_index(index_path)
+    artifact_producers = index.get("artifact_producers") if isinstance(index.get("artifact_producers"), dict) else {}
+    process_producers = index.get("process_producers") if isinstance(index.get("process_producers"), dict) else {}
+    completion_checks = index.get("completion_checks") if isinstance(index.get("completion_checks"), list) else []
+    observation = record.get("observation") if isinstance(record.get("observation"), dict) else {}
+    state_delta = record.get("state_delta") if isinstance(record.get("state_delta"), dict) else {}
+    for artifact_ref in observation.get("artifact_refs", []) if isinstance(observation.get("artifact_refs"), list) else []:
+        artifact_producers[str(artifact_ref)] = record.get("trajectory_id")
+    for process_ref in observation.get("process_refs", []) if isinstance(observation.get("process_refs"), list) else []:
+        key = _process_ref_key(process_ref)
+        if key:
+            process_producers[key] = record.get("trajectory_id")
+    action = record.get("action") if isinstance(record.get("action"), dict) else {}
+    if action.get("kind") in {"workflow_event", "guardrail_validation"} and state_delta.get("supporting_trajectory_refs") is not None:
+        completion_checks.append(
+            {
+                "trajectory_id": record.get("trajectory_id"),
+                "step_index": step_index,
+                "supporting_trajectory_refs": state_delta.get("supporting_trajectory_refs", []),
+            }
+        )
+        completion_checks = completion_checks[-100:]
     index.update(
         {
             "schema_version": "0.1.0",
@@ -173,6 +194,9 @@ def append_trajectory_step(run_root: str | Path, step: dict[str, Any]) -> dict[s
                 "timestamp": record.get("timestamp"),
                 "action_kind": (record.get("action") or {}).get("kind") if isinstance(record.get("action"), dict) else None,
             },
+            "artifact_producers": artifact_producers,
+            "process_producers": process_producers,
+            "completion_checks": completion_checks,
         }
     )
     atomic_write_json(index_path, index)
@@ -207,12 +231,15 @@ def _workflow_goal(event_kind: str) -> str:
     }.get(event_kind, f"record {event_kind}")
 
 
-def _workflow_state_delta(event_kind: str, payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+def _workflow_state_delta(run_root: Path, event_kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    delta = {
         "opened_process_refs": payload.get("owned_process_refs", []) if event_kind == "team_idle_waiting" else [],
         "completed_checklist_items": payload.get("completed_checklist_items", []),
         "new_blockers": payload.get("missing_contract_items", []) if event_kind == "completion_contract_rejected" else [],
     }
+    if event_kind in {"completion_contract_satisfied", "completion_contract_rejected", "bridge_result_returned"}:
+        delta["supporting_trajectory_refs"] = _supporting_trajectory_refs(run_root, payload)
+    return delta
 
 
 def _contract_refs(payload: dict[str, Any]) -> list[str]:
@@ -222,6 +249,41 @@ def _contract_refs(payload: dict[str, Any]) -> list[str]:
         for item in contract.get(key, []) if isinstance(contract.get(key), list) else []:
             refs.append(f"completion.{key}.{item}")
     return refs[:20]
+
+
+def _supporting_trajectory_refs(run_root: Path, payload: dict[str, Any]) -> list[str]:
+    index = _read_index(run_root / "trajectory_index.json")
+    refs: list[str] = []
+    artifact_producers = index.get("artifact_producers") if isinstance(index.get("artifact_producers"), dict) else {}
+    for artifact_ref in payload.get("artifact_refs", []) if isinstance(payload.get("artifact_refs"), list) else []:
+        producer = artifact_producers.get(str(artifact_ref))
+        if producer:
+            refs.append(str(producer))
+    latest = index.get("latest_step") if isinstance(index.get("latest_step"), dict) else {}
+    if latest.get("trajectory_id"):
+        refs.append(str(latest["trajectory_id"]))
+    return _dedupe(refs)[:20]
+
+
+def _process_ref_key(process_ref: Any) -> str | None:
+    if isinstance(process_ref, dict):
+        for key in ("process_ref", "process_id", "pid", "log_path"):
+            if process_ref.get(key):
+                return str(process_ref.get(key))
+    if process_ref:
+        return str(process_ref)
+    return None
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _blockers_from_tool_record(record: dict[str, Any]) -> list[dict[str, Any]]:

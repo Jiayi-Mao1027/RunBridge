@@ -14,6 +14,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dispatch a bridge-window workflow runtime event.")
     parser.add_argument("--control-root", required=True, help="Path to .claude/control")
     parser.add_argument("--runtime-runs-root", default=None, help="Optional explicit runtime_state/runs root")
+    parser.add_argument("--repo-key", default=None, help="Optional explicit repo_key identity for multi-repo runtime roots")
     parser.add_argument("--event-file", default=None, help="Path to JSON file containing a workflow runtime event")
     parser.add_argument("--event-json", default=None, help="Inline JSON string containing a workflow runtime event")
     parser.add_argument("--build-bridge-packet", action="store_true", help="Build one main-leader bridge packet from current runtime truth")
@@ -72,6 +73,7 @@ def main() -> None:
         result = reconcile_workflow_from_ledger(
             args.control_root,
             args.run_id,
+            repo_key=args.repo_key,
             runtime_runs_root=args.runtime_runs_root,
             persist=args.persist,
         )
@@ -84,6 +86,7 @@ def main() -> None:
         packet = decide_next_bridge_packet(
             args.control_root,
             args.run_id,
+            repo_key=args.repo_key,
             runtime_runs_root=args.runtime_runs_root,
             main_session_id=args.main_session_id,
             user_instruction=args.user_instruction,
@@ -112,6 +115,7 @@ def main() -> None:
     result = dispatch_workflow_event(
         args.control_root,
         event_payload,
+        repo_key=args.repo_key,
         runtime_runs_root=args.runtime_runs_root,
         persist=args.persist,
     )

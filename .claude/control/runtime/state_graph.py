@@ -58,11 +58,13 @@ class StateGraph:
         self.nodes = nodes
         self.edges = edges
         self.raw = raw
-        self._edges_by_event: dict[str, StateEdge] = {}
+        self._edges_by_event: dict[str, list[StateEdge]] = {}
+        self._edges_by_source_event: dict[tuple[str, str], StateEdge] = {}
         self._routes: set[tuple[str, str]] = set()
         for edge in edges:
             for event_kind in edge.event_kinds:
-                self._edges_by_event.setdefault(event_kind, edge)
+                self._edges_by_event.setdefault(event_kind, []).append(edge)
+                self._edges_by_source_event.setdefault((edge.source, event_kind), edge)
             for route in edge.phase_routes:
                 self._routes.add(route)
 
@@ -80,7 +82,30 @@ class StateGraph:
         return cls(nodes=nodes, edges=edges, raw=payload)
 
     def edge_for_event(self, event_kind: str) -> StateEdge | None:
-        return self._edges_by_event.get(str(event_kind))
+        edges = self._edges_by_event.get(str(event_kind), [])
+        if len(edges) == 1:
+            return edges[0]
+        return None
+
+    def edge_for(self, current_node: str, event_kind: str) -> StateEdge | None:
+        """Resolve a transition from the current graph node.
+
+        The unambiguous event fallback keeps legacy short ledgers replayable,
+        but repeated event kinds such as bridge_result_returned must match the
+        current node before they can move state.
+        """
+        event = str(event_kind)
+        current = str(current_node or "")
+        edge = self._edges_by_source_event.get((current, event))
+        if edge:
+            return edge
+        wildcard = self._edges_by_source_event.get(("*", event))
+        if wildcard:
+            return wildcard
+        return self.edge_for_event(event)
+
+    def candidate_edges_for_event(self, event_kind: str) -> list[StateEdge]:
+        return list(self._edges_by_event.get(str(event_kind), []))
 
     def validate_against_policy(self, control_root: str | Path) -> dict[str, Any]:
         root = Path(control_root).expanduser().resolve()
@@ -273,11 +298,22 @@ def apply_event_to_state(
     if event_kind == "retry_attempt_scheduled":
         state["retry_context"] = payload if payload else {k: v for k, v in event.items() if k.startswith("retry_") or k in {"attempt", "max_attempts"}}
 
-    edge = graph.edge_for_event(event_kind)
+    current_graph_node = str(state.get("graph_node") or "read_runtime_truth")
+    edge = graph.edge_for(current_graph_node, event_kind)
     if edge:
         state["graph_node"] = edge.target
     elif event_kind:
-        state["diagnostics"].append({"level": "warn", "category": "state_graph", "message": "event has no state graph edge", "event_kind": event_kind})
+        candidates = [candidate.edge_id for candidate in graph.candidate_edges_for_event(event_kind)]
+        state["diagnostics"].append(
+            {
+                "level": "warn",
+                "category": "state_graph",
+                "message": "event has no state graph edge from current graph node",
+                "event_kind": event_kind,
+                "current_graph_node": current_graph_node,
+                "candidate_edge_ids": candidates,
+            }
+        )
 
     bridge_window_id = str(event.get("bridge_window_id") or "")
     if bridge_window_id:

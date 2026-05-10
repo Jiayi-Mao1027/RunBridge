@@ -63,7 +63,7 @@ def validate_json_object(value: Any, *, output_name: str = "output") -> dict[str
     return validation_error(error_type="InvalidJsonObject", path="$", message=f"{output_name} must be a JSON object")
 
 
-def validate_bridge_packet(packet: Any, *, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+def validate_bridge_packet(packet: Any, *, snapshot: dict[str, Any] | None = None, control_root: str | Path | None = None) -> dict[str, Any]:
     if not isinstance(packet, dict):
         return validation_error(error_type="InvalidBridgePacket", path="$", message="BridgePacket must be an object", retry_allowed=False)
     required = [
@@ -98,9 +98,12 @@ def validate_bridge_packet(packet: Any, *, snapshot: dict[str, Any] | None = Non
     return validation_ok()
 
 
-def validate_bridge_result(payload: Any) -> dict[str, Any]:
+def validate_bridge_result(payload: Any, *, control_root: str | Path | None = None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return validation_error(error_type="InvalidBridgeResult", path="$", message="bridge result must be an object")
+    schema_validation = validate_schema(payload, "bridge_result.schema.json", control_root=control_root)
+    if not schema_validation.get("valid"):
+        return schema_validation
     status = payload.get("status")
     if status not in STATUS_VALUES:
         return validation_error(error_type="InvalidStatus", path="$.status", message="bridge result status is missing or invalid")
@@ -118,30 +121,56 @@ def validate_bridge_result(payload: Any) -> dict[str, Any]:
         if not isinstance(evidence, dict) or not evidence:
             return validation_error(error_type="MissingRequiredEvidenceRef", path="$.evidence", message="succeeded bridge result requires evidence")
     for index, report in enumerate(reports):
-        validation = validate_teammate_report(report, path=f"$.reports[{index}]", strict=False)
+        validation = validate_teammate_report(report, path=f"$.reports[{index}]", strict=status != "failed", control_root=control_root)
         if not validation.get("valid"):
             return validation
     return validation_ok()
 
 
-def validate_teammate_report(report: Any, *, path: str = "$", strict: bool = True) -> dict[str, Any]:
+def validate_teammate_report(report: Any, *, path: str = "$", strict: bool = True, control_root: str | Path | None = None) -> dict[str, Any]:
     if not isinstance(report, dict):
         return validation_error(error_type="InvalidTeammateReport", path=path, message="teammate report must be an object")
+    if strict:
+        schema_validation = validate_schema(report, "teammate_report.schema.json", control_root=control_root, root_path=path)
+        if not schema_validation.get("valid"):
+            return schema_validation
     if not report.get("summary"):
         return validation_error(error_type="MissingSummary", path=f"{path}.summary", message="teammate report requires summary")
     if strict:
         coverage = report.get("instruction_coverage")
         if not isinstance(coverage, dict):
             return validation_error(error_type="MissingInstructionCoverage", path=f"{path}.instruction_coverage", message="teammate report requires instruction_coverage")
-        for key in coverage:
-            if str(key) not in COVERAGE_VALUES:
-                return validation_error(error_type="InvalidCoverageDisposition", path=f"{path}.instruction_coverage", message=f"invalid coverage disposition {key}")
+        completed_claims = False
+        for key, raw_disposition in coverage.items():
+            disposition = _coverage_disposition(raw_disposition)
+            if disposition not in COVERAGE_VALUES:
+                return validation_error(
+                    error_type="InvalidCoverageDisposition",
+                    path=f"{path}.instruction_coverage.{_json_path_key(str(key))}",
+                    message=f"invalid coverage disposition {disposition or raw_disposition}",
+                )
+            completed_claims = completed_claims or disposition == "completed"
+        if not coverage:
+            return validation_error(error_type="MissingInstructionCoverage", path=f"{path}.instruction_coverage", message="teammate report instruction_coverage cannot be empty")
+        completed_items = report.get("completed_items") if isinstance(report.get("completed_items"), list) else []
+        completed_claims = completed_claims or bool(completed_items)
+        evidence_refs = report.get("evidence_refs") if isinstance(report.get("evidence_refs"), list) else []
+        evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+        if completed_claims and not evidence_refs and not evidence:
+            return validation_error(
+                error_type="MissingRequiredEvidenceRef",
+                path=f"{path}.evidence_refs",
+                message="completed teammate report coverage requires evidence_refs or evidence",
+            )
     return validation_ok()
 
 
-def validate_completion_report(payload: Any) -> dict[str, Any]:
+def validate_completion_report(payload: Any, *, control_root: str | Path | None = None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return validation_error(error_type="InvalidCompletionReport", path="$", message="completion report must be an object")
+    schema_validation = validate_schema(payload, "completion_report.schema.json", control_root=control_root)
+    if not schema_validation.get("valid"):
+        return schema_validation
     checks = payload.get("completion_checks") if isinstance(payload.get("completion_checks"), dict) else {}
     if not checks:
         return validation_error(error_type="MissingCompletionChecks", path="$.completion_checks", message="completion report requires completion_checks")
@@ -149,12 +178,25 @@ def validate_completion_report(payload: Any) -> dict[str, Any]:
         return validation_error(error_type="MissingReportEvidence", path="$.reports", message="completion output claims reports exist but reports are missing")
     if checks.get("required_artifacts_present") and payload.get("artifact_refs") is None:
         return validation_error(error_type="MissingArtifactRefs", path="$.artifact_refs", message="completion output claims artifacts checked but artifact_refs are absent")
+    for index, report in enumerate(payload.get("reports", []) if isinstance(payload.get("reports"), list) else []):
+        validation = validate_teammate_report(report, path=f"$.reports[{index}]", strict=True, control_root=control_root)
+        if not validation.get("valid"):
+            return validation
+    if checks.get("validation_passed") and not _has_completion_evidence(payload):
+        return validation_error(
+            error_type="MissingRequiredEvidenceRef",
+            path="$.completion_evidence",
+            message="completion report claims validation_passed but has no completion_evidence, report evidence_refs, or artifact_refs",
+        )
     return validation_ok()
 
 
-def validate_log_manifest(payload: Any) -> dict[str, Any]:
+def validate_log_manifest(payload: Any, *, control_root: str | Path | None = None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return validation_error(error_type="InvalidLogManifest", path="$", message="log manifest must be an object")
+    schema_validation = validate_schema(payload, "log_manifest.schema.json", control_root=control_root)
+    if not schema_validation.get("valid"):
+        return schema_validation
     required = _log_manifest_required_fields()
     for field in required:
         if field not in payload or payload.get(field) in {None, ""}:
@@ -165,6 +207,108 @@ def validate_log_manifest(payload: Any) -> dict[str, Any]:
 def load_schema(control_root: str | Path, schema_name: str) -> dict[str, Any]:
     root = Path(control_root).expanduser().resolve()
     return load_json_file(root / "schemas" / schema_name, default={}) or {}
+
+
+def validate_schema(
+    payload: Any,
+    schema_name: str,
+    *,
+    control_root: str | Path | None = None,
+    root_path: str = "$",
+) -> dict[str, Any]:
+    schema = _load_schema_default(control_root, schema_name)
+    if not schema:
+        return validation_ok()
+    return _validate_schema_node(payload, schema, root_path)
+
+
+def _load_schema_default(control_root: str | Path | None, schema_name: str) -> dict[str, Any]:
+    if control_root is not None:
+        return load_schema(control_root, schema_name)
+    schema_root = Path(__file__).resolve().parents[1] / "schemas"
+    return load_json_file(schema_root / schema_name, default={}) or {}
+
+
+def _validate_schema_node(value: Any, schema: dict[str, Any], path: str) -> dict[str, Any]:
+    expected_type = schema.get("type")
+    if expected_type is not None and not _schema_type_matches(value, expected_type):
+        return validation_error(
+            error_type="SchemaValidationFailed",
+            path=path,
+            message=f"{path} expected type {expected_type}",
+        )
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        return validation_error(error_type="SchemaValidationFailed", path=path, message=f"{path} value is not in schema enum")
+    if isinstance(value, dict):
+        for key in schema.get("required", []) if isinstance(schema.get("required"), list) else []:
+            if key not in value:
+                return validation_error(error_type="SchemaValidationFailed", path=f"{path}.{key}", message=f"{path} missing required field {key}")
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        for key, child_schema in properties.items():
+            if key in value and isinstance(child_schema, dict):
+                child = _validate_schema_node(value[key], child_schema, f"{path}.{key}")
+                if not child.get("valid"):
+                    return child
+    if isinstance(value, list):
+        items_schema = schema.get("items") if isinstance(schema.get("items"), dict) else None
+        if items_schema:
+            for index, item in enumerate(value):
+                child = _validate_schema_node(item, items_schema, f"{path}[{index}]")
+                if not child.get("valid"):
+                    return child
+    return validation_ok()
+
+
+def _schema_type_matches(value: Any, expected_type: Any) -> bool:
+    if isinstance(expected_type, list):
+        return any(_schema_type_matches(value, item) for item in expected_type)
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    return True
+
+
+def _coverage_disposition(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("disposition", "status", "state"):
+            if value.get(key):
+                return str(value.get(key))
+        return ""
+    return str(value)
+
+
+def _json_path_key(key: str) -> str:
+    if key.replace("_", "").replace("-", "").isalnum():
+        return key
+    return json.dumps(key, ensure_ascii=False)
+
+
+def _has_completion_evidence(payload: dict[str, Any]) -> bool:
+    if payload.get("completion_evidence"):
+        return True
+    artifact_refs = payload.get("artifact_refs") if isinstance(payload.get("artifact_refs"), list) else []
+    if artifact_refs:
+        return True
+    reports = payload.get("reports") if isinstance(payload.get("reports"), list) else []
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        evidence_refs = report.get("evidence_refs") if isinstance(report.get("evidence_refs"), list) else []
+        if evidence_refs or isinstance(report.get("evidence"), dict):
+            return True
+    return False
 
 
 def _log_manifest_required_fields() -> list[str]:

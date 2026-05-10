@@ -7,7 +7,7 @@ from typing import Any
 
 from loader import ControlPaths
 from persist import append_jsonl, atomic_write_json
-from state_graph import RunBridgeState, stable_hash, state_from_snapshot
+from state_graph import RunBridgeState, replay_run_state, stable_hash, state_from_snapshot
 
 
 class CheckpointStore:
@@ -75,7 +75,10 @@ def write_event_checkpoint(paths: ControlPaths, event: Any, snapshot: dict[str, 
     run_id = str(getattr(event, "run_id", None) or _event_value(event, "run_id") or snapshot.get("run_id") or "")
     if not run_id:
         return {}
-    state = state_from_snapshot(snapshot, control_root=paths.control_root, runtime_runs_root=paths.runtime_runs_root)
+    try:
+        state = replay_run_state(paths.control_root, run_id, runtime_runs_root=paths.runtime_runs_root)
+    except Exception:
+        state = state_from_snapshot(snapshot, control_root=paths.control_root, runtime_runs_root=paths.runtime_runs_root)
     store = CheckpointStore(paths, run_id)
     return store.write_checkpoint(state=state, event=event, snapshot=snapshot)
 

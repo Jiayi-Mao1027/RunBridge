@@ -107,8 +107,15 @@ def decide_retry(
     non_retryable = {str(item) for item in policy.get("non_retryable_error_types", []) if str(item)}
     current_attempt = max(1, int(attempt))
     error = str(error_type or "UnknownError")
-    retryable = error not in non_retryable and (max_attempts == 0 or current_attempt < max_attempts)
-    exhausted = not retryable and error not in non_retryable and max_attempts != 0 and current_attempt >= max_attempts
+    if error in non_retryable:
+        retryable = False
+        exhausted = False
+    elif max_attempts == 0:
+        retryable = True
+        exhausted = False
+    else:
+        retryable = current_attempt <= max_attempts
+        exhausted = current_attempt > max_attempts
     delay_ms = _delay_ms(policy, current_attempt)
     if error in non_retryable:
         next_action = "surface_non_retryable_failure"

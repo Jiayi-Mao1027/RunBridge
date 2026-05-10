@@ -32,7 +32,7 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 
 
 def _replace_with_retry(temp_path: Path, path: Path) -> None:
-    delays = [0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.2, 2.0]
+    delays = [0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.2, 2.0, 3.0, 5.0]
     for delay in delays:
         try:
             temp_path.replace(path)

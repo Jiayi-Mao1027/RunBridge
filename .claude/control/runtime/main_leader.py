@@ -8,6 +8,7 @@ from typing import Any
 import uuid
 
 from loader import ControlPaths, load_json_file
+from repo_runtime import get_repo_runtime_root
 from workflow_runtime import SCHEMA_VERSION, build_runtime_snapshot
 
 
@@ -108,8 +109,11 @@ def read_runtime_snapshot(
     control_root: str | Path,
     run_id: str,
     *,
+    repo_key: str | None = None,
     runtime_runs_root: str | Path | None = None,
 ) -> dict[str, Any]:
+    if repo_key and runtime_runs_root is None:
+        runtime_runs_root = get_repo_runtime_root(control_root, repo_key)
     paths = ControlPaths.from_root(control_root, runtime_runs_root)
     run_ledger = load_json_file(paths.run_ledger_path(run_id), default={}) or {}
     if not run_ledger:
@@ -133,13 +137,14 @@ def decide_next_bridge_packet(
     control_root: str | Path,
     run_id: str,
     *,
+    repo_key: str | None = None,
     runtime_runs_root: str | Path | None = None,
     main_session_id: str | None = None,
     user_instruction: str | None = None,
     task_spec: dict[str, Any] | None = None,
     target_phase: str | None = None,
 ) -> dict[str, Any]:
-    snapshot = read_runtime_snapshot(control_root, run_id, runtime_runs_root=runtime_runs_root)
+    snapshot = read_runtime_snapshot(control_root, run_id, repo_key=repo_key, runtime_runs_root=runtime_runs_root)
     phase_contracts = load_phase_contracts(control_root)
     return build_bridge_instruction_packet_for_this_invoke(
         snapshot=snapshot,

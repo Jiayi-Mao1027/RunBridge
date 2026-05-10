@@ -21,8 +21,10 @@ It is forbidden to:
 ## Data Flow
 
 ```text
+.claude/runtime_state/registry/*.json
+  -> repo/run discovery
 .claude/runtime_state/projects/<repo-key>/runs/<run-id>/*.jsonl
-  -> gateway source readers
+  -> gateway source readers and source-file tailers
   -> normalized CompanionEvent
   -> REST backfill and SSE live stream
   -> UI reducer
@@ -39,7 +41,14 @@ The gateway never calls Bridge MCP tools and never writes runtime files.
 
 ## Multi-Repo Layout
 
-The gateway discovers repositories from:
+The gateway first reads:
+
+```text
+.claude/runtime_state/registry/repos.json
+.claude/runtime_state/registry/active_runs.json
+```
+
+If registry files are missing, it falls back to scanning:
 
 ```text
 .claude/runtime_state/projects/
@@ -47,13 +56,13 @@ The gateway discovers repositories from:
 
 Each child directory is treated as one `repoKey`; each `repoKey/runs/<run-id>` directory is one run.
 
-`latest` is calculated per repo by sorting runs on snapshot, ledger, or directory mtime. It is not global across all repos.
+`latest` is repo-local. Registry `latest_run_id` and `active_run_ids` take priority; snapshot, ledger, and directory mtime are fallback ordering signals. It is never global across all repos.
 
 ## Normalized Event Sources
 
 | Source file | Companion source | Display rule |
 | --- | --- | --- |
-| `sdk_stream_events.jsonl` | `sdk_stream` | assistant text or SDK stream message only |
+| `sdk_stream_events.jsonl` | `sdk_stream` | discussion lane; assistant text, StreamEvent deltas, SDK tool declarations/results, and input JSON deltas |
 | `tool_events.jsonl` | `hook_tool_event` | only source of tool started/completed/failed cards |
 | `agent_messages.jsonl` | `agent_message` | assignment cards |
 | `teammate_reports.jsonl` | `teammate_report` | report cards |
@@ -65,6 +74,15 @@ Each child directory is treated as one `repoKey`; each `repoKey/runs/<run-id>` d
 
 The UI does not invent discussion text. If a run has tool events but no SDK text, agent message, or report text, the UI shows that only tool activity was captured.
 
+SDK stream classification is explicit:
+
+- `sdk_stream_assistant_text`, `content_block_delta`, or text delta fields -> discussion text
+- `sdk_stream_tool_use` -> SDK tool declaration in discussion lane
+- `sdk_stream_tool_result` -> SDK tool result in discussion lane
+- `input_json_delta` / partial JSON fields -> accumulated SDK tool input preview in discussion lane
+
+Real Read/Edit/Bash cards still only come from hook `tool_events.jsonl`.
+
 ## Transport
 
 REST endpoints provide discovery, hydration, backfill, and raw-record lookup.
@@ -72,21 +90,25 @@ REST endpoints provide discovery, hydration, backfill, and raw-record lookup.
 SSE endpoints provide live read-only updates:
 
 ```text
-GET /api/repos/:repoKey/runs/:runId/stream?after=<seq>
-GET /api/session-observer/stream?after=<seq>
+GET /api/repos/:repoKey/runs/:runId/stream?afterCursor=<json>
+GET /api/session-observer/stream?afterCursor=<json>
 ```
 
-The browser reconnects with `Last-Event-ID`; the explicit `after` query is also supported. Events are deduplicated by gateway `seq`.
+The browser reconnects with `afterCursor`, a map of `sourceFile -> lineOffset`. `afterId` and `Last-Event-ID` are accepted as fallbacks. Events are deduplicated by stable `eventId`, not display `seq`.
+
+Each SSE connection performs one backfill pass and then switches to per-source JSONL tailers. Tailers track byte offset and line offset for every source file.
 
 ## UI Structure
 
 The prototype uses three panes:
 
 - Repo / run / team tree
-- Live activity stream
+- Live activity stream with lane filters: All, Tools, Discussion, Reports, Processes, Completion, Failures
 - Detail inspector with raw, trajectory, and model brief tabs
 
 The team tree combines `session_bindings.jsonl`, `active_operations.json`, and hook tool events. A teammate running Bash is shown as running only when hook tool events or active operations say so. A report alone is displayed as a report, not as a fabricated tool action.
+
+Each teammate card may show current tool, last completed tool, last discussion text, last report, and current blocker. Missing discussion is displayed as missing; it is not inferred from reports or tool names.
 
 ## Trajectory
 
