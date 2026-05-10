@@ -491,6 +491,7 @@ def _emit_sdk_stream_event(
         "timestamp": _now_iso(),
         "event_type": event_type,
         "stream_source": "sdk",
+        "raw_stream_event_type": str(payload.get("type") or event_type) if isinstance(payload, dict) else event_type,
         "run_id": execution_input.get("run_id"),
         "main_session_id": execution_input.get("main_session_id"),
         "sub_session_id": execution_input.get("sub_session_id"),
@@ -502,6 +503,8 @@ def _emit_sdk_stream_event(
         "agent_type": "bridge-leader",
         "status": status,
         "message_preview": _sdk_message_preview(payload),
+        "text_delta": _sdk_text_delta(payload),
+        "input_json_delta": _sdk_input_json_delta(payload),
         "payload_keys": _sdk_payload_keys(payload),
         "sequence": sequence,
         "monotonic_index": None,
@@ -550,6 +553,8 @@ def _sdk_payload_keys(payload: dict[str, Any]) -> list[str]:
 def _sdk_stream_event_type(payload: dict[str, Any]) -> str:
     if not isinstance(payload, dict):
         return "sdk_stream_delta"
+    if payload.get("type") == "content_block_delta":
+        return "sdk_stream_content_block_delta"
     if _collect_tool_use_blocks(payload, limit=1):
         return "sdk_stream_tool_use"
     if _collect_tool_result_blocks(payload, limit=1):
@@ -562,6 +567,9 @@ def _sdk_stream_event_type(payload: dict[str, Any]) -> str:
 def _sdk_message_preview(payload: dict[str, Any]) -> str:
     parts: list[str] = []
     if isinstance(payload, dict):
+        text_delta = _sdk_text_delta(payload)
+        if text_delta:
+            parts.append(text_delta)
         for key in ("text", "message", "summary", "stop_reason", "subtype", "type"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
@@ -588,8 +596,40 @@ def _sdk_message_preview(payload: dict[str, Any]) -> str:
     return _redact_sdk_text(preview)[:_SDK_STREAM_PREVIEW_LIMIT]
 
 
+def _sdk_text_delta(payload: dict[str, Any]) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("text_delta", "delta_text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return _redact_sdk_text(value)[:_SDK_STREAM_PREVIEW_LIMIT]
+    delta = payload.get("delta") if isinstance(payload.get("delta"), dict) else {}
+    if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
+        return _redact_sdk_text(delta["text"])[:_SDK_STREAM_PREVIEW_LIMIT]
+    if isinstance(delta.get("text"), str):
+        return _redact_sdk_text(delta["text"])[:_SDK_STREAM_PREVIEW_LIMIT]
+    return None
+
+
+def _sdk_input_json_delta(payload: dict[str, Any]) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("input_json_delta", "partial_json"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return _redact_sdk_text(value)[:_SDK_STREAM_PREVIEW_LIMIT]
+    delta = payload.get("delta") if isinstance(payload.get("delta"), dict) else {}
+    if delta.get("type") == "input_json_delta" and isinstance(delta.get("partial_json"), str):
+        return _redact_sdk_text(delta["partial_json"])[:_SDK_STREAM_PREVIEW_LIMIT]
+    if isinstance(delta.get("partial_json"), str):
+        return _redact_sdk_text(delta["partial_json"])[:_SDK_STREAM_PREVIEW_LIMIT]
+    return None
+
+
 def _sdk_compact_tool_fields(payload: dict[str, Any]) -> dict[str, Any]:
     tool_blocks = _collect_tool_use_blocks(payload, limit=1) or _collect_tool_result_blocks(payload, limit=1)
+    if not tool_blocks and isinstance(payload, dict) and isinstance(payload.get("content_block"), dict):
+        tool_blocks = [_compact_tool_use_block(payload["content_block"])]
     if not tool_blocks:
         return {}
     block = tool_blocks[0]
@@ -670,8 +710,9 @@ def _attach_cli_debug_evidence(
     debug_path = prompt_path.with_suffix(".cli_debug.json")
     debug_payload: dict[str, Any] = {
         "prompt_file": str(prompt_path),
-        "stdout": stdout,
-        "stderr": stderr,
+        "stdout_tail": _redact_sdk_text(stdout)[-4000:],
+        "stderr_tail": _redact_sdk_text(stderr)[-4000:],
+        "truncated": len(stdout) > 4000 or len(stderr) > 4000,
     }
     if payload is not None:
         debug_payload["payload"] = payload
@@ -1139,7 +1180,9 @@ def _claude_command_prefix() -> list[str]:
 
 def _claude_print_stream_json_args() -> list[str]:
     # Claude CLI requires --verbose when print mode uses stream-json output.
-    return ["--output-format", "stream-json", "--verbose"]
+    # --include-partial-messages keeps content_block_delta records visible for
+    # UI-safe SDK stream text/input deltas.
+    return ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
 
 
 def _command_too_long_for_windows(cmd: list[str]) -> int | None:

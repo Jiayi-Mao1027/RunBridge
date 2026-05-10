@@ -508,6 +508,24 @@ def _build_auto_recovery_plan(
             "same_packet_boundary_required": bool(decision.policy.get("requires_same_packet_boundary", False)),
         }
     )
+    process_poll_guard = _process_poll_retry_guard(event, retry_scope, decision.policy)
+    if retry_scope == "l4_execute_process_poll" and not process_poll_guard.get("allowed", True):
+        anomaly_payload = {
+            **retry_payload,
+            "target_phase": "l4_anomaly",
+            "anomaly_reason": process_poll_guard.get("reason") or "process_poll_not_allowed",
+            "process_poll_guard": process_poll_guard,
+            "next_action": "enter_anomaly",
+        }
+        return {
+            "repo_key": repo_key,
+            "runtime_runs_root": str(paths.runtime_runs_root),
+            "retry_decision": anomaly_payload,
+            "source_event_id": event.event_id,
+            "source_event_kind": event.event_kind,
+            "dispatch_event": _runtime_recovery_event(event, "enter_anomaly", anomaly_payload),
+            "next_action": "enter_anomaly",
+        }
     plan: dict[str, Any] = {
         "repo_key": repo_key,
         "runtime_runs_root": str(paths.runtime_runs_root),
@@ -518,6 +536,7 @@ def _build_auto_recovery_plan(
         "next_action": decision.next_action,
     }
     if decision.retryable:
+        retry_payload["retry_action"] = _retry_action_contract(event, retry_scope, decision, process_poll_guard)
         plan["dispatch_event"] = _runtime_recovery_event(event, "retry_attempt_scheduled", retry_payload)
     elif decision.exhausted:
         anomaly_payload = {
@@ -564,6 +583,7 @@ def _compact_auto_recovery_plan(plan: dict[str, Any]) -> dict[str, Any]:
         "packet_hash": decision.get("packet_hash"),
         "next_action": plan.get("next_action"),
         "dispatch_event_kind": dispatch_event.get("event_kind"),
+        "retry_action": decision.get("retry_action"),
     }
 
 
@@ -608,6 +628,65 @@ def _retry_scope_for_failure(event: WorkflowEvent, check_result: CheckResult, sn
     if "bridge_packet_guardrail_failed" in check_result.reasons:
         return "bridge_sdk_call"
     return None
+
+
+def _retry_action_contract(
+    event: WorkflowEvent,
+    retry_scope: str,
+    decision: Any,
+    process_poll_guard: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    kind_by_scope = {
+        "bridge_sdk_call": "retry_bridge_sdk_call",
+        "teammate_report_missing": "continue_waiting",
+        "completion_rejected": "repair_bridge_output",
+        "l4_execute_process_poll": "poll_process",
+    }
+    if event.event_kind == "message_dispatch_failed":
+        action_kind = "retry_message_dispatch"
+    else:
+        action_kind = kind_by_scope.get(retry_scope, "retry_bridge_sdk_call")
+    requires_same_packet = bool(decision.policy.get("requires_same_packet_boundary", False) or retry_scope in {"bridge_sdk_call", "completion_rejected"})
+    action = {
+        "kind": action_kind,
+        "allowed": bool(decision.retryable),
+        "requires_new_bridge_window": False,
+        "requires_same_packet": requires_same_packet,
+        "requires_user": False,
+    }
+    if retry_scope == "l4_execute_process_poll":
+        action["process_poll_constraints"] = process_poll_guard or {}
+    return action
+
+
+def _process_poll_retry_guard(event: WorkflowEvent, retry_scope: str, policy: dict[str, Any]) -> dict[str, Any]:
+    if retry_scope != "l4_execute_process_poll":
+        return {"allowed": True}
+    refs = event.payload.get("owned_process_refs") if isinstance(event.payload.get("owned_process_refs"), list) else []
+    terminal_states = {"completed", "succeeded", "failed", "error", "exited", "terminated", "killed", "lost", "unknown_terminal"}
+    running_states = {"running", "started", "active", "pending", "unknown"}
+    ref_states = [str(ref.get("status") or ref.get("state") or "unknown").lower() for ref in refs if isinstance(ref, dict)]
+    if refs and ref_states and all(state in terminal_states for state in ref_states):
+        return {"allowed": False, "reason": "process_refs_terminal", "terminal_states": ref_states}
+    timeout_policy = event.payload.get("timeout_policy") if isinstance(event.payload.get("timeout_policy"), dict) else {}
+    hard_timeout_seconds = _positive_int_or_none(timeout_policy.get("hard_timeout_seconds"))
+    started_at = _parse_iso(event.payload.get("process_started_at") or event.payload.get("started_at"))
+    now = _parse_iso(event.timestamp) or datetime.now(timezone.utc)
+    elapsed_seconds = _elapsed_seconds(started_at, now) if started_at else None
+    if hard_timeout_seconds is not None and elapsed_seconds is not None and elapsed_seconds >= hard_timeout_seconds:
+        return {"allowed": False, "reason": "hard_timeout_elapsed", "elapsed_seconds": elapsed_seconds, "hard_timeout_seconds": hard_timeout_seconds}
+    heartbeat_timeout_ms = _positive_int_or_none(policy.get("heartbeat_timeout_ms"))
+    last_heartbeat_at = _parse_iso(event.payload.get("last_heartbeat_at"))
+    heartbeat_age_seconds = _elapsed_seconds(last_heartbeat_at, now) if last_heartbeat_at else None
+    return {
+        "allowed": True,
+        "reason": "poll_allowed_until_terminal_or_hard_timeout",
+        "retry_until_terminal_process_state": bool(policy.get("retry_until_terminal_process_state", True)),
+        "heartbeat_timeout_ms": heartbeat_timeout_ms,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "hard_timeout_seconds": hard_timeout_seconds,
+        "observed_process_states": ref_states or sorted(running_states)[:1],
+    }
 
 
 def _retry_error_type(event: WorkflowEvent, check_result: CheckResult) -> str:
@@ -723,7 +802,8 @@ def check_event(
     }:
         bridge_result = normalized_payload.get("bridge_result")
         if isinstance(bridge_result, dict):
-            guardrail = validate_bridge_result(bridge_result, control_root=control_root)
+            completion_contract = normalized_payload.get("completion_contract") if isinstance(normalized_payload.get("completion_contract"), dict) else None
+            guardrail = validate_bridge_result(bridge_result, control_root=control_root, completion_contract=completion_contract)
             if not guardrail.get("valid"):
                 reasons.append("bridge_result_guardrail_failed")
                 derived_facts["guardrail_validation"] = guardrail
@@ -2070,6 +2150,12 @@ def _validate_bridge_packet(packet: Any, event: WorkflowEvent, snapshot: dict[st
         reasons.append("bridge_packet_must_bind_exactly_one_team_and_one_task")
     if binding.get("run_id") not in {None, event.run_id}:
         reasons.append("bridge_packet_binding_mismatch")
+    expected_repo_key = event.payload.get("repo_key") or snapshot.get("repo_key")
+    if expected_repo_key:
+        if packet.get("repo_key") not in {None, expected_repo_key}:
+            reasons.append("bridge_packet_binding_mismatch")
+        if binding.get("repo_key") not in {None, expected_repo_key}:
+            reasons.append("bridge_packet_binding_mismatch")
     if binding.get("main_session_id") not in {None, event.main_session_id, snapshot.get("main_session_id")}:
         reasons.append("bridge_packet_binding_mismatch")
     if not event.bridge_window_id or binding.get("bridge_window_id") != event.bridge_window_id:

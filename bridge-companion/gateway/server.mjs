@@ -168,14 +168,16 @@ async function readJsonlWithMeta(filePath, sourceFile) {
       continue;
     }
     let record;
+    let parseError = null;
     try {
       record = JSON.parse(line);
-    } catch {
+    } catch (error) {
+      parseError = error.message;
       record = { raw: line };
     }
     const sourceOffset = index + 1;
     const sourceSequence = Number(record?.sequence || record?.monotonic_index || sourceOffset);
-    records.push({ record, sourceFile, sourceOffset, sourceSequence, sourceByteOffset });
+    records.push({ record, sourceFile, sourceOffset, sourceSequence, sourceByteOffset, rawLine: line, parseError });
     sourceByteOffset += lineByteLength + Buffer.byteLength(eol);
     charOffset += line.length + eol.length;
   }
@@ -193,14 +195,22 @@ async function lineCountAndSize(filePath) {
 }
 
 async function readJsonlTail(cursor) {
+  const warnings = [];
   const stats = await stat(cursor.filePath).catch(() => null);
-  if (!stats) return [];
+  if (!stats) return { records: [], warnings };
   if (stats.size < cursor.byteOffset) {
+    warnings.push({
+      kind: "source_truncated",
+      sourceFile: cursor.sourceFile,
+      previousByteOffset: cursor.byteOffset,
+      currentByteSize: stats.size,
+      message: `${cursor.sourceFile} was truncated or rewritten; cursor reset.`
+    });
     cursor.byteOffset = 0;
     cursor.lineOffset = 0;
     cursor.partial = "";
   }
-  if (stats.size === cursor.byteOffset) return [];
+  if (stats.size === cursor.byteOffset) return { records: [], warnings };
 
   const byteLength = stats.size - cursor.byteOffset;
   const handle = await open(cursor.filePath, "r");
@@ -220,9 +230,11 @@ async function readJsonlTail(cursor) {
       }
       cursor.lineOffset += 1;
       let record;
+      let parseError = null;
       try {
         record = JSON.parse(line);
-      } catch {
+      } catch (error) {
+        parseError = error.message;
         record = { raw: line };
       }
       records.push({
@@ -230,10 +242,12 @@ async function readJsonlTail(cursor) {
         sourceFile: cursor.sourceFile,
         sourceOffset: cursor.lineOffset,
         sourceSequence: Number(record?.sequence || record?.monotonic_index || cursor.lineOffset),
-        sourceByteOffset: null
+        sourceByteOffset: null,
+        rawLine: line,
+        parseError
       });
     }
-    return records;
+    return { records, warnings };
   } finally {
     await handle.close();
   }
@@ -489,6 +503,7 @@ function evidenceRefs(record) {
 
 function sourceAndKind(sourceFile, record) {
   const eventType = String(record.event_type || record.eventType || record.type || "");
+  const rawStreamEventType = String(record.raw_stream_event_type || record.rawStreamEventType || "");
   if (sourceFile === "tool_events.jsonl") {
     const status = normalizeStatus(record.status);
     return {
@@ -508,7 +523,7 @@ function sourceAndKind(sourceFile, record) {
     if (eventType === "sdk_stream_tool_result") {
       return { source: "sdk_stream", kind: "sdk_tool_result" };
     }
-    if (eventType.includes("content_block_delta") || eventType === "sdk_stream_delta") {
+    if (rawStreamEventType === "content_block_delta" || eventType.includes("content_block_delta") || eventType === "sdk_stream_delta") {
       return { source: "sdk_stream", kind: sdkRecordHasTextDelta(record) ? "text_delta" : "sdk_delta" };
     }
     if (eventType.includes("assistant_text")) {
@@ -554,14 +569,21 @@ function sdkRecordHasTextDelta(record) {
     record.delta_text ||
     record.delta?.text ||
     record.delta?.type === "text_delta" ||
+    record.raw_stream_event_type === "content_block_delta" && record.text_delta ||
     record.content_block_delta?.text ||
     record.message_preview && String(record.event_type || "").includes("assistant_text")
   );
 }
 
+function boundedDeltaText(value) {
+  if (value === undefined || value === null) return "";
+  const text = String(value);
+  return text.length > 700 ? text.slice(0, 700) : text;
+}
+
 function sdkTextDelta(record, sourceFile) {
   if (sourceFile !== "sdk_stream_events.jsonl") return undefined;
-  return compactText(
+  return boundedDeltaText(
     record.text_delta ||
     record.delta_text ||
     record.delta?.text ||
@@ -577,7 +599,7 @@ function sdkToolInputDelta(record, sourceFile) {
     record.tool_input_json_delta ||
     record.delta?.partial_json ||
     record.content_block_delta?.partial_json;
-  return value === undefined ? undefined : compactText(value);
+  return value === undefined ? undefined : boundedDeltaText(value);
 }
 
 function messageFor(sourceFile, record) {
@@ -661,6 +683,8 @@ function normalizeRunRecord(repoKey, runId, item) {
     fileRefs: fileRefs(record),
     evidenceRefs: evidenceRefs(record),
     rawRef,
+    rawLine: item.rawLine,
+    parseError: item.parseError || undefined,
     raw: record
   };
   if (item.sourceFile === "trajectory.jsonl") {
@@ -671,7 +695,9 @@ function normalizeRunRecord(repoKey, runId, item) {
 }
 
 function laneFor(source, kind, status) {
-  if (String(status || "").toLowerCase() === "failed" || String(kind || "").includes("failed")) return "failures";
+  const normalizedStatus = String(status || "").toLowerCase();
+  const normalizedKind = String(kind || "").toLowerCase();
+  if (["failed", "blocked"].includes(normalizedStatus) || normalizedKind.includes("failed") || normalizedKind.includes("rejected")) return "failures";
   if (source === "hook_tool_event") return "tools";
   if (source === "sdk_stream" || source === "agent_message") return "discussion";
   if (source === "teammate_report" || source === "artifact") return "reports";
@@ -803,8 +829,11 @@ async function loadCompanionData(repoKey, runId) {
     rawRef: {
       sourceFile: item.sourceFile,
       sourceOffset: item.sourceOffset,
-      sourceSequence: item.sourceSequence
-    }
+      sourceSequence: item.sourceSequence,
+      sourceByteOffset: item.sourceByteOffset ?? undefined
+    },
+    rawLine: item.rawLine,
+    parseError: item.parseError || undefined
   }));
   const events = await loadRunEvents(repoKey, runId);
   return {
@@ -978,21 +1007,20 @@ function unknownsFor(data) {
   const events = data.events || [];
   const hasTool = events.some(event => event.source === "hook_tool_event");
   const hasDiscussion = events.some(event =>
-    ["sdk_stream", "agent_message", "teammate_report"].includes(event.source)
+    ["sdk_stream", "agent_message"].includes(event.source)
   );
   const hasReport = events.some(event => event.source === "teammate_report");
   const hasCompletion = events.some(event => event.source === "completion_check");
   const unknowns = [];
-  if (!hasDiscussion && hasTool) {
-    unknowns.push("No captured discussion text; only tool events are available.");
-  }
+  if (!hasDiscussion) unknowns.push("No discussion text captured.");
+  if (!hasTool) unknowns.push("No hook tool event captured.");
   if (hasReport && !hasTool) {
-    unknowns.push("Reports exist without matching tool events; the UI must not present them as Read/Edit/Bash actions.");
+    unknowns.push("Report exists without tool event.");
   }
-  if (!hasReport) unknowns.push("No teammate report has been captured for this run yet.");
-  if (!hasCompletion) unknowns.push("No completion check has been captured for this run yet.");
-  if (!data.snapshot) unknowns.push("runtime_snapshot.json is missing; state is reconstructed from observer files only.");
-  if (!events.length) unknowns.push("No observer events are available for this run.");
+  if (!hasReport) unknowns.push("No teammate report captured.");
+  if (!hasCompletion) unknowns.push("No completion check captured.");
+  if (!data.snapshot) unknowns.push("runtime_snapshot missing.");
+  if (!events.length) unknowns.push("observer events missing.");
   return [...new Set(unknowns)];
 }
 
@@ -1043,6 +1071,7 @@ async function rawRecord(repoKey, runId, sourceFile, sourceOffset) {
     ? sourceFile
     : null;
   if (!safeFile) return null;
+  if (!Number.isInteger(Number(sourceOffset)) || Number(sourceOffset) < 1) return null;
   const dir = runDir(repoKey, runId);
   if (!dir) return null;
   const records = await readJsonlWithMeta(path.join(dir, safeFile), safeFile);
@@ -1206,13 +1235,16 @@ async function createTailer(rootDir, files) {
 
 async function readTailerEvents(tailer, repoKey, runId) {
   const events = [];
+  const warnings = [];
   for (const cursor of tailer) {
-    const records = await readJsonlTail(cursor);
+    const result = await readJsonlTail(cursor);
+    warnings.push(...result.warnings);
+    const records = result.records;
     for (const item of records) {
       events.push(normalizeRunRecord(repoKey, runId, item));
     }
   }
-  return assignSequences(events);
+  return { events: assignSequences(events), warnings };
 }
 
 async function streamRun(req, res, repoKey, runId, query) {
@@ -1252,7 +1284,12 @@ async function streamRun(req, res, repoKey, runId, query) {
   const initialEvents = await loadRunEvents(repoKey, runId);
   writeEvents(initialEvents);
   const writeLive = async () => {
-    const nextEvents = await readTailerEvents(tailer, repoKey, runId);
+    const { events: nextEvents, warnings } = await readTailerEvents(tailer, repoKey, runId);
+    for (const warning of warnings) {
+      if (sourceCursor && warning.sourceFile) sourceCursor[warning.sourceFile] = 0;
+      if (warning.sourceFile) emitted.clear();
+      writeSseEvent(res, "gateway_warning", { repoKey, runId, ...warning }, null);
+    }
     const count = writeEvents(nextEvents);
     if (!count) res.write(`: heartbeat ${Date.now()}\n\n`);
   };
@@ -1299,7 +1336,12 @@ async function streamSessionObserver(req, res, query) {
   const initialEvents = await loadSessionObserverEvents();
   writeEvents(initialEvents);
   const writeLive = async () => {
-    const nextEvents = await readTailerEvents(tailer, "session_observer", "unbound");
+    const { events: nextEvents, warnings } = await readTailerEvents(tailer, "session_observer", "unbound");
+    for (const warning of warnings) {
+      if (sourceCursor && warning.sourceFile) sourceCursor[warning.sourceFile] = 0;
+      if (warning.sourceFile) emitted.clear();
+      writeSseEvent(res, "gateway_warning", { repoKey: "session_observer", runId: "unbound", ...warning }, null);
+    }
     const count = writeEvents(nextEvents);
     if (!count) res.write(`: heartbeat ${Date.now()}\n\n`);
   };
@@ -1410,7 +1452,19 @@ async function handleApi(req, res, url) {
         const sourceOffset = Number(url.searchParams.get("offset") || url.searchParams.get("sourceOffset") || 0);
         const raw = await rawRecord(repoKey, runId, sourceFile, sourceOffset);
         if (!raw) sendJson(res, 404, { error: "raw record not found" });
-        else sendJson(res, 200, { repoKey, runId, rawRef: raw, record: raw.record });
+        else sendJson(res, 200, {
+          repoKey,
+          runId,
+          rawRef: {
+            sourceFile: raw.sourceFile,
+            sourceOffset: raw.sourceOffset,
+            sourceSequence: raw.sourceSequence,
+            sourceByteOffset: raw.sourceByteOffset ?? undefined
+          },
+          record: raw.record,
+          rawLine: raw.rawLine,
+          parseError: raw.parseError || null
+        });
         return;
       }
     }

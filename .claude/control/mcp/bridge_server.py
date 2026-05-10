@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 import sys
@@ -194,6 +195,7 @@ def _tools() -> list[dict[str, Any]]:
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "repo_key": {"type": "string"},
                     "packet": {"type": "object"},
                     "persist": {"type": "boolean"},
                 },
@@ -298,6 +300,15 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             packet = _load_last_packet(runtime_runs_root)
         if packet is None:
             raise ValueError("call_bridge_sdk requires packet; call build_bridge_packet first")
+        packet_repo_key = _packet_repo_key(packet)
+        argument_repo_key = str(arguments.get("repo_key") or "").strip()
+        if argument_repo_key and packet_repo_key and argument_repo_key != packet_repo_key:
+            raise ValueError(f"packet repo_key mismatch: argument={argument_repo_key} packet={packet_repo_key}")
+        effective_repo_key = argument_repo_key or packet_repo_key
+        if effective_repo_key:
+            runtime_runs_root = str(get_repo_runtime_root(CONTROL_ROOT, effective_repo_key))
+            if not packet_repo_key:
+                packet = _packet_with_repo_key(packet, effective_repo_key)
         _resolve_run_id(arguments, runtime_runs_root, require_active=True, packet=packet)
         _ensure_main_bridge_lifecycle_started(CONTROL_ROOT, packet, runtime_runs_root, persist=bool(arguments.get("persist", True)))
         result = {
@@ -388,6 +399,26 @@ def _load_last_packet(runtime_runs_root: str | Path) -> dict[str, Any] | None:
 
 def _last_packet_path(runtime_runs_root: str | Path) -> Path:
     return Path(runtime_runs_root) / ".last_bridge_packet.json"
+
+
+def _packet_repo_key(packet: dict[str, Any]) -> str | None:
+    if not isinstance(packet, dict):
+        return None
+    for source in (packet, packet.get("binding")):
+        if isinstance(source, dict):
+            value = str(source.get("repo_key") or "").strip()
+            if value:
+                return value
+    return None
+
+
+def _packet_with_repo_key(packet: dict[str, Any], repo_key: str) -> dict[str, Any]:
+    updated = deepcopy(packet)
+    binding = updated.setdefault("binding", {})
+    if isinstance(binding, dict):
+        binding.setdefault("repo_key", repo_key)
+    updated.setdefault("repo_key", repo_key)
+    return updated
 
 
 def _ensure_main_bridge_lifecycle_started(

@@ -50,6 +50,8 @@ def record_workflow_trajectory_step(paths: ControlPaths, event: Any, snapshot: d
                 "process_refs": payload.get("owned_process_refs", []),
             },
             "state_delta": _workflow_state_delta(paths.run_root(run_id), str(getattr(event, "event_kind", "")), payload),
+            "related_completion_check_refs": _completion_check_refs(str(getattr(event, "event_kind", "")), getattr(event, "event_id", None)),
+            "related_artifact_refs": payload.get("artifact_refs", []),
             "raw_refs": {
                 "tool_event_ref": None,
                 "sdk_stream_ref": None,
@@ -94,7 +96,7 @@ def record_tool_trajectory_step(run_root: str | Path, record: dict[str, Any]) ->
             "exit_code": record.get("exit_code"),
             "stdout_tail": _redact_text(str(record.get("stdout_tail") or ""))[:TRAJECTORY_PREVIEW_LIMIT] or None,
             "stderr_tail": _redact_text(str(record.get("stderr_tail") or ""))[:TRAJECTORY_PREVIEW_LIMIT] or None,
-            "artifact_refs": [],
+            "artifact_refs": record.get("artifact_refs", []) if isinstance(record.get("artifact_refs"), list) else [],
             "process_refs": record.get("spawned_processes", []),
         },
         "state_delta": {
@@ -139,6 +141,8 @@ def record_guardrail_trajectory_step(paths: ControlPaths, run_id: str, validatio
                 "process_refs": [],
             },
             "state_delta": {"opened_process_refs": [], "completed_checklist_items": [], "new_blockers": [] if validation.get("valid") else [validation]},
+            "supports_refs": [event_ref] if event_ref else [],
+            "related_completion_check_refs": [event_ref] if event_ref else [],
             "raw_refs": {"tool_event_ref": None, "sdk_stream_ref": None, "ledger_ref": event_ref},
         }
     )
@@ -157,6 +161,20 @@ def append_trajectory_step(run_root: str | Path, step: dict[str, Any]) -> dict[s
         "step_index": step_index,
         "timestamp": step.get("timestamp") or _now_iso(),
     }
+    observation = record.get("observation") if isinstance(record.get("observation"), dict) else {}
+    state_delta = record.get("state_delta") if isinstance(record.get("state_delta"), dict) else {}
+    record["supports_refs"] = _unique_refs(
+        record.get("supports_refs")
+        or state_delta.get("supporting_trajectory_refs")
+        or []
+    )
+    record["produces_refs"] = _unique_refs(record.get("produces_refs") or _produced_refs(observation))
+    record["related_completion_check_refs"] = _unique_refs(record.get("related_completion_check_refs") or [])
+    record["related_artifact_refs"] = _unique_refs(
+        record.get("related_artifact_refs")
+        or observation.get("artifact_refs")
+        or []
+    )
     record = sanitize_json_value(record)
     append_jsonl(path, record)
     index = _read_index(index_path)
@@ -178,6 +196,9 @@ def append_trajectory_step(run_root: str | Path, step: dict[str, Any]) -> dict[s
                 "trajectory_id": record.get("trajectory_id"),
                 "step_index": step_index,
                 "supporting_trajectory_refs": state_delta.get("supporting_trajectory_refs", []),
+                "supports_refs": record.get("supports_refs", []),
+                "related_completion_check_refs": record.get("related_completion_check_refs", []),
+                "related_artifact_refs": record.get("related_artifact_refs", []),
             }
         )
         completion_checks = completion_checks[-100:]
@@ -263,6 +284,38 @@ def _supporting_trajectory_refs(run_root: Path, payload: dict[str, Any]) -> list
     if latest.get("trajectory_id"):
         refs.append(str(latest["trajectory_id"]))
     return _dedupe(refs)[:20]
+
+
+def _completion_check_refs(event_kind: str, event_id: Any) -> list[str]:
+    if event_kind not in {"completion_contract_satisfied", "completion_contract_rejected"}:
+        return []
+    if not event_id:
+        return []
+    return [f"completion_checks.jsonl:{event_id}"]
+
+
+def _produced_refs(observation: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for artifact_ref in observation.get("artifact_refs", []) if isinstance(observation.get("artifact_refs"), list) else []:
+        refs.append(f"artifact:{artifact_ref}")
+    for process_ref in observation.get("process_refs", []) if isinstance(observation.get("process_refs"), list) else []:
+        key = _process_ref_key(process_ref)
+        if key:
+            refs.append(f"process:{key}")
+    return refs
+
+
+def _unique_refs(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        values = [values] if values else []
+    refs: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        text = str(value)
+        if text:
+            refs.append(text)
+    return _dedupe(refs)[:50]
 
 
 def _process_ref_key(process_ref: Any) -> str | None:

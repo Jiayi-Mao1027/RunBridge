@@ -718,7 +718,7 @@ def emit_tool_trajectory_record(payload: dict[str, Any]) -> None:
             "exit_code": payload.get("exit_code"),
             "stdout_tail": redact_observer_text(str(payload.get("stdout_tail") or ""))[:1200] or None,
             "stderr_tail": redact_observer_text(str(payload.get("stderr_tail") or ""))[:1200] or None,
-            "artifact_refs": [],
+            "artifact_refs": payload.get("artifact_refs", []) if isinstance(payload.get("artifact_refs"), list) else [],
             "process_refs": payload.get("spawned_processes", []) if isinstance(payload.get("spawned_processes"), list) else [],
         },
         "state_delta": {
@@ -732,6 +732,20 @@ def emit_tool_trajectory_record(payload: dict[str, Any]) -> None:
             "ledger_ref": None,
         },
     }
+    record["supports_refs"] = []
+    record["produces_refs"] = []
+    for artifact_ref in record["observation"]["artifact_refs"]:
+        record["produces_refs"].append(f"artifact:{artifact_ref}")
+    for process_ref in record["observation"]["process_refs"]:
+        key = None
+        if isinstance(process_ref, dict):
+            key = process_ref.get("process_ref") or process_ref.get("process_id") or process_ref.get("pid") or process_ref.get("log_path")
+        elif process_ref:
+            key = process_ref
+        if key:
+            record["produces_refs"].append(f"process:{key}")
+    record["related_completion_check_refs"] = []
+    record["related_artifact_refs"] = [str(item) for item in record["observation"]["artifact_refs"] if item]
     append_jsonl(trajectory_path, record)
     index_path = run_root / "trajectory_index.json"
     existing_index: dict[str, Any] = {}
@@ -741,7 +755,11 @@ def emit_tool_trajectory_record(payload: dict[str, Any]) -> None:
             existing_index = loaded if isinstance(loaded, dict) else {}
         except Exception:
             existing_index = {}
+    artifact_producers = existing_index.get("artifact_producers") if isinstance(existing_index.get("artifact_producers"), dict) else {}
     process_producers = existing_index.get("process_producers") if isinstance(existing_index.get("process_producers"), dict) else {}
+    for artifact_ref in record["observation"]["artifact_refs"]:
+        if artifact_ref:
+            artifact_producers[str(artifact_ref)] = record["trajectory_id"]
     for process_ref in record["observation"]["process_refs"]:
         key = None
         if isinstance(process_ref, dict):
@@ -763,6 +781,7 @@ def emit_tool_trajectory_record(payload: dict[str, Any]) -> None:
                 "timestamp": record["timestamp"],
                 "action_kind": "tool_use",
             },
+            "artifact_producers": artifact_producers,
             "process_producers": process_producers,
         }
     )

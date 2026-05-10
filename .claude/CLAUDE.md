@@ -78,7 +78,7 @@ Control truth priority:
 6. `.claude/control/policy/approval_matrix.json`
 7. `.claude/control/policy/phase_contracts.json`
 8. `.claude/control/policy/reconcile_rules.json`
-9. `.claude/control/runtime/checkpoint_store.py`, `retry_policy.py`, `trajectory.py`, `output_guardrails.py`, and `repo_runtime.py`
+9. `.claude/control/runtime/checkpoint_store.py`, `retry_policy.py`, `retry_driver.py`, `trajectory.py`, `output_guardrails.py`, and `repo_runtime.py`
 10. `.claude/control/schemas/*.json`
 11. `.claude/hooks/*.py`
 12. project-level workflow/semantic documents
@@ -207,7 +207,11 @@ Execute watchdog alerts are first-class warning facts. If a bridge window is in 
 
 `RuntimeSnapshot` is intentionally a compact control view, not a transcript, report store, or evidence bundle. It should preserve enough information for main-leader routing and recovery without pulling long reports, full evidence, complete tool streams, or historical binding maps into context. Full details remain in `run_ledger.json`, `event_log.jsonl`, `transitions.jsonl`, `main_leader_inbox.jsonl`, and observer JSONL files referenced by `snapshot_refs`.
 
-RunBridge also maintains native state graph and durable replay artifacts. `state_graph.json` defines graph nodes, lifecycle-event edges, and phase-route edges; `state_graph.py` validates lifecycle/phase policy consistency and can replay `event_log.jsonl` into a compact `RunBridgeState`. `checkpoint_store.py` writes per-event state checkpoints under `checkpoints/` plus `latest_checkpoint.json`. `trajectory.py` writes `trajectory.jsonl` and `trajectory_index.json` as UI-safe intent/action/observation/state-delta summaries. These records must stay bounded and must not contain hidden chain-of-thought, secrets, or full large stdout/stderr.
+RunBridge also maintains native state graph and durable replay artifacts. `state_graph.json` defines graph nodes, lifecycle-event edges, and phase-route edges; `state_graph.py` validates lifecycle/phase policy consistency and can replay `event_log.jsonl` into a compact `RunBridgeState`. `checkpoint_store.py` writes per-event state checkpoints under `checkpoints/` plus `latest_checkpoint.json`; checkpoints must reflect the state after the current event, including the current graph node, not a stale snapshot fallback. `trajectory.py` writes `trajectory.jsonl` and `trajectory_index.json` as UI-safe intent/action/observation/state-delta summaries with supporting/producing refs for completion, artifact, process, guardrail, and retry evidence. These records must stay bounded and must not contain hidden chain-of-thought, secrets, or full large stdout/stderr.
+
+SDK stream observability is separate from real hook tool events. `claude_cli_executor.py` uses `--output-format stream-json --verbose --include-partial-messages` and writes bounded `sdk_stream_events.jsonl` records with text deltas, tool input JSON deltas, raw stream event type, compact tool metadata, and redacted previews. SDK `tool_use` and `tool_result` records are discussion/stream evidence only; real tool events come from hooks into run-scoped observer files.
+
+Retry is a runtime contract, not just an event name. Failure and rejected completion paths decide against `retry_policy.py`, persist attempts in `retry_context.attempts`, and only write `retry_attempt_scheduled` when the action is allowed. Retry payloads must carry the repo/run/window identity, packet hash, same-packet requirement, source event, reason, and an explicit `retry_action`. Exhaustion routes to `enter_anomaly`. `retry_driver.py` defines the future driver contract, but automatic action execution remains disabled until explicitly enabled.
 
 `NotifyResult` writes items to the main-leader inbox. Blocking/error/warn/info messages are derived from check results, update results, integrity state, bridge results, TeamIdle, timeout, cleanup, and orphan events.
 

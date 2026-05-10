@@ -220,12 +220,14 @@ def state_from_snapshot(
     diagnostics = snapshot.get("runtime_diagnostics") if isinstance(snapshot.get("runtime_diagnostics"), dict) else {}
     semantic = snapshot.get("semantic") if isinstance(snapshot.get("semantic"), dict) else {}
     last_bridge_result = snapshot.get("last_bridge_result") if isinstance(snapshot.get("last_bridge_result"), dict) else {}
+    lifecycle_state = str((lifecycle.get("status_index") or {}).get(active_window) or last_bridge_result.get("status") or "read_runtime_truth")
+    graph_node = lifecycle_state if lifecycle_state and lifecycle_state != "read_runtime_truth" else "read_runtime_truth"
     return {
         "repo_key": repo_key,
         "run_id": str(snapshot.get("run_id") or ""),
         "phase": str(snapshot.get("current_phase") or "leader_freeze"),
-        "lifecycle_state": str((lifecycle.get("status_index") or {}).get(active_window) or last_bridge_result.get("status") or "read_runtime_truth"),
-        "graph_node": "read_runtime_truth",
+        "lifecycle_state": lifecycle_state,
+        "graph_node": graph_node,
         "active_bridge_window_id": active_window,
         "active_team_id": window_binding.get("team_id_or_null"),
         "active_task_id": window_binding.get("task_id_or_null"),

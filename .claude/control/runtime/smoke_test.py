@@ -23,8 +23,9 @@ from claude_cli_executor import _sdk_stream_event_paths
 from claude_cli_executor import _settings_args
 from claude_cli_executor import simulated_team_executor
 from main_leader import decide_next_bridge_packet
-from output_guardrails import validate_bridge_result, validate_completion_report, validate_teammate_report
+from output_guardrails import validate_bridge_result, validate_completion_report, validate_log_manifest, validate_teammate_report
 from repo_runtime import ensure_repo_registered, get_repo_runtime_root, list_registered_repos, resolve_repo_key
+from retry_driver import dispatch_retry_action_stub, evaluate_retry_attempt, load_scheduled_retry_events
 from retry_policy import decide_retry, load_retry_policies, packet_hash
 from state_graph import load_state_graph, replay_run_state, validate_state_graph
 from workflow_runtime import dispatch_workflow_event
@@ -1430,7 +1431,7 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         raise AssertionError(json.dumps(redacted_cmd, ensure_ascii=False, indent=2))
 
     stream_json_args = _claude_print_stream_json_args()
-    if "--output-format" not in stream_json_args or "stream-json" not in stream_json_args or "--verbose" not in stream_json_args:
+    if "--output-format" not in stream_json_args or "stream-json" not in stream_json_args or "--verbose" not in stream_json_args or "--include-partial-messages" not in stream_json_args:
         raise AssertionError(json.dumps(stream_json_args, ensure_ascii=False, indent=2))
 
     cli_packet = packet("bw_cli_policy", "sub_cli_policy")
@@ -1533,6 +1534,8 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
             stream_path.unlink()
     stream_script = (
         "import json, sys\n"
+        "print(json.dumps({'type':'content_block_delta','delta':{'type':'text_delta','text':'partial token=abc123 sk-demoSECRET12345'}}), flush=True)\n"
+        "print(json.dumps({'type':'content_block_delta','delta':{'type':'input_json_delta','partial_json':'{\\\"file_path\\\":\\\"README.md\\\"}'},'content_block':{'type':'tool_use','id':'toolu_delta','name':'Read'}}), flush=True)\n"
         "print(json.dumps({'type':'assistant','content':[{'type':'text','text':'hello token=abc123 sk-demoSECRET12345'}]}), flush=True)\n"
         "print(json.dumps({'type':'tool_use','id':'toolu_1','name':'Read','input':{'file_path':'README.md','limit':10}}), flush=True)\n"
         "print(json.dumps({'type':'result','subtype':'success','result': json.dumps({'status':'succeeded','reports':[{'summary':'ok','instruction_coverage':{'smoke checklist':'completed'},'evidence_refs':['event:smoke_checklist']}],'artifact_refs':[],'evidence':{'completion_contract':'satisfied'},'error_or_null':None,'cleanup_required':False})}), flush=True)\n"
@@ -1559,6 +1562,11 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         required_event_types = {"sdk_stream_started", "sdk_stream_assistant_text", "sdk_stream_tool_use", "sdk_stream_stderr", "sdk_stream_final"}
         if not required_event_types.issubset(event_types):
             raise AssertionError(json.dumps({"path": str(stream_path), "event_types": sorted(event_types)}, ensure_ascii=False, indent=2))
+        delta_records = [record for record in records if record.get("raw_stream_event_type") == "content_block_delta"]
+        if not any(record.get("text_delta") for record in delta_records):
+            raise AssertionError(json.dumps(delta_records, ensure_ascii=False, indent=2))
+        if not any(record.get("input_json_delta") and record.get("tool_name") == "Read" for record in delta_records):
+            raise AssertionError(json.dumps(delta_records, ensure_ascii=False, indent=2))
         for record in records:
             for key in [
                 "timestamp",
@@ -1573,6 +1581,7 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
                 "status",
                 "message_preview",
                 "payload_keys",
+                "raw_stream_event_type",
                 "sequence",
                 "monotonic_index",
             ]:
@@ -1581,7 +1590,9 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
             if record.get("run_id") != "run_sdk_stream" or record.get("agent_type") != "bridge-leader":
                 raise AssertionError(json.dumps(record, ensure_ascii=False, indent=2))
             preview = str(record.get("message_preview") or "")
-            if "abc123" in preview or "sk-demoSECRET12345" in preview:
+            delta_text = str(record.get("text_delta") or "")
+            input_json_delta = str(record.get("input_json_delta") or "")
+            if "abc123" in preview or "sk-demoSECRET12345" in preview or "abc123" in delta_text or "sk-demoSECRET12345" in delta_text or "abc123" in input_json_delta:
                 raise AssertionError(json.dumps(record, ensure_ascii=False, indent=2))
         tool_records = [record for record in records if record.get("event_type") == "sdk_stream_tool_use"]
         if not tool_records or tool_records[0].get("tool_name") != "Read" or "file_path" not in tool_records[0].get("tool_input_keys", []):
@@ -1898,13 +1909,15 @@ def run_state_graph_tests(control_root: Path, runs_root: Path) -> dict:
     state = replay_run_state(control_root, "run_demo", runtime_runs_root=str(runs_root))
     if state.get("lifecycle_state") != "bridge_window_returned":
         raise AssertionError(json.dumps(state, ensure_ascii=False, indent=2))
-    if state.get("graph_node") != "return_bridge_result":
+    if state.get("graph_node") != "bridge_window_returned":
         raise AssertionError(json.dumps(state, ensure_ascii=False, indent=2))
     graph = load_state_graph(control_root)
     rejected_state = graph.replay_events(
         control_root,
         [
             event("bridge_call_intended", "bw_reject_path", "sub_reject_path"),
+            event("pretooluse_allowed_by_main_leader", "bw_reject_path", "sub_reject_path"),
+            event("call_bridge_sdk_started", "bw_reject_path", "sub_reject_path"),
             event("bridge_window_opened", "bw_reject_path", "sub_reject_path"),
             event("bridge_packet_rejected", "bw_reject_path", "sub_reject_path"),
             event("bridge_result_returned", "bw_reject_path", "sub_reject_path"),
@@ -1912,8 +1925,33 @@ def run_state_graph_tests(control_root: Path, runs_root: Path) -> dict:
         runtime_runs_root=str(runs_root),
         run_id="run_demo",
     )
-    if rejected_state.get("graph_node") != "return_bridge_result":
+    if rejected_state.get("graph_node") != "bridge_window_returned":
         raise AssertionError(json.dumps(rejected_state, ensure_ascii=False, indent=2))
+    failed_state = graph.replay_events(
+        control_root,
+        [
+            event("bridge_call_intended", "bw_failed_path", "sub_failed_path"),
+            event("pretooluse_allowed_by_main_leader", "bw_failed_path", "sub_failed_path"),
+            event("call_bridge_sdk_error", "bw_failed_path", "sub_failed_path"),
+        ],
+        runtime_runs_root=str(runs_root),
+        run_id="run_demo",
+    )
+    if failed_state.get("graph_node") not in {"terminal_failure", "bridge_call_failed", "bridge_window_failed"}:
+        raise AssertionError(json.dumps(failed_state, ensure_ascii=False, indent=2))
+    interrupted_state = graph.replay_events(
+        control_root,
+        [
+            event("bridge_call_intended", "bw_interrupted_path", "sub_interrupted_path"),
+            event("pretooluse_allowed_by_main_leader", "bw_interrupted_path", "sub_interrupted_path"),
+            event("call_bridge_sdk_started", "bw_interrupted_path", "sub_interrupted_path"),
+            event("bridge_call_interrupted", "bw_interrupted_path", "sub_interrupted_path"),
+        ],
+        runtime_runs_root=str(runs_root),
+        run_id="run_demo",
+    )
+    if interrupted_state.get("graph_node") not in {"terminal_failure", "bridge_window_interrupted"}:
+        raise AssertionError(json.dumps(interrupted_state, ensure_ascii=False, indent=2))
     mermaid = graph.export_mermaid()
     dot = graph.export_dot()
     if "flowchart TD" not in mermaid or "digraph RunBridgeStateGraph" not in dot:
@@ -1985,6 +2023,113 @@ def run_retry_policy_tests(control_root: Path, runs_root: Path) -> dict:
     ]
     if not retry_events or retry_events[-1].get("payload", {}).get("attempt") != 2:
         raise AssertionError(json.dumps(retry_events, ensure_ascii=False, indent=2))
+    auto_retry_payload = retry_events[-1].get("payload", {})
+    if auto_retry_payload.get("retry_action", {}).get("kind") != "retry_bridge_sdk_call":
+        raise AssertionError(json.dumps(auto_retry_payload, ensure_ascii=False, indent=2))
+    if auto_retry_payload.get("retry_action", {}).get("requires_same_packet") is not True:
+        raise AssertionError(json.dumps(auto_retry_payload, ensure_ascii=False, indent=2))
+
+    bw_repair = "bw_completion_repair"
+    ss_repair = "sub_completion_repair"
+    repair_packet = packet(bw_repair, ss_repair)
+    dispatch(control_root, runs_root, event("bridge_call_intended", bw_repair, ss_repair, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_completion_repair", payload={"packet": repair_packet}))
+    dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw_repair, ss_repair, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_completion_repair", payload={"packet": repair_packet}))
+    dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw_repair, ss_repair, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_completion_repair", payload={"packet": repair_packet}))
+    dispatch(control_root, runs_root, event("bridge_window_opened", bw_repair, ss_repair, agent_type="bridge-leader", payload={"packet": repair_packet}))
+    dispatch(control_root, runs_root, event("bridge_packet_accepted", bw_repair, ss_repair, payload={"packet": repair_packet}))
+    dispatch(control_root, runs_root, event("team_create_started", bw_repair, ss_repair, team_id="team_completion_repair", tool_name="team_create"))
+    dispatch(control_root, runs_root, event("team_create_succeeded", bw_repair, ss_repair, team_id="team_completion_repair", tool_name="team_create"))
+    dispatch(control_root, runs_root, event("task_create_started", bw_repair, ss_repair, team_id="team_completion_repair", task_id="task_completion_repair", tool_name="task_create"))
+    dispatch(control_root, runs_root, event("task_create_succeeded", bw_repair, ss_repair, team_id="team_completion_repair", task_id="task_completion_repair", tool_name="task_create"))
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "taskcreated_hook_accepted",
+            bw_repair,
+            ss_repair,
+            team_id="team_completion_repair",
+            task_id="task_completion_repair",
+            agent_type="hook",
+            agent_id="hook.task_created",
+            payload={
+                "task_subject": "task_completion_repair",
+                "task_description": "completion repair task",
+                "task_spec": repair_packet["task_spec"],
+                "team_spec": repair_packet["team_spec"],
+                "task_team_mapping": repair_packet["task_team_mapping"],
+            },
+        ),
+    )
+    dispatch(control_root, runs_root, event("message_dispatch_started", bw_repair, ss_repair, team_id="team_completion_repair", task_id="task_completion_repair", tool_name="send_messages"))
+    dispatch(control_root, runs_root, event("message_dispatch_succeeded", bw_repair, ss_repair, team_id="team_completion_repair", task_id="task_completion_repair", tool_name="send_messages"))
+    dispatch(control_root, runs_root, event("artifacts_ready", bw_repair, ss_repair, team_id="team_completion_repair", task_id="task_completion_repair", tool_name="task_complete", payload={"artifact_refs": []}))
+    rejected_once = dispatch_workflow_event(
+        str(control_root),
+        event(
+            "completion_contract_rejected",
+            bw_repair,
+            ss_repair,
+            team_id="team_completion_repair",
+            task_id="task_completion_repair",
+            agent_type="hook",
+            agent_id="hook.task_completed",
+            payload={"completion_contract": repair_packet["completion_contract"], "completion_checks": {"required_outputs_present": True, "required_artifacts_present": False, "validation_passed": False}, "missing_contract_items": ["log_manifest"]},
+        ),
+        runtime_runs_root=str(runs_root),
+        persist=True,
+    )
+    repair_plan = rejected_once.check_result.get("derived_facts", {}).get("auto_recovery", {})
+    if repair_plan.get("dispatch_event_kind") != "retry_attempt_scheduled" or repair_plan.get("retry_scope") != "completion_rejected":
+        raise AssertionError(json.dumps(rejected_once.check_result, ensure_ascii=False, indent=2))
+    repair_retry_events = [
+        item for item in _read_jsonl(runs_root / "run_demo" / "event_log.jsonl")
+        if item.get("event_kind") == "retry_attempt_scheduled" and item.get("bridge_window_id") == bw_repair
+    ]
+    repair_retry_payload = repair_retry_events[-1].get("payload", {}) if repair_retry_events else {}
+    if repair_retry_payload.get("retry_action", {}).get("kind") != "repair_bridge_output":
+        raise AssertionError(json.dumps(repair_retry_payload, ensure_ascii=False, indent=2))
+    if repair_retry_payload.get("same_packet_boundary_required") is not True or repair_retry_payload.get("packet_hash") != packet_hash(repair_packet):
+        raise AssertionError(json.dumps(repair_retry_payload, ensure_ascii=False, indent=2))
+    driver_decision = evaluate_retry_attempt(control_root, repair_retry_events[-1], runtime_runs_root=str(runs_root))
+    if not driver_decision.ready or not driver_decision.allowed or driver_decision.action_kind != "repair_bridge_output":
+        raise AssertionError(json.dumps(driver_decision.as_dict(), ensure_ascii=False, indent=2))
+    disabled_driver = dispatch_retry_action_stub(driver_decision)
+    if disabled_driver.get("enabled") is not False:
+        raise AssertionError(json.dumps(disabled_driver, ensure_ascii=False, indent=2))
+
+    dispatch(control_root, runs_root, event("retry_artifact_collection", bw_repair, ss_repair, team_id="team_completion_repair", task_id="task_completion_repair", agent_type="bridge-leader", agent_id="bridge-leader"))
+    rejected_twice = dispatch_workflow_event(
+        str(control_root),
+        event(
+            "completion_contract_rejected",
+            bw_repair,
+            ss_repair,
+            team_id="team_completion_repair",
+            task_id="task_completion_repair",
+            agent_type="hook",
+            agent_id="hook.task_completed",
+            payload={"completion_contract": repair_packet["completion_contract"], "completion_checks": {"required_outputs_present": True, "required_artifacts_present": False, "validation_passed": False}, "missing_contract_items": ["log_manifest"]},
+        ),
+        runtime_runs_root=str(runs_root),
+        persist=True,
+    )
+    exhausted_plan = rejected_twice.check_result.get("derived_facts", {}).get("auto_recovery", {})
+    if exhausted_plan.get("dispatch_event_kind") != "enter_anomaly" or exhausted_plan.get("retry_scope") != "completion_rejected":
+        raise AssertionError(json.dumps(rejected_twice.check_result, ensure_ascii=False, indent=2))
+    anomaly_events = [
+        item for item in _read_jsonl(runs_root / "run_demo" / "event_log.jsonl")
+        if item.get("event_kind") == "enter_anomaly" and item.get("bridge_window_id") == bw_repair
+    ]
+    if not anomaly_events:
+        raise AssertionError(json.dumps(_read_jsonl(runs_root / "run_demo" / "event_log.jsonl")[-10:], ensure_ascii=False, indent=2))
+    retry_ledger = json.loads((runs_root / "run_demo" / "run_ledger.json").read_text(encoding="utf-8")).get("retry_context", {})
+    completion_attempts = [item for item in retry_ledger.get("attempts", []) if item.get("bridge_window_id") == bw_repair and item.get("retry_scope") == "completion_rejected"]
+    if len(completion_attempts) != 1 or completion_attempts[0].get("attempt") != 2:
+        raise AssertionError(json.dumps(retry_ledger, ensure_ascii=False, indent=2))
+    scheduled = load_scheduled_retry_events(control_root, "run_demo", runtime_runs_root=str(runs_root))
+    if not any(item.get("bridge_window_id") == bw_repair for item in scheduled):
+        raise AssertionError(json.dumps(scheduled[-5:], ensure_ascii=False, indent=2))
     return {"retry_policy": "passed"}
 
 
@@ -1998,9 +2143,56 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     strict_bad = validate_teammate_report({"summary": "bad", "instruction_coverage": {"completed": "item"}}, strict=True)
     if strict_bad.get("valid") or strict_bad.get("error_type") != "InvalidCoverageDisposition":
         raise AssertionError(json.dumps(strict_bad, ensure_ascii=False, indent=2))
+    summary_only = validate_bridge_result({"status": "succeeded", "reports": [{"summary": "only"}], "artifact_refs": ["artifact"], "evidence": {"event_ids": ["evt"]}, "error_or_null": None, "cleanup_required": False})
+    if summary_only.get("valid") or summary_only.get("error_type") not in {"SchemaValidationFailed", "MissingInstructionCoverage"}:
+        raise AssertionError(json.dumps(summary_only, ensure_ascii=False, indent=2))
+    completed_without_evidence = validate_teammate_report({"summary": "bad", "instruction_coverage": {"item": "completed"}}, strict=True)
+    if completed_without_evidence.get("valid") or completed_without_evidence.get("error_type") != "MissingRequiredEvidenceRef":
+        raise AssertionError(json.dumps(completed_without_evidence, ensure_ascii=False, indent=2))
     completion_invalid = validate_completion_report({"completion_checks": {"required_outputs_present": True}, "artifact_refs": []})
     if completion_invalid.get("valid"):
         raise AssertionError(json.dumps(completion_invalid, ensure_ascii=False, indent=2))
+    completion_without_evidence = validate_completion_report(
+        {
+            "completion_checks": {"required_outputs_present": False, "required_artifacts_present": False, "validation_passed": True},
+            "reports": [],
+            "artifact_refs": [],
+        }
+    )
+    if completion_without_evidence.get("valid") or completion_without_evidence.get("error_type") != "MissingRequiredEvidenceRef":
+        raise AssertionError(json.dumps(completion_without_evidence, ensure_ascii=False, indent=2))
+    artifact_claim_without_refs = validate_completion_report(
+        {
+            "completion_checks": {"required_outputs_present": True, "required_artifacts_present": True, "validation_passed": False},
+            "reports": [report()],
+            "artifact_refs": [],
+        }
+    )
+    if artifact_claim_without_refs.get("valid") or artifact_claim_without_refs.get("error_type") != "MissingArtifactRefs":
+        raise AssertionError(json.dumps(artifact_claim_without_refs, ensure_ascii=False, indent=2))
+    bad_manifest = validate_log_manifest({"run_id": "run_demo", "bridge_window_id": "bw", "task_id": "task", "terminal_status": "completed"})
+    if bad_manifest.get("valid") or bad_manifest.get("error_type") != "SchemaValidationFailed":
+        raise AssertionError(json.dumps(bad_manifest, ensure_ascii=False, indent=2))
+    formal_missing_memory = validate_log_manifest(
+        {
+            "run_id": "run_demo",
+            "bridge_window_id": "bw",
+            "task_id": "task",
+            "command": "python train.py --formal",
+            "cwd": ".",
+            "environment_evidence": {"conda_env": "mjy"},
+            "process_refs": [{"pid": 123}],
+            "terminal_status": "completed",
+            "batchbasis": {"per_device_train_batch_size": 1},
+            "gpu_id_or_device_ids": ["0"],
+            "model_or_model_family": "demo",
+            "dataset_name_split_source": "demo",
+            "method_or_objective": "demo",
+        },
+        formal_run=True,
+    )
+    if formal_missing_memory.get("valid") or formal_missing_memory.get("error_type") != "MissingFormalRunEvidence":
+        raise AssertionError(json.dumps(formal_missing_memory, ensure_ascii=False, indent=2))
     bad_event = event(
         "bridge_result_returned",
         "bw_guardrail",
@@ -2045,7 +2237,38 @@ def run_checkpoint_trajectory_tests(runs_root: Path) -> dict:
         raise AssertionError(json.dumps(latest_checkpoint, ensure_ascii=False, indent=2))
     if not isinstance(index.get("completion_checks"), list):
         raise AssertionError(json.dumps(index, ensure_ascii=False, indent=2))
+    first_step = json.loads(trajectory_text.splitlines()[0])
+    for field in ["supports_refs", "produces_refs", "related_completion_check_refs", "related_artifact_refs"]:
+        if field not in first_step:
+            raise AssertionError(json.dumps(first_step, ensure_ascii=False, indent=2))
     return {"checkpoint_trajectory": "passed", "trajectory_steps": index["step_count"]}
+
+
+def run_checkpoint_write_order_test(control_root: Path, runs_root: Path) -> dict:
+    bw = "bw_checkpoint_order"
+    ss = "sub_checkpoint_order"
+    p = packet(bw, ss)
+    payload = event(
+        "bridge_call_intended",
+        bw,
+        ss,
+        agent_type="main-leader",
+        agent_id="main",
+        tool_name="call_bridge_sdk",
+        tool_use_id="tool_checkpoint_order",
+        payload={"packet": p},
+    )
+    payload["event_id"] = "evt_checkpoint_order"
+    dispatch(control_root, runs_root, payload)
+    latest_checkpoint = json.loads((runs_root / "run_demo" / "latest_checkpoint.json").read_text(encoding="utf-8"))
+    state = latest_checkpoint.get("state") if isinstance(latest_checkpoint.get("state"), dict) else {}
+    if latest_checkpoint.get("event_id") != "evt_checkpoint_order":
+        raise AssertionError(json.dumps(latest_checkpoint, ensure_ascii=False, indent=2))
+    if state.get("graph_node") != "bridge_call_intended":
+        raise AssertionError(json.dumps(latest_checkpoint, ensure_ascii=False, indent=2))
+    if state.get("lifecycle_state") != "bridge_call_intended":
+        raise AssertionError(json.dumps(latest_checkpoint, ensure_ascii=False, indent=2))
+    return {"checkpoint_write_order": "passed"}
 
 
 def run_multi_repo_isolation_tests(root: Path, control_root: Path) -> dict:
@@ -2096,6 +2319,27 @@ def run_multi_repo_isolation_tests(root: Path, control_root: Path) -> dict:
     )
     if explicit.runtime_snapshot.get("repo_key") != key_a or not (runs_a / "run_explicit_repo_key" / "event_log.jsonl").exists():
         raise AssertionError(json.dumps(explicit.runtime_snapshot, ensure_ascii=False, indent=2))
+    bridge_server_path = Path(__file__).resolve().parents[1] / "mcp" / "bridge_server.py"
+    spec = importlib.util.spec_from_file_location("bridge_server_smoke", bridge_server_path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(str(bridge_server_path))
+    bridge_server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge_server)
+    call_schema = next(item for item in bridge_server._tools() if item.get("name") == "call_bridge_sdk")["inputSchema"]
+    if "repo_key" not in call_schema.get("properties", {}):
+        raise AssertionError(json.dumps(call_schema, ensure_ascii=False, indent=2))
+    packet_a = packet("bw_repo_a_last", "sub_repo_a_last")
+    packet_a["binding"]["repo_key"] = key_a
+    packet_b = packet("bw_repo_b_last", "sub_repo_b_last")
+    packet_b["binding"]["repo_key"] = key_b
+    bridge_server._save_last_packet(runs_a, packet_a)
+    bridge_server._save_last_packet(runs_b, packet_b)
+    if bridge_server._load_last_packet(runs_a).get("binding", {}).get("repo_key") != key_a:
+        raise AssertionError(json.dumps(bridge_server._load_last_packet(runs_a), ensure_ascii=False, indent=2))
+    if bridge_server._load_last_packet(runs_b).get("binding", {}).get("repo_key") != key_b:
+        raise AssertionError(json.dumps(bridge_server._load_last_packet(runs_b), ensure_ascii=False, indent=2))
+    if bridge_server._packet_repo_key(packet_a) != key_a or bridge_server._packet_repo_key(packet_b) != key_b:
+        raise AssertionError(json.dumps({"packet_a": packet_a, "packet_b": packet_b}, ensure_ascii=False, indent=2))
     registered = {repo.repo_key for repo in list_registered_repos(control_root)}
     if key_a not in registered or key_b not in registered:
         raise AssertionError(json.dumps(sorted(registered), ensure_ascii=False, indent=2))
@@ -2114,8 +2358,10 @@ def main() -> None:
         if success.get("current_phase") != "l4_execute":
             raise AssertionError(json.dumps({"expected_phase": "l4_execute", "snapshot": success}, ensure_ascii=False, indent=2))
         state_graph = run_state_graph_tests(control_root, runs_root)
-        retry_policy = run_retry_policy_tests(control_root, runs_root)
-        guardrails = run_guardrail_tests(control_root, runs_root)
+        retry_control_root, retry_runs_root = build_fixture(runtime_dir / "retry")
+        retry_policy = run_retry_policy_tests(retry_control_root, retry_runs_root)
+        guardrail_control_root, guardrail_runs_root = build_fixture(runtime_dir / "guardrail")
+        guardrails = run_guardrail_tests(guardrail_control_root, guardrail_runs_root)
         failure = run_failure(control_root, runs_root)
         orphan = run_orphan(control_root, runs_root)
         mcp_helper = run_mcp_lifecycle_helper(control_root, runs_root)
@@ -2131,6 +2377,8 @@ def main() -> None:
         cli_executor = run_cli_executor_policy_tests(runtime_dir)
         hook_observer = run_hook_observer_rebind_tests(runtime_dir, runs_root)
         checkpoint_trajectory = run_checkpoint_trajectory_tests(runs_root)
+        checkpoint_order_control_root, checkpoint_order_runs_root = build_fixture(runtime_dir / "checkpoint_order")
+        checkpoint_write_order = run_checkpoint_write_order_test(checkpoint_order_control_root, checkpoint_order_runs_root)
         multi_repo = run_multi_repo_isolation_tests(runtime_dir, control_root)
         summary = {
             "success_status": success["lifecycle"]["status_index"]["bw_success"],
@@ -2159,6 +2407,7 @@ def main() -> None:
             "retry_policy": retry_policy["retry_policy"],
             "guardrails": guardrails["guardrails"],
             "checkpoint_trajectory": checkpoint_trajectory["checkpoint_trajectory"],
+            "checkpoint_write_order": checkpoint_write_order["checkpoint_write_order"],
             "multi_repo_isolation": multi_repo["multi_repo_isolation"],
             "open_bridge_window_ids": orphan["lifecycle"]["open_bridge_window_ids"],
             "inbox_exists": (runs_root / "run_demo" / "main_leader_inbox.jsonl").exists(),
@@ -2186,6 +2435,7 @@ def main() -> None:
         assert summary["retry_policy"] == "passed"
         assert summary["guardrails"] == "passed"
         assert summary["checkpoint_trajectory"] == "passed"
+        assert summary["checkpoint_write_order"] == "passed"
         assert summary["multi_repo_isolation"] == "passed"
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     finally:

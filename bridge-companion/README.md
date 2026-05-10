@@ -110,4 +110,17 @@ Run event streams emit normalized events with:
 
 The SSE path uses a per-source JSONL tailer after the initial backfill. It tracks byte and line cursors per source file, so new observer lines can reach the UI without repeatedly re-reading whole long logs.
 
+If a tailed source file is truncated or rewritten, the gateway resets that file cursor and emits a `gateway_warning` SSE event. The UI displays the warning as a fact and does not infer task failure.
+
 SDK stream events are displayed in the discussion lane. SDK `tool_use` / `tool_result` / `input_json_delta` events are never rendered as real Read/Edit/Bash cards; those cards still require hook `tool_events.jsonl`.
+
+The activity lanes are filters, not exclusive state buckets:
+
+- Tools: `hook_tool_event`
+- Discussion: `sdk_stream` or `agent_message`
+- Reports: `teammate_report` or `artifact`
+- Processes: `process_event`
+- Completion: `completion_check`
+- Failures: failed/blocked status or failed/rejected kind
+
+The Detail Inspector shows Raw JSON, Normalized Event, Related Trajectory, and Related Source Cursor for the selected item.

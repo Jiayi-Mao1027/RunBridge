@@ -263,6 +263,27 @@
       color: #c7d0d5;
       font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
+    .detail-sections {
+      display: grid;
+      gap: 10px;
+    }
+    .detail-block {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #15191c;
+      overflow: hidden;
+    }
+    .detail-block h3 {
+      margin: 0;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+      letter-spacing: .06em;
+      color: var(--muted);
+    }
+    .detail-block pre {
+      padding: 10px;
+    }
     .brief-box {
       display: grid;
       gap: 10px;
@@ -400,6 +421,7 @@
       rawLookups: new Map(),
       discussionBuffers: new Map(),
       toolInputBuffers: new Map(),
+      gatewayWarnings: [],
       lastSeq: 0,
       lastEventId: "",
       sourceCursors: {},
@@ -410,6 +432,16 @@
       laneFilter: "all",
       briefText: "No model brief requested.",
       streamConnected: false
+    };
+
+    const laneLabels = {
+      all: "All",
+      tools: "Tools",
+      discussion: "Discussion",
+      reports: "Reports",
+      processes: "Processes",
+      completion: "Completion",
+      failures: "Failures"
     };
 
     const $ = id => document.getElementById(id);
@@ -502,7 +534,19 @@
       const payload = await api("/api/repos");
       state.repos = Array.isArray(payload.repos) ? payload.repos : [];
       $("repoSelect").innerHTML = state.repos.length
-        ? state.repos.map(repo => `<option value="${escapeHtml(repo.repoKey)}">${escapeHtml(repo.repoKey)} (${repo.runCount})</option>`).join("")
+        ? state.repos.map(repo => {
+          const git = repo.git || {};
+          const branch = git.branch || git.current_branch || "";
+          const head = git.head_short || git.head || git.commit || "";
+          const meta = [
+            `${repo.activeRunIds?.length || 0} active`,
+            repo.latestRun?.runId ? `latest ${repo.latestRun.runId}` : "",
+            branch ? `branch ${branch}` : "",
+            head ? `@${String(head).slice(0, 8)}` : ""
+          ].filter(Boolean).join(" · ");
+          const label = `${repo.displayName || repo.repoKey} — ${repo.repoKey}${meta ? ` (${meta})` : ""}`;
+          return `<option value="${escapeHtml(repo.repoKey)}">${escapeHtml(label)}</option>`;
+        }).join("")
         : `<option value="">No repos</option>`;
       return state.repos;
     }
@@ -515,6 +559,7 @@
       state.rawLookups.clear();
       state.discussionBuffers.clear();
       state.toolInputBuffers.clear();
+      state.gatewayWarnings = [];
       state.lastSeq = 0;
       state.lastEventId = "";
       state.sourceCursors = {};
@@ -551,6 +596,7 @@
       state.rawLookups.clear();
       state.discussionBuffers.clear();
       state.toolInputBuffers.clear();
+      state.gatewayWarnings = [];
       state.lastSeq = 0;
       state.lastEventId = "";
       state.sourceCursors = {};
@@ -590,6 +636,16 @@
       state.source.addEventListener("gateway_error", event => {
         setChip("streamChip", "gateway error", "warn");
         console.warn(event.data);
+      });
+      state.source.addEventListener("gateway_warning", event => {
+        setChip("streamChip", "gateway warning", "warn");
+        try {
+          state.gatewayWarnings.push(JSON.parse(event.data));
+          state.gatewayWarnings = state.gatewayWarnings.slice(-20);
+          renderUnknowns();
+        } catch {
+          state.gatewayWarnings.push({ message: event.data || "gateway warning" });
+        }
       });
       state.source.onerror = () => {
         state.streamConnected = false;
@@ -639,6 +695,30 @@
       return observation || step.state_delta || step.summary || "";
     }
 
+    function trajectoryStepView(step = {}) {
+      const action = step.action && typeof step.action === "object" ? step.action : {};
+      const observation = step.observation && typeof step.observation === "object" ? step.observation : {};
+      return {
+        step_index: step.step_index ?? step.step ?? null,
+        actor: step.actor || step.role || null,
+        intent_local_goal: step.intent?.local_goal || step.local_goal || null,
+        action: {
+          kind: action.kind || step.action_kind || null,
+          tool_name: action.tool_name || step.tool_name || null,
+          safe_input_preview: action.safe_input_preview || step.safe_input_preview || (typeof step.action === "string" ? step.action : null)
+        },
+        observation: {
+          status: observation.status || step.status || null,
+          exit_code: observation.exit_code ?? step.exit_code ?? null,
+          stdout_tail: observation.stdout_tail || step.stdout_tail || null,
+          stderr_tail: observation.stderr_tail || step.stderr_tail || null
+        },
+        state_delta: step.state_delta || null,
+        evidence_refs: step.evidence_refs || step.evidenceRefs || [],
+        raw_refs: step.raw_refs || step.rawRefs || step.rawRef || null
+      };
+    }
+
     function displayTitle(event) {
       if (!event) return "No event selected";
       if (event.source === "hook_tool_event") {
@@ -659,15 +739,34 @@
 
     function displaySummary(event) {
       if (!event) return "";
+      if (event.source === "process_event") return processSummary(event);
       const target = event.target ? ` target=${event.target}` : "";
       const delta = event.accumulatedText || event.textDelta ? `${event.accumulatedText || event.textDelta} ` : "";
       const inputDelta = event.accumulatedToolInput || event.toolInputDelta ? ` input_delta=${event.accumulatedToolInput || event.toolInputDelta}` : "";
       return compact(`${delta}${event.messagePreview || ""}${target}${inputDelta}`, 260);
     }
 
+    function processSummary(event) {
+      const raw = event.raw || {};
+      const ts = Date.parse(raw.heartbeat_at || raw.timestamp || event.ts || "");
+      const heartbeatAge = Number.isFinite(ts) && ts > 0
+        ? `${Math.max(0, Math.round((Date.now() - ts) / 1000))}s`
+        : "unknown";
+      return compact([
+        raw.process_ref || raw.processRef ? `process_ref=${raw.process_ref || raw.processRef}` : "",
+        raw.pid ? `pid=${raw.pid}` : "",
+        raw.state || raw.status ? `state=${raw.state || raw.status}` : "",
+        `heartbeat_age=${heartbeatAge}`,
+        raw.log_path ? `log=${raw.log_path}` : "",
+        raw.terminal_status ? `terminal=${raw.terminal_status}` : "",
+        Array.isArray(raw.artifact_refs) && raw.artifact_refs.length ? `artifacts=${raw.artifact_refs.join(",")}` : ""
+      ].filter(Boolean).join(" "), 300);
+    }
+
     function eventLane(event) {
       if (!event) return "all";
-      if (event.status === "failed" || event.status === "blocked" || String(event.kind || "").includes("failed")) return "failures";
+      const kind = String(event.kind || "").toLowerCase();
+      if (event.status === "failed" || event.status === "blocked" || kind.includes("failed") || kind.includes("rejected")) return "failures";
       return event.lane || (
         event.source === "hook_tool_event" ? "tools" :
         event.source === "sdk_stream" || event.source === "agent_message" ? "discussion" :
@@ -678,9 +777,21 @@
       );
     }
 
+    function eventMatchesLane(event, lane) {
+      if (lane === "all") return true;
+      const kind = String(event?.kind || "").toLowerCase();
+      if (lane === "tools") return event?.source === "hook_tool_event";
+      if (lane === "discussion") return event?.source === "sdk_stream" || event?.source === "agent_message";
+      if (lane === "reports") return event?.source === "teammate_report" || event?.source === "artifact";
+      if (lane === "processes") return event?.source === "process_event";
+      if (lane === "completion") return event?.source === "completion_check";
+      if (lane === "failures") return event?.status === "failed" || event?.status === "blocked" || kind.includes("failed") || kind.includes("rejected");
+      return false;
+    }
+
     function isDiscussionEvent(event) {
       if (!event) return false;
-      if (event.source === "agent_message" || event.source === "teammate_report") return true;
+      if (event.source === "agent_message") return true;
       if (event.source !== "sdk_stream") return false;
       return ["text_delta", "assistant_message", "sdk_delta", "sdk_tool_declared", "sdk_tool_result"].includes(event.kind);
     }
@@ -707,6 +818,7 @@
         };
         if (event.source === "hook_tool_event") {
           const tool = {
+            eventId: event.eventId,
             toolName: event.toolName,
             status: event.status,
             target: event.target,
@@ -725,6 +837,7 @@
         }
         if (isDiscussionEvent(event)) {
           member.lastDiscussion = {
+            eventId: event.eventId,
             kind: event.kind,
             text: event.accumulatedText || event.textDelta || event.messagePreview,
             rawRef: event.rawRef
@@ -733,12 +846,18 @@
         if (event.source === "teammate_report") {
           member.reports = (member.reports || 0) + 1;
           member.lastReport = {
+            eventId: event.eventId,
             text: event.messagePreview || "report received",
             rawRef: event.rawRef
           };
         }
-        if (event.status === "failed" || event.status === "blocked" || String(event.kind || "").includes("failed")) {
-          member.currentBlocker = event.messagePreview || event.kind || event.status;
+        const failureKind = String(event.kind || "").toLowerCase();
+        if (event.status === "failed" || event.status === "blocked" || failureKind.includes("failed") || failureKind.includes("rejected")) {
+          member.currentBlocker = {
+            eventId: event.eventId,
+            text: event.messagePreview || event.kind || event.status,
+            rawRef: event.rawRef
+          };
         }
         source.set(key, member);
       }
@@ -766,33 +885,48 @@
         const status = active ? "running" : member.status || "idle";
         const activeText = active
           ? `${active.toolName || "tool"} running${active.target ? `: ${compact(active.target, 70)}` : ""}`
-          : "no running tool";
+          : "no running tool captured";
         const lastText = last
           ? `${last.toolName || "tool"} ${last.status || "completed"}${last.exitCode !== undefined ? ` exit=${last.exitCode}` : ""}`
-          : "no completed tool recorded";
+          : "no completed tool captured";
         const discussionText = member.lastDiscussion?.text
           ? `discussion: ${compact(member.lastDiscussion.text, 110)}`
           : "no discussion text captured";
         const reportText = member.lastReport?.text
           ? `last report: ${compact(member.lastReport.text, 110)}`
-          : "no report text captured";
+          : "no report captured";
         const blockerText = member.currentBlocker
-          ? `<div class="subtext">blocker: ${escapeHtml(compact(member.currentBlocker, 110))}</div>`
+          ? `<div class="subtext">blocker: ${escapeHtml(compact(member.currentBlocker.text, 110))}</div>`
           : "";
+        const rawButtons = [
+          active?.eventId ? `<button class="raw-link" data-member-raw="${escapeHtml(active.eventId)}">active rawRef</button>` : "",
+          last?.eventId ? `<button class="raw-link" data-member-raw="${escapeHtml(last.eventId)}">last tool rawRef</button>` : "",
+          member.lastDiscussion?.eventId ? `<button class="raw-link" data-member-raw="${escapeHtml(member.lastDiscussion.eventId)}">discussion rawRef</button>` : "",
+          member.lastReport?.eventId ? `<button class="raw-link" data-member-raw="${escapeHtml(member.lastReport.eventId)}">report rawRef</button>` : "",
+          member.currentBlocker?.eventId ? `<button class="raw-link" data-member-raw="${escapeHtml(member.currentBlocker.eventId)}">blocker rawRef</button>` : ""
+        ].filter(Boolean).join(" ");
         return `
           <article class="member ${escapeHtml(statusClass(status))}">
             <div class="member-head">
               <div class="name">${escapeHtml(member.displayName || member.role || member.id)}</div>
               <span class="badge ${escapeHtml(statusClass(status))}">${escapeHtml(status)}</span>
             </div>
+            <div class="subtext">role: ${escapeHtml(member.role || "unknown")} · session: ${escapeHtml(member.sessionId || "unknown")}</div>
             <div class="subtext">${escapeHtml(activeText)}</div>
             <div class="subtext">${escapeHtml(lastText)}</div>
             <div class="subtext">${escapeHtml(discussionText)}</div>
             <div class="subtext">${escapeHtml(reportText)}</div>
             ${blockerText}
+            ${rawButtons ? `<div class="event-meta">${rawButtons}</div>` : ""}
             ${member.reports ? `<div class="subtext">${escapeHtml(member.reports)} report event(s)</div>` : ""}
           </article>`;
       }).join("") : `<div class="empty">No team/session binding captured.</div>`;
+      document.querySelectorAll("[data-member-raw]").forEach(node => {
+        node.addEventListener("click", event => {
+          event.stopPropagation();
+          openRawRef(node.dataset.memberRaw);
+        });
+      });
     }
 
     function selectEvent(seq, tab = "raw") {
@@ -826,15 +960,28 @@
       return state.selectedTab;
     }
 
+    function laneCounts() {
+      const counts = { all: eventList().length, tools: 0, discussion: 0, reports: 0, processes: 0, completion: 0, failures: 0 };
+      for (const event of eventList()) {
+        for (const lane of Object.keys(counts)) {
+          if (lane !== "all" && eventMatchesLane(event, lane)) counts[lane] += 1;
+        }
+      }
+      return counts;
+    }
+
     function renderActivity() {
       const lane = state.laneFilter || "all";
+      const counts = laneCounts();
       const events = eventList()
-        .filter(event => lane === "all" || eventLane(event) === lane)
+        .filter(event => eventMatchesLane(event, lane))
         .slice(-250)
         .reverse();
       $("activityMeta").textContent = `${events.length} visible / latest seq ${state.lastSeq}`;
       document.querySelectorAll("#laneTabs button").forEach(button => {
         button.classList.toggle("active", button.dataset.lane === lane);
+        const label = laneLabels[button.dataset.lane] || button.dataset.lane;
+        button.textContent = `${label} ${counts[button.dataset.lane] || 0}`;
       });
       $("activityList").innerHTML = events.length ? events.map(event => {
         const eventId = event.eventId || String(event.seq);
@@ -857,7 +1004,7 @@
               <button class="raw-link" data-raw="${escapeHtml(eventId)}">rawRef</button>
             </div>
           </article>`;
-      }).join("") : `<div class="empty">No observer events for this run.</div>`;
+      }).join("") : `<div class="empty">No ${escapeHtml(laneLabels[lane] || lane)} events for this run.</div>`;
       document.querySelectorAll(".event").forEach(node => {
         node.addEventListener("click", event => {
           const eventId = node.dataset.eventId;
@@ -878,6 +1025,8 @@
         event.bridgeWindowId,
         event.teamId,
         event.taskId,
+        event.sessionId,
+        event.rawRef?.sourceFile && event.rawRef?.sourceOffset ? `${event.rawRef.sourceFile}:${event.rawRef.sourceOffset}` : "",
         event.rawRef?.sourceSequence,
         ...(event.evidenceRefs || [])
       ].filter(Boolean).map(String);
@@ -886,6 +1035,14 @@
         const text = JSON.stringify(step);
         return tokens.some(token => text.includes(token));
       }).slice(-40);
+    }
+
+    function detailBlock(title, value) {
+      return `
+        <section class="detail-block">
+          <h3>${escapeHtml(title)}</h3>
+          <pre>${escapeHtml(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</pre>
+        </section>`;
     }
 
     function renderDetail() {
@@ -920,27 +1077,44 @@
                   <span class="badge">${escapeHtml(trajectoryActorLabel(step.actor || step.role))}</span>
                 </div>
                 <div class="subtext">${escapeHtml(compact(trajectoryObservationLabel(step), 260))}</div>
-                <pre>${escapeHtml(JSON.stringify(step, null, 2))}</pre>
+                <pre>${escapeHtml(JSON.stringify(trajectoryStepView(step), null, 2))}</pre>
               </article>`).join("")}
           </div>` : `<div class="empty">No trajectory steps matched this selection.</div>`;
         return;
       }
       const rawLookup = selected ? state.rawLookups.get(selected.eventId || String(selected.seq)) : null;
+      const rawValue = rawLookup
+        ? {
+          rawRef: rawLookup.rawRef,
+          record: rawLookup.record,
+          rawLine: rawLookup.rawLine,
+          parseError: rawLookup.parseError
+        }
+        : "Click rawRef to read the source JSONL line.";
       $("detailBody").innerHTML = selected
-        ? `<pre>${escapeHtml(JSON.stringify({
-            normalized: selected,
-            rawRef: selected.rawRef,
-            rawSourceRecord: rawLookup || "Click rawRef to read the source JSONL line.",
-            raw: selected.raw,
-            relatedTrajectory: relatedTrajectory(selected)
-          }, null, 2))}</pre>`
+        ? `<div class="detail-sections">
+            ${detailBlock("Raw JSON", rawValue)}
+            ${detailBlock("Normalized Event", selected)}
+            ${detailBlock("Related Trajectory", relatedTrajectory(selected))}
+            ${detailBlock("Related Source Cursor", {
+              eventId: selected.eventId,
+              cursor: selected.cursor,
+              rawRef: selected.rawRef,
+              sourceCursorForFile: state.sourceCursors[selected.rawRef?.sourceFile] || null
+            })}
+          </div>`
         : `<div class="empty">Select an activity item to inspect raw runtime data.</div>`;
     }
 
     function renderUnknowns() {
       const unknowns = Array.isArray(state.status?.unknowns) ? state.status.unknowns : [];
-      $("unknownsList").innerHTML = unknowns.length
-        ? unknowns.map(item => `<div class="member"><div class="subtext">${escapeHtml(item)}</div></div>`).join("")
+      const warnings = state.gatewayWarnings || [];
+      const items = [
+        ...unknowns.map(item => ({ label: "unknown", text: item })),
+        ...warnings.map(item => ({ label: "gateway warning", text: item.message || JSON.stringify(item) }))
+      ];
+      $("unknownsList").innerHTML = items.length
+        ? items.map(item => `<div class="member"><div class="member-head"><div class="name">${escapeHtml(item.label)}</div></div><div class="subtext">${escapeHtml(item.text)}</div></div>`).join("")
         : `<div class="empty">No unknowns recorded.</div>`;
     }
 

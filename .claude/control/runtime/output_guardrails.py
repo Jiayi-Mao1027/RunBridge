@@ -98,7 +98,12 @@ def validate_bridge_packet(packet: Any, *, snapshot: dict[str, Any] | None = Non
     return validation_ok()
 
 
-def validate_bridge_result(payload: Any, *, control_root: str | Path | None = None) -> dict[str, Any]:
+def validate_bridge_result(
+    payload: Any,
+    *,
+    control_root: str | Path | None = None,
+    completion_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return validation_error(error_type="InvalidBridgeResult", path="$", message="bridge result must be an object")
     schema_validation = validate_schema(payload, "bridge_result.schema.json", control_root=control_root)
@@ -120,6 +125,14 @@ def validate_bridge_result(payload: Any, *, control_root: str | Path | None = No
         evidence = payload.get("evidence")
         if not isinstance(evidence, dict) or not evidence:
             return validation_error(error_type="MissingRequiredEvidenceRef", path="$.evidence", message="succeeded bridge result requires evidence")
+        contract = completion_contract if isinstance(completion_contract, dict) else {}
+        required_artifacts = contract.get("required_artifacts") if isinstance(contract.get("required_artifacts"), list) else []
+        if required_artifacts and not payload.get("artifact_refs"):
+            return validation_error(
+                error_type="MissingArtifactRefs",
+                path="$.artifact_refs",
+                message="succeeded bridge result must include artifact_refs required by completion contract",
+            )
     for index, report in enumerate(reports):
         validation = validate_teammate_report(report, path=f"$.reports[{index}]", strict=status != "failed", control_root=control_root)
         if not validation.get("valid"):
@@ -176,7 +189,7 @@ def validate_completion_report(payload: Any, *, control_root: str | Path | None 
         return validation_error(error_type="MissingCompletionChecks", path="$.completion_checks", message="completion report requires completion_checks")
     if checks.get("required_outputs_present") and not payload.get("reports"):
         return validation_error(error_type="MissingReportEvidence", path="$.reports", message="completion output claims reports exist but reports are missing")
-    if checks.get("required_artifacts_present") and payload.get("artifact_refs") is None:
+    if checks.get("required_artifacts_present") and not payload.get("artifact_refs"):
         return validation_error(error_type="MissingArtifactRefs", path="$.artifact_refs", message="completion output claims artifacts checked but artifact_refs are absent")
     for index, report in enumerate(payload.get("reports", []) if isinstance(payload.get("reports"), list) else []):
         validation = validate_teammate_report(report, path=f"$.reports[{index}]", strict=True, control_root=control_root)
@@ -191,7 +204,12 @@ def validate_completion_report(payload: Any, *, control_root: str | Path | None 
     return validation_ok()
 
 
-def validate_log_manifest(payload: Any, *, control_root: str | Path | None = None) -> dict[str, Any]:
+def validate_log_manifest(
+    payload: Any,
+    *,
+    control_root: str | Path | None = None,
+    formal_run: bool | None = None,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return validation_error(error_type="InvalidLogManifest", path="$", message="log manifest must be an object")
     schema_validation = validate_schema(payload, "log_manifest.schema.json", control_root=control_root)
@@ -199,8 +217,22 @@ def validate_log_manifest(payload: Any, *, control_root: str | Path | None = Non
         return schema_validation
     required = _log_manifest_required_fields()
     for field in required:
-        if field not in payload or payload.get(field) in {None, ""}:
+        if field not in payload or _is_empty_value(payload.get(field)):
             return validation_error(error_type="MissingLogManifestField", path=f"$.{field}", message=f"log manifest missing {field}")
+    environment_evidence = payload.get("environment_evidence")
+    if not isinstance(environment_evidence, dict) or not environment_evidence:
+        return validation_error(error_type="MissingLogManifestField", path="$.environment_evidence", message="log manifest requires non-empty environment_evidence")
+    process_refs = payload.get("process_refs")
+    if not isinstance(process_refs, list) or not process_refs:
+        return validation_error(error_type="MissingLogManifestField", path="$.process_refs", message="log manifest requires non-empty process_refs")
+    if formal_run is True or (formal_run is None and _looks_like_l4_formal_manifest(payload)):
+        for field in _formal_l4_manifest_required_fields():
+            if field not in payload or _is_empty_value(payload.get(field)):
+                return validation_error(
+                    error_type="MissingFormalRunEvidence",
+                    path=f"$.{field}",
+                    message=f"L4 execute formal log manifest missing {field}",
+                )
     return validation_ok()
 
 
@@ -216,6 +248,9 @@ def validate_schema(
     control_root: str | Path | None = None,
     root_path: str = "$",
 ) -> dict[str, Any]:
+    # Minimal local schema checker for runtime guardrails. It covers type,
+    # required, enum, object properties, and array items only; it is not a
+    # complete JSON Schema implementation.
     schema = _load_schema_default(control_root, schema_name)
     if not schema:
         return validation_ok()
@@ -322,3 +357,40 @@ def _log_manifest_required_fields() -> list[str]:
         "process_refs",
         "terminal_status",
     ]
+
+
+def _formal_l4_manifest_required_fields() -> list[str]:
+    return [
+        "batchbasis",
+        "gpu_id_or_device_ids",
+        "formal_memory_observed",
+        "model_or_model_family",
+        "dataset_name_split_source",
+        "method_or_objective",
+    ]
+
+
+def _is_empty_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value == ""
+    if isinstance(value, (list, dict)):
+        return len(value) == 0
+    return False
+
+
+def _looks_like_l4_formal_manifest(payload: dict[str, Any]) -> bool:
+    phase = str(payload.get("phase") or payload.get("target_phase") or "").lower()
+    stage = " ".join(
+        str(payload.get(key) or "").lower()
+        for key in ("stage_name", "stage_kind", "run_kind", "execution_kind", "mode")
+    )
+    command = str(payload.get("command") or "").lower()
+    explicit = payload.get("formal_run") is True or payload.get("is_formal") is True
+    return bool(
+        explicit
+        or (phase == "l4_execute" and "formal" in stage)
+        or ("l4_execute" in stage and "formal" in stage)
+        or ("--formal" in command or " formal" in command)
+    )

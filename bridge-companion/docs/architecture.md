@@ -98,6 +98,8 @@ The browser reconnects with `afterCursor`, a map of `sourceFile -> lineOffset`. 
 
 Each SSE connection performs one backfill pass and then switches to per-source JSONL tailers. Tailers track byte offset and line offset for every source file.
 
+Partial JSONL writes are buffered until a newline completes the record. If a file size moves backwards, the gateway treats it as truncate/rewrite, resets that source cursor, and emits `gateway_warning`. The UI displays this as a gateway warning only; it does not infer runtime failure.
+
 ## UI Structure
 
 The prototype uses three panes:
@@ -109,6 +111,17 @@ The prototype uses three panes:
 The team tree combines `session_bindings.jsonl`, `active_operations.json`, and hook tool events. A teammate running Bash is shown as running only when hook tool events or active operations say so. A report alone is displayed as a report, not as a fabricated tool action.
 
 Each teammate card may show current tool, last completed tool, last discussion text, last report, and current blocker. Missing discussion is displayed as missing; it is not inferred from reports or tool names.
+
+Lane filters are multi-membership predicates:
+
+- Tools: `source == hook_tool_event`
+- Discussion: `source == sdk_stream || source == agent_message`
+- Reports: `source == teammate_report || source == artifact`
+- Processes: `source == process_event`
+- Completion: `source == completion_check`
+- Failures: `status in {failed, blocked}` or `kind` contains `failed` / `rejected`
+
+The Detail Inspector exposes four audit blocks for every selected event: Raw JSON, Normalized Event, Related Trajectory, and Related Source Cursor.
 
 ## Trajectory
 

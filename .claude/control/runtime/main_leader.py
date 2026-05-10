@@ -203,6 +203,7 @@ def build_bridge_instruction_packet_for_this_invoke(
     mapping = _build_task_team_mapping(resolved_task, resolved_team, phase_contracts=contracts)
 
     binding = {
+        "repo_key": snapshot.get("repo_key"),
         "run_id": run_id,
         "main_session_id": resolved_main_session_id,
         "sub_session_id": sub_session_id,
@@ -222,6 +223,7 @@ def build_bridge_instruction_packet_for_this_invoke(
     packet = {
         "schema_version": PACKET_SCHEMA_VERSION,
         "policy_contract_ref": _policy_contract_ref(contracts),
+        "repo_key": snapshot.get("repo_key"),
         "binding": binding,
         "frozen_semantics": deepcopy(snapshot.get("semantic", {}).get("frozen") or {}),
         "frozen_scope": deepcopy(snapshot.get("scope", {}).get("frozen") or {}),
