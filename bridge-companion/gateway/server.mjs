@@ -18,6 +18,7 @@ const STREAM_INTERVAL_MS = Number(process.env.BRIDGE_COMPANION_STREAM_INTERVAL_M
 const MAX_EVENT_LIMIT = 1000;
 const DEFAULT_EVENT_LIMIT = 500;
 const RESPONSE_TEXT_LIMIT = 8000;
+const REPORT_RESPONSE_TEXT_LIMIT = Number(process.env.BRIDGE_COMPANION_REPORT_TEXT_LIMIT || 50000);
 const COMPANION_TOKEN = process.env.BRIDGE_COMPANION_TOKEN || "";
 const OUTER_HOST_URL = process.env.BRIDGE_OUTER_HOST_URL || process.env.OUTER_SDK_HOST_URL || "";
 const OUTER_HOST_TOKEN = process.env.BRIDGE_OUTER_HOST_TOKEN || process.env.OUTER_SDK_HOST_TOKEN || "";
@@ -114,10 +115,10 @@ function authorizeRequest(req, url) {
   return [bearer, headerToken, queryToken].some(value => value && value === COMPANION_TOKEN);
 }
 
-function redactForResponse(value, depth = 0) {
+function redactForResponse(value, depth = 0, pathParts = []) {
   if (depth > 8) return "<max-depth>";
-  if (typeof value === "string") return redactText(value);
-  if (Array.isArray(value)) return value.map(item => redactForResponse(item, depth + 1));
+  if (typeof value === "string") return redactText(value, responseTextLimitFor(pathParts));
+  if (Array.isArray(value)) return value.map((item, index) => redactForResponse(item, depth + 1, [...pathParts, String(index)]));
   if (!value || typeof value !== "object") return value;
   const result = {};
   for (const [key, item] of Object.entries(value)) {
@@ -125,17 +126,29 @@ function redactForResponse(value, depth = 0) {
       result[key] = item ? "<redacted>" : item;
       continue;
     }
-    result[key] = redactForResponse(item, depth + 1);
+    result[key] = redactForResponse(item, depth + 1, [...pathParts, key]);
   }
   return result;
 }
 
-function redactText(value) {
+function responseTextLimitFor(pathParts) {
+  const pathText = pathParts.join(".");
+  if (
+    /(^|\.)leaderReportCards\.\d+\.summary$/.test(pathText) ||
+    /(^|\.)leader_result\.reports\.\d+\.summary$/.test(pathText) ||
+    /(^|\.)leaderResult\.reports\.\d+\.summary$/.test(pathText)
+  ) {
+    return Math.max(RESPONSE_TEXT_LIMIT, Math.min(REPORT_RESPONSE_TEXT_LIMIT || 50000, 200000));
+  }
+  return RESPONSE_TEXT_LIMIT;
+}
+
+function redactText(value, limit = RESPONSE_TEXT_LIMIT) {
   let text = String(value || "");
   text = text.replace(/(api[_-]?key|token|password|secret)(\s*[:=]\s*)(\S+)/gi, "$1$2<redacted>");
   text = text.replace(/bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer <redacted>");
   text = text.replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<redacted>");
-  if (text.length > RESPONSE_TEXT_LIMIT) return `${text.slice(0, RESPONSE_TEXT_LIMIT)}...<truncated>`;
+  if (text.length > limit) return `${text.slice(0, limit)}...<truncated>`;
   return text;
 }
 
@@ -810,14 +823,18 @@ function sourceCursorsFor(events) {
 
 function parseSourceCursor(value) {
   if (!value) return null;
+  const normalize = parsed =>
+    parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).length
+      ? parsed
+      : null;
   try {
     const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    return normalize(parsed);
   } catch {
     try {
       const decoded = Buffer.from(String(value), "base64url").toString("utf8");
       const parsed = JSON.parse(decoded);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+      return normalize(parsed);
     } catch {
       return null;
     }
@@ -862,6 +879,7 @@ function filterEvents(events, query) {
   const after = Number(query.get("after") || 0);
   const afterId = query.get("afterId") || query.get("after_id") || "";
   const sourceCursor = parseSourceCursor(query.get("afterCursor") || query.get("after_cursor") || "");
+  const tail = ["1", "true", "yes", "latest"].includes(String(query.get("tail") || "").toLowerCase());
   const limit = Math.min(
     MAX_EVENT_LIMIT,
     Math.max(1, Number(query.get("limit") || DEFAULT_EVENT_LIMIT))
@@ -872,6 +890,8 @@ function filterEvents(events, query) {
   } else if (afterId) {
     const index = events.findIndex(event => event.eventId === afterId);
     filtered = (index >= 0 ? events.slice(index + 1) : events).slice(0, limit);
+  } else if (tail && !after) {
+    filtered = events.slice(Math.max(0, events.length - limit));
   } else {
     filtered = events.filter(event => event.seq > after).slice(0, limit);
   }
@@ -1221,17 +1241,29 @@ function projectMessageCard(event) {
 
 function projectLeaderReportCards(events) {
   const outerResults = events.filter(event => event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result");
-  const sourceEvents = outerResults.length ? outerResults : events;
-  return sourceEvents
-    .filter(event => {
-      const sdkType = String(event.raw?.sdk_message_type || event.raw?.event_type || "");
-      return (
-        (event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result") ||
-        (event.source === "sdk_stream" && ["ResultMessage", "sdk_stream_final_result"].includes(sdkType))
-      );
-    })
+  const sdkResults = events.filter(event => {
+    const sdkType = String(event.raw?.sdk_message_type || event.raw?.event_type || "");
+    return event.source === "sdk_stream" && ["ResultMessage", "sdk_stream_final_result"].includes(sdkType);
+  });
+  return dedupeLeaderReportCards([...outerResults, ...sdkResults])
     .slice(-40)
     .map(projectLeaderReportCard);
+}
+
+function dedupeLeaderReportCards(events) {
+  const byKey = new Map();
+  for (const event of sortEvents([...events])) {
+    const card = projectLeaderReportCard(event);
+    const key = [
+      card.reportStatus,
+      compactText(card.summary || "").slice(0, 260).toLowerCase()
+    ].join("|");
+    const existing = byKey.get(key);
+    if (!existing || String(card.summary || "").length > String(existing.card.summary || "").length) {
+      byKey.set(key, { event, card });
+    }
+  }
+  return sortEvents([...byKey.values()].map(item => item.event));
 }
 
 function projectLeaderReportCard(event) {
@@ -1355,19 +1387,18 @@ async function loadBriefSecret() {
   };
 }
 
-function requestJson(url, payload, headers = {}) {
+function requestJson(url, payload = null, headers = {}, method = "POST") {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
-    const body = JSON.stringify(payload);
+    const body = payload === null || payload === undefined ? "" : JSON.stringify(payload);
     const transport = target.protocol === "http:" ? http : https;
     const req = transport.request({
-      method: "POST",
+      method,
       hostname: target.hostname,
       port: target.port || (target.protocol === "http:" ? 80 : 443),
       path: `${target.pathname}${target.search}`,
       headers: {
-        "content-type": "application/json",
-        "content-length": Buffer.byteLength(body),
+        ...(body ? { "content-type": "application/json", "content-length": Buffer.byteLength(body) } : {}),
         ...headers
       }
     }, res => {
@@ -1385,7 +1416,7 @@ function requestJson(url, payload, headers = {}) {
       });
     });
     req.on("error", reject);
-    req.write(body);
+    if (body) req.write(body);
     req.end();
   });
 }
@@ -1405,6 +1436,19 @@ async function submitLeaderInput(input) {
   const endpoint = new URL("/v1/input", OUTER_HOST_URL).toString();
   const headers = OUTER_HOST_TOKEN ? { "x-bridge-outer-host-token": OUTER_HOST_TOKEN } : {};
   return requestJson(endpoint, { ...input, source: "bridge_companion_gateway" }, headers);
+}
+
+async function outerHostStatus() {
+  if (!OUTER_HOST_URL) {
+    return {
+      ok: false,
+      error: "outer_host_not_configured",
+      message: "Set BRIDGE_OUTER_HOST_URL to enable outer host status discovery."
+    };
+  }
+  const endpoint = new URL("/v1/status", OUTER_HOST_URL).toString();
+  const headers = OUTER_HOST_TOKEN ? { "x-bridge-outer-host-token": OUTER_HOST_TOKEN } : {};
+  return requestJson(endpoint, null, headers, "GET");
 }
 
 function buildBriefPrompt(input) {
@@ -1676,6 +1720,23 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === "/api/health") {
+    let outerHost = null;
+    if (OUTER_HOST_URL) {
+      try {
+        const status = await outerHostStatus();
+        outerHost = {
+          ok: true,
+          adapter: status.adapter,
+          repoKey: status.repo_key || status.repoKey,
+          runId: status.run_id || status.runId,
+          defaultRunId: status.default_run_id || status.defaultRunId,
+          hostInstanceId: status.host_instance_id || status.hostInstanceId,
+          startedAt: status.started_at || status.startedAt
+        };
+      } catch (error) {
+        outerHost = { ok: false, error: error.message };
+      }
+    }
     sendJson(res, 200, {
       ok: true,
       projectsRoot: PROJECTS_ROOT,
@@ -1686,7 +1747,8 @@ async function handleApi(req, res, url) {
       streamIntervalMs: STREAM_INTERVAL_MS,
       readOnly: true,
       outerHostConfigured: Boolean(OUTER_HOST_URL),
-      inputProxy: OUTER_HOST_URL ? "outer_sdk_host" : "disabled"
+      inputProxy: OUTER_HOST_URL ? "outer_sdk_host" : "disabled",
+      outerHost
     });
     return;
   }
@@ -1803,6 +1865,16 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (pathname === "/api/leader/status") {
+    try {
+      const status = await outerHostStatus();
+      sendJson(res, status?.ok === false ? 503 : 200, status);
+    } catch (error) {
+      sendJson(res, 502, { error: "outer_host_status_failed", message: error.message });
+    }
+    return;
+  }
+
   if (pathname === "/api/brief" || pathname === "/brief") {
     if (req.method !== "POST") {
       sendJson(res, 405, { error: "POST required" });
@@ -1893,10 +1965,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
 export {
   buildProjection,
   buildStatus,
+  filterEvents,
   loadRunEvents,
   normalizeRunRecord,
+  outerHostStatus,
   projectCompletionChecklist,
   projectSemanticCoverage,
+  redactForResponse,
   requestHandler,
   startServer,
   submitLeaderInput

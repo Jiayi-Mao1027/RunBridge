@@ -2624,6 +2624,14 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         default_main_session_id="outer_smoke_main",
     )
     host = OuterSdkHost(config, adapter=UnavailableOuterLeaderAdapter())
+    startup_status = host.status()
+    startup_run_id = startup_status.get("default_run_id")
+    if not startup_run_id or startup_status.get("run_id") != startup_run_id:
+        raise AssertionError(json.dumps(startup_status, ensure_ascii=False, indent=2))
+    startup_run_root = control_root.parent / "runtime_state" / "projects" / startup_status["repo_key"] / "runs" / startup_run_id
+    startup_events = _read_jsonl(startup_run_root / "outer_host_events.jsonl")
+    if not any(item.get("event_kind") == "outer_host_started" for item in startup_events):
+        raise AssertionError(json.dumps(startup_events, ensure_ascii=False, indent=2))
     response = host.handle_user_input(
         {
             "text": "read the current runtime status and report",
@@ -2637,6 +2645,12 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         raise AssertionError(json.dumps(response, ensure_ascii=False, indent=2))
     repo_key = response["host"]["repo_key"]
     run_id = response["host"]["run_id"]
+    host_status = host.status(repo_key=repo_key)
+    if response["host"].get("default_run_id") != run_id or host_status.get("default_run_id") != run_id:
+        raise AssertionError(json.dumps({"response": response["host"], "status": host_status}, ensure_ascii=False, indent=2))
+    second_default = host.handle_user_input({"text": "second message should stay on host default run"})
+    if second_default.get("host", {}).get("run_id") != run_id:
+        raise AssertionError(json.dumps({"first": response.get("host"), "second": second_default.get("host")}, ensure_ascii=False, indent=2))
     run_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / run_id
     event_log = _read_jsonl(run_root / "event_log.jsonl")
     if not any(item.get("event_kind") == "user_prompt_submitted" for item in event_log):
@@ -2647,6 +2661,43 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     stream_events = _read_jsonl(run_root / "sdk_stream_events.jsonl")
     if not any(item.get("event_type") == "outer_user_input" for item in stream_events):
         raise AssertionError(json.dumps(stream_events, ensure_ascii=False, indent=2))
+
+    class LongReportAdapter:
+        name = "long-report-smoke"
+
+        def handle_user_input(self, request, *, event_sink=None):
+            summary = "outer host long report " + " ".join(f"chunk-{index:04d}" for index in range(380))
+            return {
+                "status": "succeeded",
+                "handled_by": self.name,
+                "reports": [{"summary": summary, "source": "smoke"}],
+                "artifact_refs": [],
+                "evidence": {},
+                "error_or_null": None,
+                "cleanup_required": False,
+            }
+
+    long_host = OuterSdkHost(config, adapter=LongReportAdapter())
+    long_response = long_host.handle_user_input(
+        {
+            "text": "record a long leader report",
+            "run_id": "run_outer_long_report",
+            "main_session_id": "outer_smoke_long",
+        }
+    )
+    long_summary = long_response.get("leader_result", {}).get("reports", [{}])[0].get("summary", "")
+    if "chunk-0379" not in long_summary:
+        raise AssertionError(json.dumps({"response_summary_tail": long_summary[-200:]}, ensure_ascii=False, indent=2))
+    long_run_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / "run_outer_long_report"
+    long_host_events = _read_jsonl(long_run_root / "outer_host_events.jsonl")
+    long_result_events = [item for item in long_host_events if item.get("event_kind") == "outer_leader_result"]
+    persisted_summary = long_result_events[-1].get("payload", {}).get("leader_result", {}).get("reports", [{}])[0].get("summary", "")
+    if "chunk-0379" not in persisted_summary:
+        raise AssertionError(json.dumps({"persisted_summary_tail": persisted_summary[-200:]}, ensure_ascii=False, indent=2))
+    new_default = long_host.handle_user_input({"text": "force a new host default run", "start_new_run": True})
+    if new_default.get("host", {}).get("run_id") == long_response.get("host", {}).get("default_run_id"):
+        raise AssertionError(json.dumps({"old": long_response.get("host"), "new": new_default.get("host")}, ensure_ascii=False, indent=2))
+
     sdk_adapter = ClaudeAgentSdkOuterLeaderAdapter(config)
     sdk_adapter._load_sdk = lambda: None
     sdk_missing = sdk_adapter.handle_user_input(
@@ -2674,10 +2725,10 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         def __init__(self, text: str):
             self.content = [FakeTextBlock(text)]
 
-    class FakeResultMessage:
+    class ResultMessage:
         def __init__(self):
             self.subtype = "success"
-            self.result = "fake sdk success"
+            self.result = "fake sdk success " + " ".join(f"section-{index:03d}" for index in range(180))
             self.session_id = "outer_smoke_main"
 
     class FakeClaudeSDKClient:
@@ -2695,7 +2746,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
 
         async def query(self, prompt, session_id=None):
             self.queries.append({"prompt": prompt, "session_id": session_id})
-            self._pending = [FakeAssistantMessage(f"fake response {len(self.queries)}"), FakeResultMessage()]
+            self._pending = [FakeAssistantMessage(f"fake response {len(self.queries)}"), ResultMessage()]
 
         async def receive_response(self):
             for message in self._pending:
@@ -2722,6 +2773,12 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     sdk_second = sdk_adapter.handle_user_input(sdk_request, event_sink=lambda event_type, payload, **kwargs: sdk_events.append({"event_type": event_type, "payload": payload, **kwargs}))
     if sdk_first.get("status") != "succeeded" or sdk_second.get("status") != "succeeded":
         raise AssertionError(json.dumps({"first": sdk_first, "second": sdk_second}, ensure_ascii=False, indent=2))
+    first_summary = sdk_first.get("reports", [{}])[0].get("summary", "")
+    if "section-179" not in first_summary:
+        raise AssertionError(json.dumps({"summary_tail_missing": first_summary[-200:], "summary_length": len(first_summary)}, ensure_ascii=False, indent=2))
+    result_events = [item for item in sdk_events if item.get("payload", {}).get("sdk_message_type") == "ResultMessage"]
+    if not result_events or "section-179" not in str(result_events[0].get("payload", {}).get("result") or ""):
+        raise AssertionError(json.dumps(result_events, ensure_ascii=False, indent=2))
     if len(FakeClaudeSDKClient.instances) != 1:
         raise AssertionError(json.dumps({"client_instances": len(FakeClaudeSDKClient.instances)}, ensure_ascii=False, indent=2))
     fake_client = FakeClaudeSDKClient.instances[0]

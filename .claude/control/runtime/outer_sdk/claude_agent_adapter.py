@@ -28,6 +28,7 @@ DEFAULT_ALLOWED_TOOLS = [
 ]
 DEFAULT_DISALLOWED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]
 PREVIEW_LIMIT = 700
+REPORT_TEXT_LIMIT = 20000
 
 
 class ClaudeAgentSdkOuterLeaderAdapter:
@@ -370,7 +371,7 @@ def _result_fields(payload: dict[str, Any]) -> dict[str, Any]:
     for key in ("subtype", "result", "session_id", "total_cost_usd", "duration_ms", "num_turns"):
         if key in payload:
             value = payload.get(key)
-            fields[key] = _safe_preview(value) if key == "result" else value
+            fields[key] = _safe_report_text(value) if key == "result" else value
     return fields
 
 
@@ -412,7 +413,7 @@ def _sdk_result(
 ) -> dict[str, Any]:
     subtype = result_message.get("subtype") if result_message else None
     status = "succeeded" if subtype in {None, "success"} else "failed"
-    summary = _last_preview(messages) or "outer leader SDK response completed"
+    summary = _result_text(result_message) or _last_result_text(messages) or _last_preview(messages) or "outer leader SDK response completed"
     return {
         "status": status,
         "handled_by": handled_by,
@@ -446,6 +447,23 @@ def _last_preview(messages: list[dict[str, Any]]) -> str | None:
         preview = item.get("message_preview")
         if preview:
             return str(preview)[:PREVIEW_LIMIT]
+    return None
+
+
+def _last_result_text(messages: list[dict[str, Any]]) -> str | None:
+    for item in reversed(messages):
+        text = _result_text(item)
+        if text:
+            return text
+    return None
+
+
+def _result_text(message: dict[str, Any] | None) -> str | None:
+    if not isinstance(message, dict):
+        return None
+    value = message.get("result")
+    if isinstance(value, str) and value.strip():
+        return _safe_report_text(value)
     return None
 
 
@@ -494,6 +512,16 @@ def _safe_preview(value: Any) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
     text = " ".join(str(text).split())
     return text[:PREVIEW_LIMIT]
+
+
+def _safe_report_text(value: Any) -> str:
+    if value is None:
+        return ""
+    limit = _env_int("BRIDGE_OUTER_SDK_REPORT_TEXT_LIMIT") or REPORT_TEXT_LIMIT
+    limit = max(PREVIEW_LIMIT, min(limit, 100000))
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
+    text = str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+    return text[:limit]
 
 
 def _env_list(name: str, default: list[str]) -> list[str]:

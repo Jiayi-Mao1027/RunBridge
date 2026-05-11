@@ -117,7 +117,7 @@
     .layout {
       min-height: 0;
       display: grid;
-      grid-template-columns: minmax(260px, .75fr) minmax(520px, 1.35fr) minmax(390px, .95fr);
+      grid-template-columns: minmax(260px, .72fr) minmax(560px, 1.45fr) minmax(420px, 1fr);
       gap: 10px;
     }
     .panel {
@@ -156,7 +156,13 @@
       gap: 10px;
     }
     .left-stack { grid-template-rows: 210px 265px 1fr; }
-    .right-stack { grid-template-rows: minmax(230px, .62fr) minmax(300px, 1fr) minmax(210px, .58fr); }
+    .center-stack, .right-stack {
+      min-height: 0;
+      display: grid;
+      gap: 10px;
+    }
+    .center-stack { grid-template-rows: minmax(360px, 1.15fr) minmax(280px, .85fr); }
+    .right-stack { grid-template-rows: minmax(360px, 1.15fr) minmax(230px, .7fr); }
     .summary-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -329,6 +335,15 @@
       padding: 9px;
       min-width: 0;
     }
+    .leader-report.primary {
+      border-color: rgba(125, 183, 162, .55);
+      background: #16201d;
+    }
+    .leader-summary {
+      color: #dfe7e9;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     .leader-report pre {
       margin-top: 8px;
       max-height: 150px;
@@ -410,8 +425,13 @@
                   <option value="user_prompt">Prompt</option>
                   <option value="user_answer">Answer</option>
                 </select>
+                <select id="leaderRunMode" data-testid="leader-run-mode">
+                  <option value="host_default">New host run</option>
+                  <option value="selected_run">Continue selected run</option>
+                </select>
                 <button id="leaderSendButton" type="submit" data-testid="leader-send-button">Send</button>
               </div>
+              <div class="subtext" id="leaderTargetStatus">Target run unknown.</div>
               <div class="submit-status" id="leaderInputStatus">input proxy not checked</div>
             </form>
           </div>
@@ -428,26 +448,7 @@
         </section>
       </aside>
 
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Live Activity Stream</h2>
-          <span class="meta" id="activityMeta">0 events</span>
-        </div>
-        <div class="panel-body">
-          <div class="lane-tabs" id="laneTabs" aria-label="activity filters">
-            <button class="active" data-lane="all">All</button>
-            <button data-lane="tools">Tools</button>
-            <button data-lane="discussion">Discussion</button>
-            <button data-lane="reports">Reports</button>
-            <button data-lane="processes">Processes</button>
-            <button data-lane="completion">Completion</button>
-            <button data-lane="failures">Failures</button>
-          </div>
-          <div class="activity-list" id="activityList" data-testid="activity-list"></div>
-        </div>
-      </section>
-
-      <aside class="right-stack">
+      <section class="center-stack">
         <section class="panel">
           <div class="panel-header">
             <h2>Leader Report</h2>
@@ -470,6 +471,27 @@
               <button data-tab="brief">Model Brief</button>
             </div>
             <div class="panel-body" id="detailBody" data-testid="detail-inspector"></div>
+          </div>
+        </section>
+      </section>
+
+      <aside class="right-stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Live Activity Stream</h2>
+            <span class="meta" id="activityMeta">0 events</span>
+          </div>
+          <div class="panel-body">
+            <div class="lane-tabs" id="laneTabs" aria-label="activity filters">
+              <button class="active" data-lane="all">All</button>
+              <button data-lane="tools">Tools</button>
+              <button data-lane="discussion">Discussion</button>
+              <button data-lane="reports">Reports</button>
+              <button data-lane="processes">Processes</button>
+              <button data-lane="completion">Completion</button>
+              <button data-lane="failures">Failures</button>
+            </div>
+            <div class="activity-list" id="activityList" data-testid="activity-list"></div>
           </div>
         </section>
 
@@ -498,11 +520,13 @@
       discussionBuffers: new Map(),
       toolInputBuffers: new Map(),
       gatewayWarnings: [],
+      projection: null,
       lastSeq: 0,
       lastEventId: "",
       sourceCursors: {},
       source: null,
       gatewayHealth: null,
+      leaderHostStatus: null,
       inputPending: false,
       inputStatus: "input proxy not checked",
       inputStatusClass: "",
@@ -622,6 +646,15 @@
       }
     }
 
+    function mergeSourceCursors(cursors = {}) {
+      if (!cursors || typeof cursors !== "object") return;
+      for (const [sourceFile, sourceOffset] of Object.entries(cursors)) {
+        const offset = Number(sourceOffset || 0);
+        if (!sourceFile || !Number.isFinite(offset) || offset <= 0) continue;
+        state.sourceCursors[sourceFile] = Math.max(Number(state.sourceCursors[sourceFile] || 0), offset);
+      }
+    }
+
     function streamKey(event, suffix = "text") {
       return [
         event.repoKey || state.repoKey,
@@ -681,6 +714,7 @@
       state.discussionBuffers.clear();
       state.toolInputBuffers.clear();
       state.gatewayWarnings = [];
+      state.projection = null;
       state.lastSeq = 0;
       state.lastEventId = "";
       state.sourceCursors = {};
@@ -729,8 +763,10 @@
         return;
       }
       state.status = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`);
-      const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500`);
+      const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500&tail=1`);
       addEvents(payload.events || []);
+      mergeSourceCursors(payload.sourceCursors || {});
+      await refreshProjection();
       await refreshGatewayHealth();
       render();
       startStream();
@@ -739,14 +775,30 @@
     async function refreshGatewayHealth() {
       try {
         state.gatewayHealth = await api("/api/health");
+        state.leaderHostStatus = state.gatewayHealth?.outerHost || null;
         state.inputStatus = state.gatewayHealth?.inputProxy === "outer_sdk_host"
           ? "input proxy connected"
           : "input proxy disabled";
-        state.inputStatusClass = state.gatewayHealth?.inputProxy === "outer_sdk_host" ? "ok" : "warn";
+        state.inputStatusClass = state.gatewayHealth?.inputProxy === "outer_sdk_host" && state.leaderHostStatus?.ok !== false ? "ok" : "warn";
       } catch (error) {
         state.gatewayHealth = null;
+        state.leaderHostStatus = null;
         state.inputStatus = `gateway health failed: ${error.message}`;
         state.inputStatusClass = "failed";
+      }
+    }
+
+    async function refreshProjection() {
+      if (!state.repoKey || !state.runId) {
+        state.projection = null;
+        return;
+      }
+      try {
+        state.projection = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/projection`);
+      } catch (error) {
+        state.projection = null;
+        state.gatewayWarnings.push({ message: `projection refresh failed: ${error.message}` });
+        state.gatewayWarnings = state.gatewayWarnings.slice(-20);
       }
     }
 
@@ -1016,13 +1068,21 @@
     }
 
     function renderLeaderInput() {
-      $("inputProxyMeta").textContent = state.gatewayHealth?.inputProxy || "unknown";
+      const host = state.leaderHostStatus || {};
+      $("inputProxyMeta").textContent = host.defaultRunId
+        ? `host run ${compact(host.defaultRunId, 32)}`
+        : state.gatewayHealth?.inputProxy || "unknown";
       const status = $("leaderInputStatus");
       status.textContent = state.inputStatus || "";
       status.className = `submit-status ${state.inputStatusClass || ""}`.trim();
+      const runMode = $("leaderRunMode").value || "host_default";
+      $("leaderTargetStatus").textContent = runMode === "selected_run"
+        ? `Target: continue selected run ${state.runId || "none selected"}`
+        : `Target: host default run ${host.defaultRunId || "pending host status"}; restarts create a new default run.`;
       $("leaderSendButton").disabled = Boolean(state.inputPending);
       $("leaderInputText").disabled = Boolean(state.inputPending);
       $("leaderInputKind").disabled = Boolean(state.inputPending);
+      $("leaderRunMode").disabled = Boolean(state.inputPending);
     }
 
     function leaderReportEvents() {
@@ -1030,16 +1090,40 @@
       const outerResults = allEvents.filter(event =>
         event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result"
       );
-      if (outerResults.length) return outerResults.slice(-12).reverse();
-      const events = allEvents.filter(event => {
-        if (event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result") return true;
+      const sdkResults = allEvents.filter(event => {
         if (event.source === "sdk_stream") {
           const type = String(event.raw?.sdk_message_type || event.raw?.event_type || "");
           return type === "ResultMessage" || type === "sdk_stream_final_result";
         }
         return false;
       });
-      return events.slice(-12).reverse();
+      return dedupeLeaderReports([...outerResults, ...sdkResults]).slice(-12).reverse();
+    }
+
+    function leaderReportDedupeKey(event) {
+      return leaderReportCardKey(leaderReportFromEvent(event));
+    }
+
+    function leaderReportCardKey(report) {
+      return [
+        report.status,
+        compact(report.summary, 260).toLowerCase()
+      ].join("|");
+    }
+
+    function dedupeLeaderReports(events) {
+      const byKey = new Map();
+      for (const event of events.sort((a, b) => (Date.parse(a.ts || "") || 0) - (Date.parse(b.ts || "") || 0))) {
+        const key = leaderReportDedupeKey(event);
+        const report = leaderReportFromEvent(event);
+        const existing = byKey.get(key);
+        if (!existing || String(report.summary || "").length > String(existing.report.summary || "").length) {
+          byKey.set(key, { event, report });
+        }
+      }
+      return [...byKey.values()]
+        .map(item => item.event)
+        .sort((a, b) => (Date.parse(a.ts || "") || 0) - (Date.parse(b.ts || "") || 0));
     }
 
     function leaderReportFromEvent(event) {
@@ -1059,8 +1143,51 @@
       };
     }
 
+    function projectedLeaderReportCards() {
+      return (state.projection?.leaderReportCards || []).map(card => ({
+        eventId: card.eventId || `${card.rawRef?.sourceFile || "projection"}:${card.rawRef?.sourceOffset || card.ts || "leader-report"}`,
+        rawRef: card.rawRef || null,
+        ts: card.ts,
+        status: card.reportStatus || card.status || "unknown",
+        handledBy: card.handledBy || "leader-orchestrator",
+        summary: card.summary || "leader result recorded",
+        error: card.error || null,
+        evidence: card.evidence || null,
+        projected: true
+      }));
+    }
+
+    function projectedLeaderReportEvent(id) {
+      const card = projectedLeaderReportCards().find(item => item.eventId === id);
+      if (!card) return null;
+      return {
+        seq: null,
+        eventId: card.eventId,
+        ts: card.ts,
+        source: "projection",
+        kind: "leader_report_projection",
+        lane: "reports",
+        status: card.status,
+        messagePreview: compact(card.summary, 700),
+        rawRef: card.rawRef,
+        raw: { projection: "leaderReportCards", card }
+      };
+    }
+
+    function dedupeLeaderReportCards(cards) {
+      const byKey = new Map();
+      for (const card of [...cards].sort((a, b) => (Date.parse(b.ts || "") || 0) - (Date.parse(a.ts || "") || 0))) {
+        const key = leaderReportCardKey(card);
+        const existing = byKey.get(key);
+        if (!existing || String(card.summary || "").length > String(existing.summary || "").length) {
+          byKey.set(key, card);
+        }
+      }
+      return [...byKey.values()].sort((a, b) => (Date.parse(b.ts || "") || 0) - (Date.parse(a.ts || "") || 0));
+    }
+
     function renderLeaderReports() {
-      const cards = leaderReportEvents().map(leaderReportFromEvent);
+      const cards = dedupeLeaderReportCards([...projectedLeaderReportCards(), ...leaderReportEvents().map(leaderReportFromEvent)]);
       $("leaderReportMeta").textContent = cards.length ? `${cards.length} result(s)` : "no result";
       const response = state.lastLeaderResponse?.leader_result ? {
         eventId: "latest-response",
@@ -1071,16 +1198,20 @@
         error: state.lastLeaderResponse.leader_result.error_or_null || null,
         evidence: state.lastLeaderResponse.leader_result.evidence || null
       } : null;
-      const merged = response ? [response, ...cards.filter(card => card.eventId !== response.eventId)] : cards;
+      const responseKey = response ? leaderReportCardKey(response) : "";
+      const merged = response
+        ? [response, ...cards.filter(card => card.eventId !== response.eventId && leaderReportCardKey(card) !== responseKey)]
+        : cards;
       $("leaderReportList").innerHTML = merged.length ? merged.slice(0, 10).map(card => `
-        <article class="leader-report">
+        <article class="leader-report ${card === merged[0] ? "primary" : ""}">
           <div class="member-head">
             <div class="name">${escapeHtml(card.handledBy)}</div>
             <span class="badge ${escapeHtml(statusClass(card.status))}">${escapeHtml(card.status)}</span>
           </div>
-          <div class="subtext">${escapeHtml(compact(card.summary, 420))}</div>
+          <div class="leader-summary">${escapeHtml(card.summary || "leader result recorded")}</div>
           <div class="event-meta">
             <span class="badge">${escapeHtml(card.ts || "no timestamp")}</span>
+            ${card.evidence?.sdk_message_count !== undefined ? `<span class="badge">SDK messages ${escapeHtml(card.evidence.sdk_message_count)}</span>` : ""}
             ${card.rawRef ? `<button class="raw-link" data-report-raw="${escapeHtml(card.eventId)}">rawRef</button>` : ""}
           </div>
           ${card.error ? `<pre>${escapeHtml(JSON.stringify(card.error, null, 2))}</pre>` : ""}
@@ -1155,7 +1286,7 @@
     }
 
     async function openRawRef(id) {
-      const event = state.events.get(id) || [...state.events.values()].find(item => item.seq === id || item.eventId === id);
+      const event = state.events.get(id) || [...state.events.values()].find(item => item.seq === id || item.eventId === id) || projectedLeaderReportEvent(id);
       state.selectedEventSeq = event?.seq ?? null;
       state.selectedEventId = event?.eventId || String(id || "");
       state.selectedTab = "raw";
@@ -1267,6 +1398,7 @@
       const selected =
         state.events.get(state.selectedEventId) ||
         [...state.events.values()].find(event => event.seq === state.selectedEventSeq) ||
+        projectedLeaderReportEvent(state.selectedEventId) ||
         eventList().at(-1) ||
         null;
       $("detailMeta").textContent = selected?.rawRef
@@ -1380,11 +1512,15 @@
       state.inputStatusClass = "warn";
       renderLeaderInput();
       try {
+        const runMode = $("leaderRunMode").value || "host_default";
+        if (runMode === "selected_run" && !state.runId) {
+          throw new Error("continue selected run requires a selected run");
+        }
         const payload = {
           text,
           input_kind: $("leaderInputKind").value || "user_prompt",
           repo_key: state.repoKey || undefined,
-          run_id: state.runId || undefined
+          run_id: runMode === "selected_run" ? state.runId || undefined : undefined
         };
         const response = await apiJson("/api/leader/input", {
           method: "POST",
@@ -1404,8 +1540,10 @@
           await selectRun(nextRun);
         } else if (state.repoKey && state.runId) {
           state.status = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`);
-          const events = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500`);
+          const events = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500&tail=1`);
           addEvents(events.events || []);
+          mergeSourceCursors(events.sourceCursors || {});
+          await refreshProjection();
           render();
         }
       } catch (error) {
@@ -1431,6 +1569,7 @@
         setChip("streamChip", "run error", "warn");
       });
     });
+    $("leaderRunMode").addEventListener("change", renderLeaderInput);
     $("latestButton").addEventListener("click", () => {
       selectLatestRun().catch(error => {
         console.error(error);

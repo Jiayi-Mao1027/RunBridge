@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from .adapters import OuterLeaderAdapter, build_outer_leader_adapter
 
 
 HOST_EVENT_SCHEMA_VERSION = "outer_sdk_host_event.v1"
+PAYLOAD_TEXT_LIMIT = 2000
+REPORT_TEXT_LIMIT = 20000
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +62,10 @@ class OuterSdkHost:
     ) -> None:
         self.config = config
         self.adapter = adapter or build_outer_leader_adapter(config)
+        self.started_at = _now_iso()
+        self.host_instance_id = f"outer_host_{uuid.uuid4().hex[:12]}"
+        self.default_run_id = _new_run_id()
+        self._activate_default_run("outer_host_started")
 
     def handle_user_input(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = self._normalize_input(payload)
@@ -99,6 +106,8 @@ class OuterSdkHost:
                 "mode": "outer_sdk_host",
                 "adapter": self.adapter.name,
                 "run_id": request["run_id"],
+                "default_run_id": self.default_run_id,
+                "host_instance_id": self.host_instance_id,
                 "repo_key": request["repo_key"],
                 "main_session_id": request["main_session_id"],
                 "input_kind": request["input_kind"],
@@ -117,7 +126,7 @@ class OuterSdkHost:
     def status(self, *, repo_key: str | None = None, run_id: str | None = None) -> dict[str, Any]:
         resolved_repo_key = repo_key or self._repo_key()
         runs_root = get_repo_runtime_root(self.config.control_root, resolved_repo_key)
-        run = run_id or _latest_run_id(runs_root)
+        run = run_id or self.default_run_id or _latest_run_id(runs_root)
         snapshot = load_json_file(runs_root / run / "runtime_snapshot.json", default={}) if run else {}
         return {
             "schema_version": "outer_sdk_host_status.v1",
@@ -125,6 +134,9 @@ class OuterSdkHost:
             "adapter": self.adapter.name,
             "repo_key": resolved_repo_key,
             "run_id": run,
+            "default_run_id": self.default_run_id,
+            "host_instance_id": self.host_instance_id,
+            "started_at": self.started_at,
             "runtime_runs_root": str(runs_root),
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
         }
@@ -136,7 +148,10 @@ class OuterSdkHost:
         if not text:
             raise ValueError("outer host input requires text")
         repo_key = str(payload.get("repo_key") or payload.get("repoKey") or self._repo_key()).strip()
-        run_id = str(payload.get("run_id") or payload.get("runId") or "").strip() or _new_run_id()
+        if _truthy(payload.get("start_new_run") or payload.get("startNewRun")):
+            self.default_run_id = _new_run_id()
+            self._activate_default_run("outer_host_default_run_rotated")
+        run_id = str(payload.get("run_id") or payload.get("runId") or "").strip() or self.default_run_id
         main_session_id = str(
             payload.get("main_session_id")
             or payload.get("mainSessionId")
@@ -196,6 +211,28 @@ class OuterSdkHost:
             repo_key=repo_key,
             runtime_runs_root=runs_root,
             persist=True,
+        )
+
+    def _activate_default_run(self, event_kind: str) -> None:
+        repo_key = self._repo_key()
+        update_active_run_registry(
+            self.config.control_root,
+            repo_key=repo_key,
+            repo_root=str(self.config.repo_root) if self.config.repo_root else None,
+            run_id=self.default_run_id,
+            status="running",
+        )
+        self._write_host_event(
+            event_kind,
+            {
+                "run_id": self.default_run_id,
+                "repo_key": repo_key,
+                "host_instance_id": self.host_instance_id,
+                "default_run_id": self.default_run_id,
+                "main_session_id": self.config.default_main_session_id,
+                "started_at": self.started_at,
+                "safe_preview": f"{event_kind}:{self.default_run_id}",
+            },
         )
 
     def _write_host_event(self, event_kind: str, payload: dict[str, Any]) -> None:
@@ -333,7 +370,7 @@ def _safe_preview(value: Any) -> str:
 
 
 def _bounded_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    return _bound(payload)
+    return _bound(payload, path=())
 
 
 def _payload_keys(payload: dict[str, Any]) -> list[str]:
@@ -342,16 +379,48 @@ def _payload_keys(payload: dict[str, Any]) -> list[str]:
     return sorted(str(key) for key in payload.keys())[:20]
 
 
-def _bound(value: Any, depth: int = 0) -> Any:
+def _bound(value: Any, depth: int = 0, path: tuple[str, ...] = ()) -> Any:
     if depth > 8:
         return "<max-depth>"
     if isinstance(value, str):
-        return value[:2000]
+        return value[:_payload_text_limit(path)]
     if isinstance(value, dict):
-        return {str(key)[:200]: _bound(item, depth + 1) for key, item in list(value.items())[:80]}
+        return {str(key)[:200]: _bound(item, depth + 1, (*path, str(key))) for key, item in list(value.items())[:80]}
     if isinstance(value, list):
-        return [_bound(item, depth + 1) for item in value[:80]]
+        return [_bound(item, depth + 1, (*path, str(index))) for index, item in enumerate(value[:80])]
     return value
+
+
+def _payload_text_limit(path: tuple[str, ...]) -> int:
+    if _is_report_summary_path(path):
+        return _env_int("BRIDGE_OUTER_SDK_REPORT_TEXT_LIMIT", REPORT_TEXT_LIMIT, minimum=PAYLOAD_TEXT_LIMIT, maximum=100000)
+    return PAYLOAD_TEXT_LIMIT
+
+
+def _is_report_summary_path(path: tuple[str, ...]) -> bool:
+    if len(path) < 4 or path[-1] != "summary":
+        return False
+    return path[-3] == "reports" and path[-4] in {"leader_result", "leaderResult"}
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "new"}
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name)
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+    else:
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def _now_iso() -> str:

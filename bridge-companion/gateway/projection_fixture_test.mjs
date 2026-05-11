@@ -13,7 +13,7 @@ process.env.BRIDGE_RUNTIME_PROJECTS_ROOT = projectsRoot;
 process.env.BRIDGE_SESSION_OBSERVER_ROOT = path.join(tmpRoot, "session_observer");
 process.env.BRIDGE_RUNTIME_REGISTRY_ROOT = path.join(tmpRoot, "registry");
 
-const { buildProjection, submitLeaderInput } = await import("./server.mjs");
+const { buildProjection, filterEvents, redactForResponse, submitLeaderInput } = await import("./server.mjs");
 
 try {
   await mkdir(runRoot, { recursive: true });
@@ -119,6 +119,53 @@ try {
     runtime_event: { authority: "source", event_id: "evt_outer_result" },
     sequence: 1
   });
+  await appendJsonl(path.join(runRoot, "sdk_stream_events.jsonl"), {
+    timestamp: "2026-05-11T00:00:04.500Z",
+    event_type: "ResultMessage",
+    sdk_message_type: "ResultMessage",
+    session_id: "outer-main",
+    status: "succeeded",
+    result: "leader reported runtime status"
+  });
+  await appendJsonl(path.join(runRoot, "sdk_stream_events.jsonl"), {
+    timestamp: "2026-05-11T00:00:05.000Z",
+    event_type: "ResultMessage",
+    sdk_message_type: "ResultMessage",
+    session_id: "outer-main",
+    status: "succeeded",
+    result: "SafeDPO and SafeOPD latest project status summary"
+  });
+  const longLeaderPrefix = "long duplicate leader report ".repeat(12).slice(0, 260);
+  const longLeaderReport = `${longLeaderPrefix} full-tail-marker`;
+  await appendJsonl(path.join(runRoot, "outer_host_events.jsonl"), {
+    schema_version: "outer_sdk_host_event.v1",
+    timestamp: "2026-05-11T00:00:06.000Z",
+    event_kind: "outer_leader_result",
+    source: "outer_sdk_host",
+    authority: "source",
+    run_id: runId,
+    repo_key: repoKey,
+    payload: {
+      leader_result: {
+        status: "succeeded",
+        handled_by: "claude-agent-sdk",
+        reports: [{ summary: longLeaderPrefix }],
+        artifact_refs: [],
+        evidence: {},
+        error_or_null: null,
+        cleanup_required: false
+      }
+    },
+    sequence: 2
+  });
+  await appendJsonl(path.join(runRoot, "sdk_stream_events.jsonl"), {
+    timestamp: "2026-05-11T00:00:06.500Z",
+    event_type: "ResultMessage",
+    sdk_message_type: "ResultMessage",
+    session_id: "outer-main",
+    status: "succeeded",
+    result: longLeaderReport
+  });
 
   const projection = await buildProjection(repoKey, runId);
   assert.equal(projection.schemaVersion, "companion_projection.v1");
@@ -129,8 +176,30 @@ try {
   assert.ok(projection.liveToolCards.some(card => card.toolName === "Read"));
   assert.equal(projection.completionChecklist.validatedBy, "completion_validator.v1");
   assert.ok(projection.leaderReportCards.some(card => card.reportStatus === "succeeded" && card.handledBy === "claude-agent-sdk"));
+  assert.equal(projection.leaderReportCards.filter(card => card.summary === "leader reported runtime status").length, 1);
+  assert.ok(projection.leaderReportCards.some(card => card.summary.includes("SafeDPO and SafeOPD")));
+  assert.ok(projection.leaderReportCards.some(card => card.summary.includes("full-tail-marker")));
+  const longReportText = `${"report-body ".repeat(900)}report-tail-marker`;
+  const redactedProjection = redactForResponse({
+    leaderReportCards: [{ summary: longReportText }],
+    rawLine: longReportText
+  });
+  assert.ok(redactedProjection.leaderReportCards[0].summary.includes("report-tail-marker"));
+  assert.ok(redactedProjection.rawLine.endsWith("...<truncated>"));
+  const redactedInputResponse = redactForResponse({
+    leader_result: { reports: [{ summary: longReportText }] }
+  });
+  assert.ok(redactedInputResponse.leader_result.reports[0].summary.includes("report-tail-marker"));
   assert.ok(projection.semanticCoverageMatrix.some(row => row.disposition === "completed"));
   assert.ok(projection.rawJsonRefs.every(ref => ref.sourceAuthority !== "authoritative"));
+  const syntheticEvents = Array.from({ length: 605 }, (_, index) => ({ seq: index + 1, eventId: `evt_${index + 1}` }));
+  const initialTail = filterEvents(syntheticEvents, new URLSearchParams("limit=500&tail=1"));
+  assert.equal(initialTail.events[0].seq, 106);
+  assert.equal(initialTail.events.at(-1).seq, 605);
+  const cursorPage = filterEvents(syntheticEvents, new URLSearchParams("after=600&limit=10&tail=1"));
+  assert.equal(cursorPage.events[0].seq, 601);
+  const emptyCursorTail = filterEvents(syntheticEvents, new URLSearchParams("afterCursor={}&limit=5&tail=1"));
+  assert.equal(emptyCursorTail.events[0].seq, 601);
   const disabledInput = await submitLeaderInput({ text: "hello" });
   assert.equal(disabledInput.accepted, false);
   assert.equal(disabledInput.error, "outer_host_not_configured");

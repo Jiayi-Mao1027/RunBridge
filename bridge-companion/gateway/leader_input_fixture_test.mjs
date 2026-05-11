@@ -2,11 +2,30 @@ import assert from "node:assert/strict";
 import http from "node:http";
 
 let captured = null;
+let statusCaptured = null;
 const server = http.createServer((req, res) => {
   let body = "";
   req.setEncoding("utf8");
   req.on("data", chunk => { body += chunk; });
   req.on("end", () => {
+    if (req.method === "GET" && req.url === "/v1/status") {
+      statusCaptured = {
+        method: req.method,
+        url: req.url,
+        token: req.headers["x-bridge-outer-host-token"] || ""
+      };
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        schema_version: "outer_sdk_host_status.v1",
+        mode: "outer_sdk_host",
+        adapter: "fixture",
+        repo_key: "repo_fixture",
+        run_id: "run_latest",
+        default_run_id: "run_host_default",
+        host_instance_id: "outer_host_fixture"
+      }));
+      return;
+    }
     captured = {
       method: req.method,
       url: req.url,
@@ -30,7 +49,11 @@ process.env.BRIDGE_OUTER_HOST_URL = `http://127.0.0.1:${port}`;
 process.env.BRIDGE_OUTER_HOST_TOKEN = "fixture-token";
 
 try {
-  const { submitLeaderInput } = await import(`./server.mjs?leader-input-fixture=${Date.now()}`);
+  const { outerHostStatus, submitLeaderInput } = await import(`./server.mjs?leader-input-fixture=${Date.now()}`);
+  const status = await outerHostStatus();
+  assert.equal(status.default_run_id, "run_host_default");
+  assert.equal(statusCaptured.method, "GET");
+  assert.equal(statusCaptured.token, "fixture-token");
   const response = await submitLeaderInput({
     text: "continue the current run",
     repo_key: "repo_fixture",
