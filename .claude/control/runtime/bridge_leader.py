@@ -3,11 +3,14 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable
 import uuid
 
-from claude_cli_executor import claude_cli_team_executor, simulated_team_executor
+from artifact_refs import normalize_artifact_refs
+from bridge.executors import BridgeExecutionRequest, bridge_executor_from_env
+from completion_validator import completion_succeeded, validate_bridge_completion
 from workflow_runtime import dispatch_workflow_event
 
 
@@ -26,7 +29,7 @@ def execute_bridge_window(
     packet: dict[str, Any],
     *,
     runtime_runs_root: str | Path | None = None,
-    team_executor: TeamExecutor | None = None,
+    team_executor: Any | None = None,
     persist: bool = True,
     bridge_leader_id: str = "bridge-leader",
 ) -> dict[str, Any]:
@@ -34,7 +37,7 @@ def execute_bridge_window(
         control_root=control_root,
         runtime_runs_root=runtime_runs_root,
         packet=packet,
-        team_executor=team_executor or default_team_executor(),
+        team_executor=team_executor if team_executor is not None else bridge_executor_from_env(),
         persist=persist,
         bridge_leader_id=bridge_leader_id,
     )
@@ -48,7 +51,7 @@ class BridgeLeaderRuntime:
         control_root: str | Path,
         runtime_runs_root: str | Path | None,
         packet: dict[str, Any],
-        team_executor: TeamExecutor,
+        team_executor: Any,
         persist: bool,
         bridge_leader_id: str,
     ) -> None:
@@ -215,7 +218,11 @@ class BridgeLeaderRuntime:
             "team_id": self.team_id,
             "task_id": self.task_id,
         }
-        result = self.team_executor(execution_input)
+        executor = self.team_executor
+        if hasattr(executor, "execute"):
+            result = executor.execute(BridgeExecutionRequest.from_execution_input(execution_input), event_sink=self._executor_event)
+        else:
+            result = executor(execution_input)
         if not isinstance(result, dict):
             raise BridgeExecutionError("task_complete", "team executor must return a dict")
         status = result.get("status")
@@ -228,6 +235,11 @@ class BridgeLeaderRuntime:
             raise BridgeExecutionError("task_complete", "team executor result requires reports for non-failed status")
         if not isinstance(result.get("artifact_refs"), list):
             result["artifact_refs"] = []
+        result["artifact_refs"] = normalize_artifact_refs(
+            result.get("artifact_refs", []),
+            context=self._artifact_context(),
+            base_dir=_project_root(),
+        )
         return result
 
     def _team_waiting(self, execution: dict[str, Any]) -> None:
@@ -269,9 +281,9 @@ class BridgeLeaderRuntime:
         )
 
     def _complete_task(self, execution: dict[str, Any]) -> bool:
-        checks = _completion_checks(self.packet.get("completion_contract", {}), execution)
+        checks = self._completion_validation(execution)
         self._event("artifacts_ready", team_id=self.team_id, task_id=self.task_id, tool_name="task_complete", payload={"artifact_refs": execution.get("artifact_refs", [])})
-        if not _checks_satisfied(checks):
+        if not completion_succeeded(checks):
             return False
         self._event(
             "completion_contract_satisfied",
@@ -290,7 +302,7 @@ class BridgeLeaderRuntime:
         return True
 
     def _reject_completion(self, execution: dict[str, Any]) -> None:
-        checks = _completion_checks(self.packet.get("completion_contract", {}), execution)
+        checks = self._completion_validation(execution)
         missing = list(checks.get("missing_outputs", [])) + list(checks.get("missing_artifacts", [])) + list(checks.get("failed_validations", []))
         self._event(
             "completion_contract_rejected",
@@ -306,6 +318,51 @@ class BridgeLeaderRuntime:
                 "completion_checks": checks,
                 "missing_contract_items": missing,
             },
+        )
+
+    def _completion_validation(self, execution: dict[str, Any]) -> dict[str, Any]:
+        validation = validate_bridge_completion(
+            self.packet,
+            execution,
+            context=self._artifact_context(),
+            control_root=self.control_root,
+            base_dir=_project_root(),
+        )
+        normalized_refs = validation.get("artifact_refs_normalized")
+        if isinstance(normalized_refs, list):
+            execution["artifact_refs"] = normalized_refs
+        return validation
+
+    def _artifact_context(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "main_session_id": self.main_session_id,
+            "sub_session_id": self.sub_session_id,
+            "bridge_window_id": self.bridge_window_id,
+            "team_id": self.team_id,
+            "task_id": self.task_id,
+            "agent_id": self.bridge_leader_id,
+            "event_id": self.event_ids[-1] if self.event_ids else None,
+            "timestamp": _now_iso(),
+        }
+
+    def _executor_event(
+        self,
+        event_kind: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        agent_id: str | None = None,
+        agent_type: str = "bridge-leader",
+        tool_name: str | None = None,
+    ) -> dict[str, Any]:
+        return self._event(
+            event_kind,
+            team_id=self.team_id,
+            task_id=self.task_id,
+            agent_id=agent_id,
+            agent_type=agent_type,
+            tool_name=tool_name,
+            payload=payload,
         )
 
     def _fail_task(self, execution: dict[str, Any], *, event_kind: str) -> None:
@@ -458,12 +515,12 @@ class BridgeLeaderRuntime:
 
 
 def default_team_executor() -> TeamExecutor:
-    import os
+    executor = bridge_executor_from_env()
+    return lambda execution_input: executor.execute(BridgeExecutionRequest.from_execution_input(execution_input))
 
-    mode = os.environ.get("BRIDGE_EXECUTOR", "claude-cli").strip().lower()
-    if mode in {"simulate", "simulated", "smoke"}:
-        return simulated_team_executor
-    return claude_cli_team_executor
+
+def _project_root() -> Path:
+    return Path(os.environ.get("BRIDGE_PROJECT_ROOT") or Path.cwd()).resolve()
 
 
 def _completion_checks(contract: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:

@@ -19,8 +19,23 @@ type TeammateId = string
 type AgentId = string
 type ToolUseId = string
 type EventId = string
-type ArtifactRef = string
 type Timestamp = iso8601_string
+
+struct ArtifactRef:
+    schema_version: "artifact_ref.v1"
+    ref_type: string
+    id: string
+    path: string | null
+    sha256: string | null
+    producer:
+        agent_id: AgentId | null
+        event_id: EventId | null
+    created_at: Timestamp
+    safe_preview: string
+    run_id: RunId | null
+    bridge_window_id: BridgeWindowId | null
+    team_id: TeamId | null
+    task_id: TaskId | null
 
 enum AgentType:
     main-leader
@@ -67,6 +82,40 @@ enum FailureStage:
 # =====================================================
 # 2. Event envelope
 # =====================================================
+
+enum RuntimeEventSource:
+    outer_sdk
+    inner_sdk
+    cli
+    hook
+    runtime
+    companion
+
+enum RuntimeEventAuthority:
+    authoritative
+    source
+    observed
+    derived
+    projection
+
+struct RuntimeEventEnvelope:
+    schema_version: "runtime_event_envelope.v1"
+    event_id: EventId
+    run_id: RunId | null
+    session_id: string | null
+    window_id: BridgeWindowId | null
+    team_id: TeamId | null
+    task_id: TaskId | null
+    agent_id: AgentId | null
+    phase: string | null
+    event_kind: string
+    source: RuntimeEventSource
+    seq: int | null
+    timestamp: Timestamp
+    caused_by: EventId | null
+    payload_ref: string | null
+    safe_preview: string
+    authority: RuntimeEventAuthority
 
 struct RuntimeEvent:
     event_id: EventId

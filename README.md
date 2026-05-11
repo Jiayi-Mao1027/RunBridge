@@ -150,11 +150,19 @@ Per run, the runtime writes:
 
 - `run_ledger.json`: authoritative mutable run state
 - `runtime_snapshot.json`: compact routing and recovery truth for leaders and tools
-- `event_log.jsonl`: raw workflow events
+- `event_log.jsonl`: canonical authoritative workflow events; each persisted record also carries `runtime_event` (`runtime_event_envelope.v1`)
 - `check_ledger.jsonl`: check decisions and reasons
 - `update_ledger.jsonl`: persisted update results
 - `transitions.jsonl`: lifecycle transition facts
 - `main_leader_inbox.jsonl`: notifications for the main leader
+
+Runtime data is split into three layers:
+
+- Authoritative state: canonical event log, run ledger, task/window lifecycle transitions, indexes, and compact snapshot refs used for recovery/routing.
+- Artifacts: BridgePacket, BridgeResult, teammate reports, completion reports, manifests, tool outputs, evidence files, and structured `artifact_ref.v1` records with producer/run/window/task/hash metadata.
+- Projections: Companion timeline, cards, brief text, trajectory views, and other UI views. These can be deleted and rebuilt from authoritative state plus artifacts; they are never a main-leader recovery source.
+
+Stream and observer inputs should normalize into `runtime_event_envelope.v1` before becoming runtime facts or projections. The envelope records source (`outer_sdk`, `inner_sdk`, `cli`, `hook`, `runtime`, `companion`) and authority (`authoritative`, `source`, `observed`, `derived`, `projection`) so UI rendering does not blur runtime truth with observations.
 
 `runtime_snapshot.json` is intentionally compact. It is a routing and recovery view for the main leader, not a place for full reports, tool logs, full evidence, or complete historical bindings. Large details remain in ledgers and observer streams, and the snapshot carries `snapshot_refs`, counts, and short previews so the leader can open details only when needed.
 
@@ -350,7 +358,13 @@ For smoke-only bridge execution:
 $env:BRIDGE_EXECUTOR='simulate'
 ```
 
-Without `BRIDGE_EXECUTOR=simulate`, the bridge executor uses a nested non-interactive Claude Code call through `claude -p`.
+Bridge execution now goes through the `BridgeExecutor` interface:
+
+- `BRIDGE_EXECUTOR=cli` (default): existing Claude CLI `stream-json` subprocess path, retained as fallback/debug/canary.
+- `BRIDGE_EXECUTOR=simulate`: deterministic smoke executor using the same interface.
+- `BRIDGE_EXECUTOR=sdk`: SDK-in-SDK migration skeleton. It reports `SdkExecutorNotImplemented` until the inner SDK session is wired.
+
+Without `BRIDGE_EXECUTOR=simulate` or `BRIDGE_EXECUTOR=sdk`, the bridge executor uses the existing nested non-interactive Claude Code call through `claude -p`.
 
 ## Notes
 

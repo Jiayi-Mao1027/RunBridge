@@ -8,6 +8,7 @@ from typing import Any
 import uuid
 
 from loader import ControlPaths, load_json_file
+from policy_compiler import compile_policy
 from repo_runtime import get_repo_runtime_root
 from workflow_runtime import SCHEMA_VERSION, build_runtime_snapshot
 
@@ -157,9 +158,7 @@ def decide_next_bridge_packet(
 
 
 def load_phase_contracts(control_root: str | Path) -> dict[str, Any]:
-    path = Path(control_root).expanduser().resolve() / "policy" / "phase_contracts.json"
-    payload = load_json_file(path, default={}) or {}
-    return payload if isinstance(payload, dict) else {}
+    return compile_policy(control_root).phase_contracts
 
 
 def build_bridge_instruction_packet_for_this_invoke(

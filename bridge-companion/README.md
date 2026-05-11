@@ -57,6 +57,11 @@ Optional overrides:
 - `BRIDGE_SESSION_OBSERVER_ROOT`: path to `.claude/runtime_state/session_observer`
 - `BRIDGE_COMPANION_PORT`: default `8787`
 - `BRIDGE_COMPANION_STREAM_INTERVAL_MS`: default `750`
+- `BRIDGE_COMPANION_TOKEN`: optional bearer/query/header token required for `/api/*`
+- `BRIDGE_COMPANION_ORIGIN`: optional CORS allow origin; default `http://127.0.0.1:<port>`
+- `BRIDGE_COMPANION_ALLOW_PROJECT_SECRET=1`: allow loading `bridge-companion/key.json` for `/api/brief`. By default the gateway only uses `BRIDGE_BRIEF_API_KEY`.
+
+The gateway is a read-only projection layer. It redacts common token/password/secret patterns before responses and only serves files from the configured runtime roots and the Companion static directory.
 
 ## Read-Only API
 
@@ -107,6 +112,8 @@ Run event streams emit normalized events with:
 - `rawRef`
 
 `eventId` is stable for a source JSONL line and is used for UI dedupe. `seq` is only a display/back-compat ordinal. Reconnect should prefer `afterCursor`, which is a map of `sourceFile -> lineOffset`; `Last-Event-ID` / `afterId` are also accepted.
+
+When source records carry `runtime_event`, the UI treats that as the canonical normalized envelope. Companion records must keep `authority=projection` or `authority=observed`; they are never authoritative runtime state.
 
 The SSE path uses a per-source JSONL tailer after the initial backfill. It tracks byte and line cursors per source file, so new observer lines can reach the UI without repeatedly re-reading whole long logs.
 

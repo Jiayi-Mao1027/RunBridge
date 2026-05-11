@@ -7,6 +7,7 @@ import re
 
 from loader import ControlPaths
 from persist import append_jsonl, sanitize_json_value
+from runtime_event_envelope import normalize_runtime_event
 
 
 COMPANION_EVENT_KINDS = {
@@ -144,6 +145,13 @@ def _base(event: Any) -> dict[str, Any]:
         "agent_type": event.agent_type,
         "tool_name": event.tool_name,
         "tool_use_id": event.tool_use_id,
+        "runtime_event": normalize_runtime_event(
+            event,
+            source="runtime",
+            authority="projection",
+            payload_ref=f"event_log.jsonl:{event.event_id}",
+            safe_preview=event.event_kind,
+        ),
     }
 
 
@@ -283,15 +291,30 @@ def _artifacts_from_event(event: Any, payload: dict[str, Any]) -> list[dict[str,
     if not isinstance(artifact_refs, list):
         bridge_result = payload.get("bridge_result") if isinstance(payload.get("bridge_result"), dict) else {}
         artifact_refs = bridge_result.get("artifact_refs") if isinstance(bridge_result.get("artifact_refs"), list) else []
-    return [
-        {
-            "artifact_ref": str(ref),
-            "artifact_type": "path_or_ref",
-            "summary": f"artifact recorded from {event.event_kind}",
-            "status": "recorded",
-        }
-        for ref in artifact_refs
-    ]
+    result = []
+    for ref in artifact_refs:
+        if isinstance(ref, dict):
+            result.append(
+                {
+                    "artifact_ref": ref,
+                    "artifact_id": ref.get("id"),
+                    "artifact_type": ref.get("ref_type") or "artifact_ref",
+                    "path": ref.get("path"),
+                    "sha256": ref.get("sha256"),
+                    "summary": ref.get("safe_preview") or f"artifact recorded from {event.event_kind}",
+                    "status": "recorded",
+                }
+            )
+        else:
+            result.append(
+                {
+                    "artifact_ref": str(ref),
+                    "artifact_type": "path_or_ref",
+                    "summary": f"artifact recorded from {event.event_kind}",
+                    "status": "recorded",
+                }
+            )
+    return result
 
 
 def _completion_check_from_event(event: Any, payload: dict[str, Any]) -> dict[str, Any] | None:

@@ -15,6 +15,7 @@ from typing import Any
 
 from output_guardrails import validate_bridge_result
 from persist import append_jsonl, sanitize_json_value
+from runtime_event_envelope import normalize_stream_record
 
 
 BRIDGE_RESULT_SCHEMA = {
@@ -22,7 +23,7 @@ BRIDGE_RESULT_SCHEMA = {
     "properties": {
         "status": {"type": "string", "enum": ["succeeded", "failed", "partial", "partial_or_failed"]},
         "reports": {"type": "array", "items": {"type": "object"}},
-        "artifact_refs": {"type": "array", "items": {"type": "string"}},
+        "artifact_refs": {"type": "array", "items": {"type": ["string", "object"]}},
         "evidence": {"type": ["object", "null"]},
         "error_or_null": {"type": ["object", "null"]},
         "cleanup_required": {"type": "boolean"},
@@ -265,13 +266,21 @@ def simulated_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
         field: manifest_defaults.get(field, "not_applicable: simulated executor")
         for field in manifest_fields
     } if manifest_required else {}
+    coverage_items = task_spec.get("instruction_coverage_checklist") if isinstance(task_spec.get("instruction_coverage_checklist"), list) else []
+    instruction_coverage = {str(item): "completed" for item in coverage_items if str(item)}
+    if not instruction_coverage:
+        instruction_coverage = {"simulated completion": "completed"}
     return {
         "status": "succeeded",
         "reports": [
             {
                 "summary": f"Simulated completion for {task_spec.get('task_subject') or execution_input['task_id']}",
                 "task_description": task_spec.get("task_description"),
-                "instruction_coverage": {"simulated completion": "completed"},
+                "instruction_coverage": instruction_coverage,
+                "semantic_identity_resolution": {
+                    "disposition": "not_applicable",
+                    "basis": "simulated executor",
+                },
                 "evidence_refs": [f"task:{execution_input['task_id']}"],
                 **({"manifest required fields checklist": manifest_checklist} if manifest_required else {}),
             }
@@ -522,6 +531,14 @@ def _emit_sdk_stream_event(
         record["monotonic_index"] = _SDK_STREAM_MONOTONIC_INDEX
         if record["sequence"] is None:
             record["sequence"] = record["monotonic_index"]
+        record["runtime_event"] = normalize_stream_record(
+            record,
+            source="cli",
+            authority="observed",
+            event_kind=event_type,
+            seq=record.get("sequence"),
+            payload_ref="sdk_stream_events.jsonl",
+        )
         for path in _sdk_stream_event_paths(project_root, execution_input):
             append_jsonl(path, record)
 

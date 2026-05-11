@@ -597,6 +597,7 @@ def emit_companion_event(kind: str, payload: dict[str, Any]) -> None:
         "sequence": payload.get("sequence") or sequence,
         "monotonic_index": payload.get("monotonic_index") or sequence,
     }
+    record["runtime_event"] = observer_runtime_event(kind, record, source="hook", authority="observed")
     append_jsonl(event_path, record)
     companion_path = run_root / "companion_events.jsonl"
     companion_sequence = next_jsonl_sequence(companion_path)
@@ -624,6 +625,7 @@ def emit_session_observer_event(kind: str, payload: dict[str, Any]) -> None:
         "sequence": payload.get("sequence") or sequence,
         "monotonic_index": payload.get("monotonic_index") or sequence,
     }
+    record["runtime_event"] = observer_runtime_event(kind, record, source="hook", authority="observed")
     append_jsonl(event_path, record)
     if kind != "session_events":
         session_event_path = root / "session_events.jsonl"
@@ -1144,6 +1146,44 @@ def next_jsonl_sequence(path: Path) -> int:
         return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()) + 1
     except Exception:
         return 1
+
+
+def observer_runtime_event(kind: str, record: dict[str, Any], *, source: str, authority: str) -> dict[str, Any]:
+    try:
+        runtime_path = str(runtime_root())
+        if runtime_path not in sys.path:
+            sys.path.insert(0, runtime_path)
+        from runtime_event_envelope import normalize_stream_record
+
+        return normalize_stream_record(
+            record,
+            source=source,
+            authority=authority,
+            event_kind=str(record.get("event_type") or kind),
+            seq=record.get("sequence"),
+            payload_ref=f"{kind}.jsonl",
+        )
+    except Exception:
+        session_id = record.get("session_id") or record.get("sub_session_id") or record.get("main_session_id")
+        return {
+            "schema_version": "runtime_event_envelope.v1",
+            "event_id": record.get("event_id") or record.get("source_event_id"),
+            "run_id": record.get("run_id"),
+            "session_id": session_id,
+            "window_id": record.get("bridge_window_id"),
+            "team_id": record.get("team_id"),
+            "task_id": record.get("task_id"),
+            "agent_id": record.get("agent_id"),
+            "phase": record.get("phase"),
+            "event_kind": str(record.get("event_type") or kind),
+            "source": source,
+            "seq": record.get("sequence"),
+            "timestamp": record.get("timestamp") or now_iso(),
+            "caused_by": record.get("parent_event_id") or record.get("source_event_id"),
+            "payload_ref": f"{kind}.jsonl",
+            "safe_preview": redact_observer_text(str(record.get("summary") or record.get("message_preview") or kind))[:700],
+            "authority": authority,
+        }
 
 
 def redact_observer_text(text: str) -> str:

@@ -7,7 +7,7 @@
   "properties": {
     "status": {"type": "string", "enum": ["succeeded", "failed", "partial", "partial_or_failed"]},
     "reports": {"type": "array", "items": {"type": "object"}},
-    "artifact_refs": {"type": "array", "items": {"type": "string"}},
+    "artifact_refs": {"type": "array", "items": {"type": ["string", "object"]}},
     "evidence": {"type": ["object", "null"]},
     "error_or_null": {"type": ["object", "null"]},
     "cleanup_required": {"type": "boolean"},

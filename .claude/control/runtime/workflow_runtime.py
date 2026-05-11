@@ -11,10 +11,12 @@ from loader import ControlPaths, load_json_file, load_jsonl
 from persist import append_jsonl, atomic_write_json, sanitize_json_value
 from companion_observer import observe_workflow_event
 from checkpoint_store import write_event_checkpoint
+from completion_validator import completion_succeeded, validate_bridge_completion
 from output_guardrails import validate_bridge_packet as guardrail_validate_bridge_packet
 from output_guardrails import validate_bridge_result, validate_completion_report
 from repo_runtime import ensure_repo_registered, get_repo_runtime_root, infer_repo_key_from_runs_root, repo_key_for_paths, update_active_run_registry
 from retry_policy import decide_retry, load_retry_policies, packet_hash as retry_packet_hash
+from runtime_event_envelope import normalize_runtime_event
 from trajectory import record_guardrail_trajectory_step, record_workflow_trajectory_step
 
 
@@ -840,9 +842,36 @@ def check_event(
         if not guardrail.get("valid"):
             reasons.append("completion_report_guardrail_failed")
             derived_facts["guardrail_validation"] = guardrail
+        completion_validation = validate_bridge_completion(
+            {
+                "completion_contract": contract if isinstance(contract, dict) else {},
+                "task_spec": normalized_payload.get("task_spec") if isinstance(normalized_payload.get("task_spec"), dict) else {},
+                "report_contract": normalized_payload.get("report_contract") if isinstance(normalized_payload.get("report_contract"), dict) else {},
+                "target_phase": snapshot.get("current_phase"),
+            },
+            {
+                "status": "succeeded",
+                "reports": normalized_payload.get("reports", []),
+                "artifact_refs": normalized_payload.get("artifact_refs", []),
+                "evidence": normalized_payload.get("completion_evidence") or {},
+                "error_or_null": None,
+                "cleanup_required": False,
+            },
+            context={
+                "run_id": event.run_id,
+                "bridge_window_id": event.bridge_window_id,
+                "team_id": event.team_id,
+                "task_id": event.task_id,
+                "agent_id": event.agent_id,
+                "event_id": event.event_id,
+                "timestamp": event.timestamp,
+            },
+            control_root=control_root,
+        )
+        derived_facts["completion_validation"] = completion_validation
         if not isinstance(contract, dict) or not contract:
             reasons.append("completion_contract_missing")
-        elif not _completion_contract_satisfied(contract, normalized_payload, checks):
+        elif not _completion_contract_satisfied(contract, normalized_payload, checks) or not completion_succeeded(completion_validation):
             reasons.append("completion_contract_not_satisfied")
         if not normalized_payload.get("completion_evidence") and not normalized_payload.get("reports") and not normalized_payload.get("artifact_refs"):
             reasons.append("completion_evidence_missing")
@@ -1153,7 +1182,18 @@ def persist_workflow_result(
     notify_path = run_root / "main_leader_inbox.jsonl"
     snapshot_path = run_root / "runtime_snapshot.json"
 
-    append_jsonl(event_path, event.as_record())
+    event_sequence = _next_jsonl_sequence(event_path)
+    event_record = event.as_record()
+    event_record["runtime_event"] = normalize_runtime_event(
+        event,
+        source="runtime",
+        authority="authoritative",
+        seq=event_sequence,
+        phase=snapshot.get("current_phase"),
+        payload_ref=f"event_log.jsonl:{event.event_id}",
+        safe_preview=event.event_kind,
+    )
+    append_jsonl(event_path, event_record)
     append_jsonl(
         check_path,
         {
@@ -1219,6 +1259,15 @@ def persist_workflow_result(
 def load_recent_workflow_events(paths: ControlPaths, run_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
     records = load_jsonl(paths.run_root(run_id) / "event_log.jsonl")
     return records[-limit:]
+
+
+def _next_jsonl_sequence(path: Path) -> int:
+    if not path.exists():
+        return 1
+    try:
+        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()) + 1
+    except Exception:
+        return 1
 
 
 def reconcile_workflow_from_ledger(
@@ -1513,7 +1562,7 @@ def _new_bridge_binding(event: WorkflowEvent) -> dict[str, Any]:
 
 
 def _build_transition(event: WorkflowEvent, update_kind: str, check_result: CheckResult, to_status: str) -> dict[str, Any]:
-    return {
+    transition = {
         "schema_version": SCHEMA_VERSION,
         "transition_id": f"wtr_{uuid.uuid4().hex[:16]}",
         "type": to_status,
@@ -1532,6 +1581,15 @@ def _build_transition(event: WorkflowEvent, update_kind: str, check_result: Chec
         "payload": deepcopy(check_result.normalized_payload),
         "timestamp": event.timestamp,
     }
+    transition["runtime_event"] = normalize_runtime_event(
+        event,
+        source="runtime",
+        authority="authoritative",
+        phase=check_result.derived_facts.get("target_phase"),
+        payload_ref=f"transitions.jsonl:{transition['transition_id']}",
+        safe_preview=f"{event.event_kind}->{to_status}",
+    )
+    return transition
 
 
 def _packet_from_event(event: WorkflowEvent) -> dict[str, Any] | None:
@@ -1623,6 +1681,7 @@ def _snapshot_refs(paths: ControlPaths, run_id: str) -> dict[str, str]:
     return {
         "run_ledger": str(run_root / "run_ledger.json"),
         "event_log": str(run_root / "event_log.jsonl"),
+        "canonical_event_log": str(run_root / "event_log.jsonl"),
         "transitions": str(run_root / "transitions.jsonl"),
         "main_leader_inbox": str(run_root / "main_leader_inbox.jsonl"),
         "teammate_reports": str(run_root / "teammate_reports.jsonl"),
@@ -1826,7 +1885,7 @@ def _compact_bridge_result_for_snapshot(result: Any, refs: dict[str, str]) -> di
         "report_count": len(reports),
         "artifact_count": len(artifacts),
         "reports_preview": [_compact_value_for_snapshot(item) for item in reports[:SNAPSHOT_LIST_LIMIT]],
-        "artifact_refs_preview": [_compact_text(str(item)) for item in artifacts[:SNAPSHOT_LIST_LIMIT]],
+        "artifact_refs_preview": [_compact_artifact_ref_for_snapshot(item) for item in artifacts[:SNAPSHOT_LIST_LIMIT]],
         "evidence_summary": _compact_value_for_snapshot(evidence),
         "error_or_null": _compact_value_for_snapshot(error),
         "omitted": {
@@ -1918,6 +1977,18 @@ def _compact_value_for_snapshot(value: Any, *, depth: int = 0) -> Any:
             compact["_omitted_keys"] = omitted_keys
         return compact
     return _compact_text(str(sanitize_json_value(value)))
+
+
+def _compact_artifact_ref_for_snapshot(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            "id": value.get("id"),
+            "ref_type": value.get("ref_type"),
+            "path": _compact_text(str(value.get("path") or "")) if value.get("path") else None,
+            "sha256": value.get("sha256"),
+            "safe_preview": _compact_text(str(value.get("safe_preview") or value.get("id") or "")),
+        }
+    return _compact_text(str(value))
 
 
 def _compact_text(text: str) -> str:

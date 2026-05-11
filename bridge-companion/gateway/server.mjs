@@ -17,6 +17,13 @@ const HOST = process.env.BRIDGE_COMPANION_HOST || "127.0.0.1";
 const STREAM_INTERVAL_MS = Number(process.env.BRIDGE_COMPANION_STREAM_INTERVAL_MS || 750);
 const MAX_EVENT_LIMIT = 1000;
 const DEFAULT_EVENT_LIMIT = 500;
+const RESPONSE_TEXT_LIMIT = 8000;
+const COMPANION_TOKEN = process.env.BRIDGE_COMPANION_TOKEN || "";
+const ACCESS_CONTROL_ALLOW_ORIGIN =
+  process.env.BRIDGE_COMPANION_ORIGIN ||
+  process.env.BRIDGE_COMPANION_ALLOWED_ORIGIN ||
+  process.env.BRIDGE_COMPANION_ALLOWED_ORIGINS?.split(",").map(item => item.trim()).filter(Boolean)[0] ||
+  `http://${HOST}:${PORT}`;
 
 const PROJECTS_ROOT = resolveProjectsRoot();
 const SESSION_OBSERVER_ROOT = process.env.BRIDGE_SESSION_OBSERVER_ROOT
@@ -76,22 +83,56 @@ function sendJson(res, statusCode, body) {
   res.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
-    "access-control-allow-origin": "*",
+    "access-control-allow-origin": ACCESS_CONTROL_ALLOW_ORIGIN,
     "access-control-allow-methods": "GET, HEAD, OPTIONS, POST",
-    "access-control-allow-headers": "content-type"
+    "access-control-allow-headers": "content-type, authorization, x-bridge-companion-token"
   });
-  res.end(JSON.stringify(body, null, 2));
+  res.end(JSON.stringify(redactForResponse(body), null, 2));
 }
 
 function sendText(res, statusCode, body, contentType = "text/plain; charset=utf-8") {
   res.writeHead(statusCode, {
     "content-type": contentType,
     "cache-control": "no-store",
-    "access-control-allow-origin": "*",
+    "access-control-allow-origin": ACCESS_CONTROL_ALLOW_ORIGIN,
     "access-control-allow-methods": "GET, HEAD, OPTIONS, POST",
-    "access-control-allow-headers": "content-type"
+    "access-control-allow-headers": "content-type, authorization, x-bridge-companion-token"
   });
   res.end(body);
+}
+
+function authorizeRequest(req, url) {
+  if (!COMPANION_TOKEN) return true;
+  const auth = String(req.headers.authorization || "");
+  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
+  const headerToken = String(req.headers["x-bridge-companion-token"] || "");
+  const queryToken = String(url.searchParams.get("token") || "");
+  return [bearer, headerToken, queryToken].some(value => value && value === COMPANION_TOKEN);
+}
+
+function redactForResponse(value, depth = 0) {
+  if (depth > 8) return "<max-depth>";
+  if (typeof value === "string") return redactText(value);
+  if (Array.isArray(value)) return value.map(item => redactForResponse(item, depth + 1));
+  if (!value || typeof value !== "object") return value;
+  const result = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (/api[_-]?key|authorization|token|password|secret/i.test(key)) {
+      result[key] = item ? "<redacted>" : item;
+      continue;
+    }
+    result[key] = redactForResponse(item, depth + 1);
+  }
+  return result;
+}
+
+function redactText(value) {
+  let text = String(value || "");
+  text = text.replace(/(api[_-]?key|token|password|secret)(\s*[:=]\s*)(\S+)/gi, "$1$2<redacted>");
+  text = text.replace(/bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer <redacted>");
+  text = text.replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<redacted>");
+  if (text.length > RESPONSE_TEXT_LIMIT) return `${text.slice(0, RESPONSE_TEXT_LIMIT)}...<truncated>`;
+  return text;
 }
 
 function safeSegment(value) {
@@ -685,6 +726,7 @@ function normalizeRunRecord(repoKey, runId, item) {
     rawRef,
     rawLine: item.rawLine,
     parseError: item.parseError || undefined,
+    runtimeEvent: record.runtime_event || undefined,
     raw: record
   };
   if (item.sourceFile === "trajectory.jsonl") {
@@ -1080,7 +1122,9 @@ async function rawRecord(repoKey, runId, sourceFile, sourceOffset) {
 
 async function loadBriefSecret() {
   const fileConfig = await readJsonIfExists(BRIEF_SECRET_PATH, null);
-  const localProjectConfig = await readJsonIfExists(path.join(companionRoot, "key.json"), null);
+  const localProjectConfig = process.env.BRIDGE_COMPANION_ALLOW_PROJECT_SECRET === "1"
+    ? await readJsonIfExists(path.join(companionRoot, "key.json"), null)
+    : null;
   const config = fileConfig || localProjectConfig || {};
   return {
     baseUrl: config.baseUrl || config.base_url || process.env.BRIDGE_BRIEF_BASE_URL || DEFAULT_BRIEF_BASE_URL,
@@ -1210,7 +1254,7 @@ async function parseBody(req) {
 function writeSseEvent(res, eventName, data, id = null) {
   if (id !== null && id !== undefined) res.write(`id: ${id}\n`);
   res.write(`event: ${eventName}\n`);
-  const payload = JSON.stringify(data);
+  const payload = JSON.stringify(redactForResponse(data));
   for (const line of payload.split(/\r?\n/)) {
     res.write(`data: ${line}\n`);
   }
@@ -1252,7 +1296,7 @@ async function streamRun(req, res, repoKey, runId, query) {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-store, no-transform",
     "connection": "keep-alive",
-    "access-control-allow-origin": "*"
+    "access-control-allow-origin": ACCESS_CONTROL_ALLOW_ORIGIN
   });
   const dir = runDir(repoKey, runId);
   let sourceCursor = parseSourceCursor(query.get("afterCursor") || query.get("after_cursor") || "");
@@ -1306,7 +1350,7 @@ async function streamSessionObserver(req, res, query) {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-store, no-transform",
     "connection": "keep-alive",
-    "access-control-allow-origin": "*"
+    "access-control-allow-origin": ACCESS_CONTROL_ALLOW_ORIGIN
   });
   let sourceCursor = parseSourceCursor(query.get("afterCursor") || query.get("after_cursor") || "");
   let lastSeq = Number(query.get("after") || 0);
@@ -1374,6 +1418,10 @@ async function serveStatic(req, res, pathname) {
 async function handleApi(req, res, url) {
   const pathname = url.pathname;
   const parts = pathname.split("/").filter(Boolean);
+  if (!authorizeRequest(req, url)) {
+    sendJson(res, 401, { error: "unauthorized" });
+    return;
+  }
 
   if (pathname === "/api/health") {
     sendJson(res, 200, {
