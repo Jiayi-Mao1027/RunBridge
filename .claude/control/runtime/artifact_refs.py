@@ -110,7 +110,16 @@ def artifact_ref_satisfies(required: str, ref: dict[str, Any]) -> bool:
     key = required.strip().casefold()
     if not key:
         return True
-    haystack = json.dumps(ref, ensure_ascii=False, default=str).casefold().replace("\\", "/")
+    searchable = {
+        "ref_type": ref.get("ref_type"),
+        "id": ref.get("id"),
+        "path": ref.get("path"),
+        "safe_preview": ref.get("safe_preview"),
+    }
+    haystack = json.dumps(searchable, ensure_ascii=False, default=str).casefold().replace("\\", "/")
+    if key in {"artifact", "artifacts"}:
+        ref_type = str(ref.get("ref_type") or "").casefold()
+        return ref_type in {"artifact", "logical"} and "manifest" not in haystack
     if key == "log_manifest":
         return "manifest" in haystack and ("log" in haystack or ref.get("ref_type") == "log_manifest")
     return key in haystack

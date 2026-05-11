@@ -186,6 +186,31 @@
       "timeout_action": "ask_main_leader"
     }
   },
+  "team_planner": {
+    "enabled": true,
+    "force_full_team_markers": ["three-seat", "full team", "chiefmate", "multi-view", "high risk"],
+    "risk_terms": {
+      "ambiguity": ["ambiguous", "clarify", "unclear", "strategy", "plan"],
+      "write_risk": ["delete", "move", "refactor", "rewrite", "migration", "update", "edit", "write", "CLAUDE.md", "README"],
+      "external_fact_dependency": ["latest", "paper", "research", "web", "benchmark"],
+      "failure_recovery_required": ["failed", "partial", "orphan", "recovery", "anomaly"],
+      "semantic_identity_uncertain": ["checkpoint", "dataset", "model", "metric", "prompt", "config"]
+    },
+    "phase_rules": {
+      "l2_advisory": {
+        "reduced_teammates": ["chiefmate-a"],
+        "full_team_risks": ["ambiguity", "external_fact_dependency", "semantic_identity_uncertain"]
+      },
+      "l3_bridge": {
+        "reduced_teammates": ["preflight-initial"],
+        "full_team_risks": ["write_risk", "semantic_identity_uncertain", "external_fact_dependency"]
+      },
+      "l4_anomaly": {
+        "reduced_teammates": ["anomaly-analyst-a"],
+        "full_team_risks": ["failure_recovery_required", "external_fact_dependency"]
+      }
+    }
+  },
   "phases": {
     "l2_advisory": {
       "bridge_tools": ["Agent", "Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch"],

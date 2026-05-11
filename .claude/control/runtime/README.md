@@ -19,9 +19,9 @@ Canonical boundaries:
 
 - `runtime_event_envelope.py` normalizes CLI stream records, hook observer records, runtime transitions, and future SDK stream records into `runtime_event_envelope.v1`.
 - `artifact_refs.py` normalizes and validates `artifact_ref.v1`, including producer event/agent, run/window/team/task binding, optional path, and sha256.
-- `completion_validator.py` combines schema, contract, artifact, semantic coverage, lifecycle, and failure-disposition checks before a bridge result can satisfy completion.
-- `policy_compiler.py` is the compatibility compiler for policy JSON and schemas; Python should execute compiled policy instead of growing new scattered hardcodes.
-- `team_planner.py` contains the first risk-based selector for reducing redundant teammate specs without changing the one-window/one-team/one-task invariant.
+- `completion_validator.py` combines schema, contract, artifact, semantic coverage, lifecycle, and failure-disposition checks before a bridge result can satisfy completion. Completion projection records use the validator output so Companion shows the same structured checks the runtime used.
+- `policy_compiler.py` is the compatibility compiler for policy JSON and schemas; Python should execute compiled policy instead of growing new scattered hardcodes. It now emits `validation_results` for policy schema checks and team-planner phase-rule references.
+- `team_planner.py` contains the policy-owned risk-based selector for reducing redundant teammate specs without changing the one-window/one-team/one-task invariant. The selected team and full decision are recorded in `team_planning` on each packet.
 
 Durability and recovery pieces:
 

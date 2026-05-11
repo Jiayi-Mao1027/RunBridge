@@ -17,6 +17,7 @@ from output_guardrails import validate_bridge_result, validate_completion_report
 from repo_runtime import ensure_repo_registered, get_repo_runtime_root, infer_repo_key_from_runs_root, repo_key_for_paths, update_active_run_registry
 from retry_policy import decide_retry, load_retry_policies, packet_hash as retry_packet_hash
 from runtime_event_envelope import normalize_runtime_event
+from state_graph import stable_hash
 from trajectory import record_guardrail_trajectory_step, record_workflow_trajectory_step
 
 
@@ -842,21 +843,31 @@ def check_event(
         if not guardrail.get("valid"):
             reasons.append("completion_report_guardrail_failed")
             derived_facts["guardrail_validation"] = guardrail
+        packet_for_validation, packet_ref = _completion_packet_for_window(snapshot, event, normalized_payload)
+        if packet_ref:
+            derived_facts["completion_packet_ref"] = packet_ref
+        completion_evidence = normalized_payload.get("completion_evidence") if isinstance(normalized_payload.get("completion_evidence"), dict) else {}
+        completion_execution = {
+            "status": "succeeded",
+            "reports": normalized_payload.get("reports", []),
+            "artifact_refs": normalized_payload.get("artifact_refs", []),
+            "evidence": completion_evidence,
+            "error_or_null": None,
+            "cleanup_required": False,
+        }
+        waiting = normalized_payload.get("waiting")
+        if waiting is None:
+            waiting = completion_evidence.get("waiting")
+        if waiting is not None:
+            completion_execution["waiting"] = bool(waiting)
+        owned_process_refs = normalized_payload.get("owned_process_refs")
+        if owned_process_refs is None:
+            owned_process_refs = completion_evidence.get("owned_process_refs")
+        if owned_process_refs is not None:
+            completion_execution["owned_process_refs"] = owned_process_refs if isinstance(owned_process_refs, list) else []
         completion_validation = validate_bridge_completion(
-            {
-                "completion_contract": contract if isinstance(contract, dict) else {},
-                "task_spec": normalized_payload.get("task_spec") if isinstance(normalized_payload.get("task_spec"), dict) else {},
-                "report_contract": normalized_payload.get("report_contract") if isinstance(normalized_payload.get("report_contract"), dict) else {},
-                "target_phase": snapshot.get("current_phase"),
-            },
-            {
-                "status": "succeeded",
-                "reports": normalized_payload.get("reports", []),
-                "artifact_refs": normalized_payload.get("artifact_refs", []),
-                "evidence": normalized_payload.get("completion_evidence") or {},
-                "error_or_null": None,
-                "cleanup_required": False,
-            },
+            packet_for_validation,
+            completion_execution,
             context={
                 "run_id": event.run_id,
                 "bridge_window_id": event.bridge_window_id,
@@ -867,6 +878,7 @@ def check_event(
                 "timestamp": event.timestamp,
             },
             control_root=control_root,
+            base_dir=_run_root_from_snapshot(snapshot),
         )
         derived_facts["completion_validation"] = completion_validation
         if not isinstance(contract, dict) or not contract:
@@ -1222,7 +1234,7 @@ def persist_workflow_result(
     atomic_write_json(paths.run_ledger_path(event.run_id), run_ledger)
     atomic_write_json(snapshot_path, snapshot)
     try:
-        companion_paths = observe_workflow_event(paths, event, snapshot)
+        companion_paths = observe_workflow_event(paths, _event_for_projection(event, check_result), snapshot)
     except Exception as exc:
         companion_paths = {"companion_observer_error": f"{exc.__class__.__name__}: {exc}"}
     try:
@@ -1466,6 +1478,12 @@ def _apply_transition_to_run(run: dict[str, Any], event: WorkflowEvent, to_statu
         )
         binding["updated_at"] = event.timestamp
         binding["lifecycle_status"] = to_status
+        packet = _packet_from_event(event)
+        if packet:
+            binding["packet_ref"] = f"event_log.jsonl:{event.event_id}"
+            binding["packet_hash"] = stable_hash(packet)
+            if isinstance(packet.get("target_phase"), str):
+                binding["target_phase"] = packet.get("target_phase")
         if event.sub_session_id:
             binding["sub_session_id"] = event.sub_session_id
         if event.team_id:
@@ -1600,6 +1618,83 @@ def _packet_from_event(event: WorkflowEvent) -> dict[str, Any] | None:
     if isinstance(tool_input, dict) and isinstance(tool_input.get("packet"), dict):
         return tool_input["packet"]
     return None
+
+
+def _completion_packet_for_window(
+    snapshot: dict[str, Any],
+    event: WorkflowEvent,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else None
+    if packet:
+        return packet, payload.get("packet_ref") if isinstance(payload.get("packet_ref"), str) else "completion_payload:packet"
+    packet, packet_ref = _load_packet_for_window(snapshot, event.bridge_window_id)
+    if packet:
+        return packet, packet_ref
+    contract = payload.get("completion_contract") or payload.get("contract") or {}
+    return (
+        {
+            "completion_contract": contract if isinstance(contract, dict) else {},
+            "task_spec": payload.get("task_spec") if isinstance(payload.get("task_spec"), dict) else {},
+            "report_contract": payload.get("report_contract") if isinstance(payload.get("report_contract"), dict) else {},
+            "target_phase": _target_phase_for_window(snapshot, event.bridge_window_id) or snapshot.get("current_phase"),
+        },
+        None,
+    )
+
+
+def _load_packet_for_window(snapshot: dict[str, Any], bridge_window_id: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    if not bridge_window_id:
+        return None, None
+    event_log_ref = _snapshot_ref_path(snapshot, "canonical_event_log") or _snapshot_ref_path(snapshot, "event_log")
+    if not event_log_ref:
+        return None, None
+    records = load_jsonl(Path(event_log_ref))
+    for record in reversed(records):
+        if str(record.get("bridge_window_id") or "") != str(bridge_window_id):
+            continue
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        packet = payload.get("packet")
+        if isinstance(packet, dict):
+            return packet, f"event_log.jsonl:{record.get('event_id') or '?'}"
+        tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+        packet = tool_input.get("packet")
+        if isinstance(packet, dict):
+            return packet, f"event_log.jsonl:{record.get('event_id') or '?'}"
+    return None, None
+
+
+def _target_phase_for_window(snapshot: dict[str, Any], bridge_window_id: str | None) -> str | None:
+    binding = _bridge_binding(snapshot, bridge_window_id)
+    if isinstance(binding, dict) and binding.get("target_phase"):
+        return str(binding.get("target_phase"))
+    route = snapshot.get("route") if isinstance(snapshot.get("route"), dict) else {}
+    if route.get("target_phase"):
+        return str(route.get("target_phase"))
+    return None
+
+
+def _run_root_from_snapshot(snapshot: dict[str, Any]) -> str | None:
+    return _snapshot_ref_path(snapshot, "run_root")
+
+
+def _snapshot_ref_path(snapshot: dict[str, Any], key: str) -> str | None:
+    refs = snapshot.get("snapshot_refs") if isinstance(snapshot.get("snapshot_refs"), dict) else {}
+    value = refs.get(key)
+    return str(value) if value else None
+
+
+def _event_for_projection(event: WorkflowEvent, check_result: CheckResult) -> WorkflowEvent:
+    validation = check_result.derived_facts.get("completion_validation")
+    if event.event_kind not in {"completion_contract_satisfied", "completion_contract_rejected"} or not isinstance(validation, dict):
+        return event
+    projected = deepcopy(event)
+    projected.payload = deepcopy(event.payload)
+    projected.payload["completion_checks"] = validation
+    projected.payload.setdefault("completion_validation", validation)
+    if check_result.derived_facts.get("completion_packet_ref"):
+        projected.payload.setdefault("packet_ref", check_result.derived_facts["completion_packet_ref"])
+    return projected
 
 
 def _record_bridge_packet_route(run: dict[str, Any], event: WorkflowEvent) -> None:

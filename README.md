@@ -68,7 +68,7 @@ The system ships agent prompts under `.claude/agents/`. Common roles include:
 - `rungater`: checks readiness after implementation and recommends proceed, repair, reroute, or stop.
 - `anomaly-analyst-*`: investigates failed, partial, blocked, or orphaned workflow states.
 
-Roles are selected by phase and packet construction. A teammate is not supposed to infer broad authority from being spawned.
+Roles are selected by phase, policy, and risk-based packet construction. Low-risk clear tasks may use a reduced policy-valid team, while explicit high-risk, write, execute, anomaly, or multi-view tasks keep the fuller phase team. The `team_planning` packet field records the selector, risk profile, original teammate names, selected teammate names, and policy ref. A teammate is not supposed to infer broad authority from being spawned.
 
 ## Phases
 
@@ -163,6 +163,8 @@ Runtime data is split into three layers:
 - Projections: Companion timeline, cards, brief text, trajectory views, and other UI views. These can be deleted and rebuilt from authoritative state plus artifacts; they are never a main-leader recovery source.
 
 Stream and observer inputs should normalize into `runtime_event_envelope.v1` before becoming runtime facts or projections. The envelope records source (`outer_sdk`, `inner_sdk`, `cli`, `hook`, `runtime`, `companion`) and authority (`authoritative`, `source`, `observed`, `derived`, `projection`) so UI rendering does not blur runtime truth with observations.
+
+Bridge-window bindings keep compact packet attribution (`packet_ref`, `packet_hash`, `target_phase`) in the run ledger. Completion validation reloads the original packet from the authoritative event log when available, so L4 lifecycle and report/artifact checks are evaluated against the packet boundary rather than a later UI projection or natural-language report.
 
 `runtime_snapshot.json` is intentionally compact. It is a routing and recovery view for the main leader, not a place for full reports, tool logs, full evidence, or complete historical bindings. Large details remain in ledgers and observer streams, and the snapshot carries `snapshot_refs`, counts, and short previews so the leader can open details only when needed.
 

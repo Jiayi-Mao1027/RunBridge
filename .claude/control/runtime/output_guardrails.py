@@ -285,6 +285,22 @@ def _validate_schema_node(value: Any, schema: dict[str, Any], path: str) -> dict
                 child = _validate_schema_node(value[key], child_schema, f"{path}.{key}")
                 if not child.get("valid"):
                     return child
+        additional = schema.get("additionalProperties")
+        if isinstance(additional, dict):
+            for key, item in value.items():
+                if key in properties:
+                    continue
+                child = _validate_schema_node(item, additional, f"{path}.{_json_path_key(str(key))}")
+                if not child.get("valid"):
+                    return child
+        elif additional is False:
+            for key in value:
+                if key not in properties:
+                    return validation_error(
+                        error_type="SchemaValidationFailed",
+                        path=f"{path}.{_json_path_key(str(key))}",
+                        message=f"{path} has unexpected field {key}",
+                    )
     if isinstance(value, list):
         items_schema = schema.get("items") if isinstance(schema.get("items"), dict) else None
         if items_schema:

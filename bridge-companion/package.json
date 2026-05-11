@@ -6,6 +6,7 @@
   "description": "Read-only Bridge Runtime companion UI and local gateway.",
   "scripts": {
     "gateway": "node gateway/server.mjs",
-    "start": "node gateway/server.mjs"
+    "start": "node gateway/server.mjs",
+    "test:projection": "node gateway/projection_fixture_test.mjs"
   }
 }

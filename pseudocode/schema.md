@@ -37,6 +37,14 @@ struct ArtifactRef:
     team_id: TeamId | null
     task_id: TaskId | null
 
+struct TeamPlanningDecision:
+    selector: string
+    reason: string
+    risk_profile: map[string,bool]
+    original_teammate_names: list[string]
+    selected_teammate_names: list[string]
+    policy_ref: string
+
 enum AgentType:
     main-leader
     bridge-leader
@@ -297,6 +305,7 @@ struct BridgePacket:
     target_phase: string
 
     team_spec: TeamSpec
+    team_planning: TeamPlanningDecision | null
     task_spec: TaskSpec
     task_team_mapping: TaskTeamMapping
 
@@ -315,6 +324,7 @@ struct TeamSpec:
     team_name: string
     teammate_specs: list[TeammateSpec]
     ownership_boundary: OwnershipBoundary
+    team_planning: TeamPlanningDecision | null
 
 struct TeammateSpec:
     teammate_id_or_null: TeammateId | null

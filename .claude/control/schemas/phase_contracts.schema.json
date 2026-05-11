@@ -41,6 +41,15 @@
     "execution_policy": {"type": "object"},
     "base_report_contract": {"type": "object"},
     "base_completion_contract": {"type": "object"},
+    "team_planner": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "force_full_team_markers": {"type": "array", "items": {"type": "string"}},
+        "risk_terms": {"type": "object"},
+        "phase_rules": {"type": "object"}
+      }
+    },
     "phases": {
       "type": "object",
       "additionalProperties": {

@@ -9,6 +9,7 @@ It does not create bridge windows, create teams or tasks, modify ledgers, modify
 Primary live sources:
 
 - `sdk_stream_events.jsonl`
+- `bridge_packets.jsonl`
 - `tool_events.jsonl`
 - `agent_messages.jsonl`
 - `teammate_reports.jsonl`
@@ -63,6 +64,12 @@ Optional overrides:
 
 The gateway is a read-only projection layer. It redacts common token/password/secret patterns before responses and only serves files from the configured runtime roots and the Companion static directory.
 
+Projection fixture check:
+
+```powershell
+npm run test:projection
+```
+
 ## Read-Only API
 
 ```text
@@ -73,6 +80,7 @@ GET /api/repos/:repoKey/runs/latest
 GET /api/repos/:repoKey/runs/:runId/status
 GET /api/repos/:repoKey/runs/:runId/snapshot
 GET /api/repos/:repoKey/runs/:runId/events?after=<seq>&afterId=<eventId>&afterCursor=<json>&limit=500
+GET /api/repos/:repoKey/runs/:runId/projection
 GET /api/repos/:repoKey/runs/:runId/stream?after=<seq>&afterId=<eventId>&afterCursor=<json>
 GET /api/repos/:repoKey/runs/:runId/raw?file=<jsonl>&offset=<line>
 GET /api/session-observer/events?after=<seq>&afterId=<eventId>&afterCursor=<json>&limit=500
@@ -114,6 +122,8 @@ Run event streams emit normalized events with:
 `eventId` is stable for a source JSONL line and is used for UI dedupe. `seq` is only a display/back-compat ordinal. Reconnect should prefer `afterCursor`, which is a map of `sourceFile -> lineOffset`; `Last-Event-ID` / `afterId` are also accepted.
 
 When source records carry `runtime_event`, the UI treats that as the canonical normalized envelope. Companion records must keep `authority=projection` or `authority=observed`; they are never authoritative runtime state.
+
+`/projection` returns `companion_projection.v1`: active task, timeline, live tool cards, agent message cards, artifact cards, completion checklist, failure/retry lane, semantic coverage matrix, and raw JSON refs. It is derived display data and must not be used for workflow recovery.
 
 The SSE path uses a per-source JSONL tailer after the initial backfill. It tracks byte and line cursors per source file, so new observer lines can reach the UI without repeatedly re-reading whole long logs.
 

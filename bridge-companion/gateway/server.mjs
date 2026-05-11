@@ -41,6 +41,7 @@ const BRIEF_SECRET_PATH =
 
 const runSourceFiles = [
   "sdk_stream_events.jsonl",
+  "bridge_packets.jsonl",
   "tool_events.jsonl",
   "agent_messages.jsonl",
   "teammate_reports.jsonl",
@@ -572,6 +573,9 @@ function sourceAndKind(sourceFile, record) {
     }
     return { source: "sdk_stream", kind: "assistant_message" };
   }
+  if (sourceFile === "bridge_packets.jsonl") {
+    return { source: "bridge_packet", kind: "bridge_packet" };
+  }
   if (sourceFile === "agent_messages.jsonl") {
     return { source: "agent_message", kind: "assignment_sent" };
   }
@@ -892,19 +896,23 @@ async function loadCompanionData(repoKey, runId) {
 
 function packetSummaryFrom(snapshot, runLedger, events) {
   const packetEvent = [...events].reverse().find(event => event.raw?.packet || event.raw?.payload?.packet);
+  const packetSummaryEvent = [...events].reverse().find(event => event.source === "bridge_packet");
   const packet = packetEvent?.raw?.packet || packetEvent?.raw?.payload?.packet || null;
+  const packetSummary = packetSummaryEvent?.raw || {};
   const task = packet?.task_spec || {};
-  const completion = packet?.completion_contract || task?.completion_contract || {};
-  const report = packet?.report_contract || task?.report_contract || {};
+  const completion = packet?.completion_contract || task?.completion_contract || packetSummary.completion_contract || {};
+  const report = packet?.report_contract || task?.report_contract || packetSummary.report_contract || {};
   const semantic = snapshot?.semantic?.frozen || runLedger?.semantic?.frozen || {};
   return {
     objective:
       task.task_subject ||
       task.task_description ||
+      packetSummary.task_title ||
+      packetSummary.objective ||
       semantic.task_subject ||
       semantic.user_instruction ||
       "No task packet recorded",
-    targetPhase: packet?.target_phase || snapshot?.current_phase || runLedger?.current_phase || "unknown",
+    targetPhase: packet?.target_phase || packetSummary.target_phase || snapshot?.current_phase || runLedger?.current_phase || "unknown",
     completionSummary: completion.required_outputs || completion.required_artifacts
       ? JSON.stringify({
           required_outputs: completion.required_outputs || [],
@@ -918,7 +926,8 @@ function packetSummaryFrom(snapshot, runLedger, events) {
           required_evidence: report.required_evidence || []
         })
       : "No report contract recorded",
-    packet
+    packet,
+    packetSummary
   };
 }
 
@@ -1106,6 +1115,167 @@ async function buildStatus(repoKey, runId) {
       readOnly: true
     }
   };
+}
+
+async function buildProjection(repoKey, runId) {
+  const data = await loadCompanionData(repoKey, runId);
+  if (!data) return null;
+  const packetSummary = packetSummaryFrom(data.snapshot, data.runLedger, data.events);
+  const events = data.events || [];
+  return {
+    schemaVersion: "companion_projection.v1",
+    authority: "projection",
+    repoKey,
+    runId,
+    generatedAt: new Date().toISOString(),
+    derivedFrom: {
+      authoritativeRefs: {
+        snapshot: "runtime_snapshot.json",
+        runLedger: "run_ledger.json",
+        canonicalEventLog: data.snapshot?.snapshot_refs?.canonical_event_log || data.snapshot?.snapshot_refs?.event_log || "event_log.jsonl",
+        transitions: data.snapshot?.snapshot_refs?.transitions || "transitions.jsonl"
+      },
+      observerRefs: runSourceFiles,
+      projectionRule: "Companion projection is derived display data and must not be used for workflow recovery."
+    },
+    activeTask: {
+      title: packetSummary.objective,
+      targetPhase: packetSummary.targetPhase,
+      lifecycleState: latestLifecycleState(data.snapshot || data.runLedger),
+      packetRef: _projectionRawRef(events.find(event => event.source === "bridge_packet" || event.raw?.packet || event.raw?.payload?.packet)),
+      completionSummary: packetSummary.completionSummary,
+      reportSummary: packetSummary.reportSummary
+    },
+    timeline: events.slice(-300).map(projectTimelineEvent),
+    liveToolCards: events.filter(event => event.source === "hook_tool_event").slice(-80).map(projectToolCard),
+    agentMessageCards: events.filter(event => event.source === "agent_message" || event.source === "sdk_stream").slice(-120).map(projectMessageCard),
+    artifactCards: events.filter(event => event.source === "artifact" || event.evidenceRefs?.length).slice(-120).map(projectArtifactCard),
+    completionChecklist: projectCompletionChecklist(events),
+    failureRetryLane: events.filter(event => event.lane === "failures" || ["failed", "blocked", "rejected"].includes(String(event.status || ""))).slice(-80).map(projectTimelineEvent),
+    semanticCoverageMatrix: projectSemanticCoverage(events),
+    rawJsonRefs: events.slice(-300).map(event => ({ eventId: event.eventId, rawRef: event.rawRef, sourceAuthority: event.runtimeEvent?.authority || "observed" })),
+    unknowns: unknownsFor(data)
+  };
+}
+
+function projectTimelineEvent(event) {
+  return {
+    seq: event.seq,
+    eventId: event.eventId,
+    ts: event.ts,
+    lane: event.lane,
+    kind: event.kind,
+    source: event.source,
+    sourceAuthority: event.runtimeEvent?.authority || "observed",
+    sourceEnvelopeId: event.runtimeEvent?.event_id || undefined,
+    bridgeWindowId: event.bridgeWindowId,
+    teamId: event.teamId,
+    taskId: event.taskId,
+    actor: event.actor,
+    status: event.status,
+    messagePreview: event.messagePreview,
+    rawRef: event.rawRef
+  };
+}
+
+function projectToolCard(event) {
+  return {
+    ...projectTimelineEvent(event),
+    toolName: event.toolName,
+    target: event.target,
+    fileRefs: event.fileRefs || [],
+    evidenceRefs: event.evidenceRefs || []
+  };
+}
+
+function projectMessageCard(event) {
+  return {
+    ...projectTimelineEvent(event),
+    textDelta: event.textDelta || undefined,
+    toolInputDelta: event.toolInputDelta || undefined,
+    sdkToolName: event.sdkToolName || undefined
+  };
+}
+
+function projectArtifactCard(event) {
+  const raw = event.raw || {};
+  const artifactRef = raw.artifact_ref || raw.artifact_refs || raw.raw_ref || null;
+  return {
+    ...projectTimelineEvent(event),
+    artifactType: raw.artifact_type || raw.ref_type || "artifact",
+    artifactId: raw.artifact_id || raw.id || undefined,
+    artifactRef,
+    safePreview: raw.safe_preview || raw.summary || event.messagePreview,
+    evidenceRefs: event.evidenceRefs || []
+  };
+}
+
+function projectCompletionChecklist(events) {
+  const latest = [...events].reverse().find(event => event.source === "completion_check");
+  if (!latest) return { status: "unknown", items: [], rawRef: null };
+  const raw = latest.raw || {};
+  const checks = raw.completion_checks || {};
+  const items = [];
+  for (const item of Array.isArray(checks.checks) ? checks.checks : []) {
+    if (!item || typeof item !== "object") continue;
+    items.push({
+      name: item.name || "check",
+      status: item.status || "unknown",
+      subject: item.subject || "",
+      message: item.message || "",
+      evidenceRef: item.evidence_ref || null
+    });
+  }
+  if (!items.length && Array.isArray(raw.items)) {
+    for (const item of raw.items) {
+      if (!item || typeof item !== "object") continue;
+      items.push({
+        name: item.id || "contract_item",
+        status: item.status || "unknown",
+        subject: item.text || "",
+        message: item.reason || "",
+        evidenceRef: Array.isArray(item.evidence_refs) ? item.evidence_refs[0] || null : null
+      });
+    }
+  }
+  return {
+    status: raw.status || latest.status || "unknown",
+    finalDisposition: checks.final_disposition || undefined,
+    validatedBy: checks.validated_by || undefined,
+    items,
+    rawRef: latest.rawRef
+  };
+}
+
+function projectSemanticCoverage(events) {
+  const rows = [];
+  for (const event of events.filter(item => item.source === "teammate_report")) {
+    const report = event.raw?.report && typeof event.raw.report === "object" ? event.raw.report : event.raw || {};
+    const coverage = report.instruction_coverage && typeof report.instruction_coverage === "object"
+      ? report.instruction_coverage
+      : {};
+    for (const [item, disposition] of Object.entries(coverage)) {
+      rows.push({
+        item,
+        disposition: coverageDisposition(disposition),
+        teammateId: event.actor?.teammateId || event.actor?.displayName || event.actor?.role || undefined,
+        evidenceRefs: Array.isArray(report.evidence_refs) ? report.evidence_refs : [],
+        rawRef: event.rawRef
+      });
+    }
+  }
+  return rows;
+}
+
+function coverageDisposition(value) {
+  if (value && typeof value === "object") {
+    return String(value.disposition || value.status || value.state || "unknown");
+  }
+  return String(value || "unknown");
+}
+
+function _projectionRawRef(event) {
+  return event?.rawRef || null;
 }
 
 async function rawRecord(repoKey, runId, sourceFile, sourceOffset) {
@@ -1486,6 +1656,11 @@ async function handleApi(req, res, url) {
         sendJson(res, 200, { repoKey, runId, ...filterEvents(events, url.searchParams) });
         return;
       }
+      if (action === "projection") {
+        const projection = await buildProjection(repoKey, runId);
+        sendJson(res, projection ? 200 : 404, projection || { error: "projection unavailable", repoKey, runId });
+        return;
+      }
       if (action === "stream") {
         await streamRun(req, res, repoKey, runId, url.searchParams);
         return;
@@ -1604,8 +1779,25 @@ async function requestHandler(req, res) {
   }
 }
 
-http.createServer(requestHandler).listen(PORT, HOST, () => {
-  console.log(`Bridge Companion gateway listening on http://${HOST}:${PORT}`);
-  console.log(`projects root: ${PROJECTS_ROOT}`);
-  console.log(`session observer root: ${SESSION_OBSERVER_ROOT}`);
-});
+function startServer() {
+  return http.createServer(requestHandler).listen(PORT, HOST, () => {
+    console.log(`Bridge Companion gateway listening on http://${HOST}:${PORT}`);
+    console.log(`projects root: ${PROJECTS_ROOT}`);
+    console.log(`session observer root: ${SESSION_OBSERVER_ROOT}`);
+  });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  startServer();
+}
+
+export {
+  buildProjection,
+  buildStatus,
+  loadRunEvents,
+  normalizeRunRecord,
+  projectCompletionChecklist,
+  projectSemanticCoverage,
+  requestHandler,
+  startServer
+};

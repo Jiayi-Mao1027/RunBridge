@@ -2507,6 +2507,9 @@ def run_event_artifact_completion_tests(control_root: Path, runs_root: Path) -> 
     valid_refs = validate_artifact_refs(refs, required_artifacts=["artifact", "log_manifest"], context=context, base_dir=runs_root)
     if not valid_refs.get("valid"):
         raise AssertionError(json.dumps(valid_refs, ensure_ascii=False, indent=2))
+    generic_missing = validate_artifact_refs([refs[1]], required_artifacts=["artifact"], context=context, base_dir=runs_root)
+    if generic_missing.get("valid"):
+        raise AssertionError(json.dumps(generic_missing, ensure_ascii=False, indent=2))
     stale = dict(refs[1])
     stale["bridge_window_id"] = "bw_other_window"
     stale_validation = validate_artifact_refs([stale], required_artifacts=["log_manifest"], context=context, base_dir=runs_root)
@@ -2546,6 +2549,11 @@ def run_policy_team_projection_tests(control_root: Path, runs_root: Path) -> dic
         raise AssertionError(json.dumps(sorted(compiled.schemas.keys()), ensure_ascii=False, indent=2))
     if not compiled.phase_contracts.get("base_completion_contract"):
         raise AssertionError(json.dumps(compiled.phase_contracts, ensure_ascii=False, indent=2))
+    if compiled.team_planner.get("enabled") is not True:
+        raise AssertionError(json.dumps(compiled.team_planner, ensure_ascii=False, indent=2))
+    invalid_policy = [item for item in compiled.validation_results if not item.get("valid")]
+    if invalid_policy:
+        raise AssertionError(json.dumps(invalid_policy, ensure_ascii=False, indent=2))
 
     decision = RiskBasedTeamSelector().select(
         target_phase="l3_bridge",
@@ -2559,6 +2567,32 @@ def run_policy_team_projection_tests(control_root: Path, runs_root: Path) -> dic
     if decision.reason != "risk_reduced_team" or [item.get("teammate_name") for item in decision.selected_teammates] != ["preflight-initial"]:
         raise AssertionError(json.dumps({"reason": decision.reason, "selected": decision.selected_teammates}, ensure_ascii=False, indent=2))
 
+    low_risk_l3 = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="read repository docs and report current status",
+        task_spec={"task_subject": "read docs status", "task_kind": "preflight"},
+        target_phase="l3_bridge",
+    )
+    low_names = [item.get("teammate_name") for item in low_risk_l3.get("team_spec", {}).get("teammate_specs", [])]
+    if low_names != ["preflight-initial"] or low_risk_l3.get("team_planning", {}).get("reason") != "risk_reduced_team":
+        raise AssertionError(json.dumps(low_risk_l3.get("team_planning"), ensure_ascii=False, indent=2))
+
+    write_risk_l3 = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="update CLAUDE.md and README with current workflow behavior",
+        task_spec={"task_subject": "documentation update", "task_kind": "documentation"},
+        target_phase="l3_bridge",
+    )
+    write_names = [item.get("teammate_name") for item in write_risk_l3.get("team_spec", {}).get("teammate_specs", [])]
+    if "curator" not in write_names or write_risk_l3.get("team_planning", {}).get("reason") == "risk_reduced_team":
+        raise AssertionError(json.dumps(write_risk_l3.get("team_planning"), ensure_ascii=False, indent=2))
+
     snapshot = json.loads((runs_root / "run_demo" / "runtime_snapshot.json").read_text(encoding="utf-8"))
     if not snapshot.get("snapshot_refs", {}).get("canonical_event_log"):
         raise AssertionError(json.dumps(snapshot.get("snapshot_refs"), ensure_ascii=False, indent=2))
@@ -2568,6 +2602,14 @@ def run_policy_team_projection_tests(control_root: Path, runs_root: Path) -> dic
     companion_events = _read_jsonl(runs_root / "run_demo" / "companion_events.jsonl")
     if companion_events and any((item.get("runtime_event") or {}).get("authority") == "authoritative" for item in companion_events):
         raise AssertionError(json.dumps(companion_events[:5], ensure_ascii=False, indent=2))
+    completion_events = _read_jsonl(runs_root / "run_demo" / "completion_checks.jsonl")
+    if not any((item.get("completion_checks") or {}).get("validated_by") == "completion_validator.v1" for item in completion_events):
+        raise AssertionError(json.dumps(completion_events[-5:], ensure_ascii=False, indent=2))
+    run_ledger = json.loads((runs_root / "run_demo" / "run_ledger.json").read_text(encoding="utf-8"))
+    bindings = run_ledger.get("bindings", {}).get("bridge_windows", {})
+    success_binding = bindings.get("bw_success", {})
+    if not success_binding.get("packet_ref") or not success_binding.get("packet_hash"):
+        raise AssertionError(json.dumps(success_binding, ensure_ascii=False, indent=2))
     return {"policy_team_projection": "passed"}
 
 

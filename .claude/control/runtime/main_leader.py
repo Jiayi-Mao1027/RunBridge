@@ -10,6 +10,7 @@ import uuid
 from loader import ControlPaths, load_json_file
 from policy_compiler import compile_policy
 from repo_runtime import get_repo_runtime_root
+from team_planner import RiskBasedTeamSelector
 from workflow_runtime import SCHEMA_VERSION, build_runtime_snapshot
 
 
@@ -199,6 +200,8 @@ def build_bridge_instruction_packet_for_this_invoke(
         report_contract=resolved_report,
         phase_contracts=contracts,
     )
+    team_planning = _plan_team_for_task(resolved_target_phase, resolved_task, resolved_team, contracts)
+    resolved_team = team_planning["team_spec"]
     mapping = _build_task_team_mapping(resolved_task, resolved_team, phase_contracts=contracts)
 
     binding = {
@@ -229,6 +232,7 @@ def build_bridge_instruction_packet_for_this_invoke(
         "phase_route": resolved_route,
         "target_phase": resolved_target_phase,
         "team_spec": resolved_team,
+        "team_planning": team_planning["decision"],
         "task_spec": resolved_task,
         "task_team_mapping": mapping,
         "completion_contract": resolved_completion,
@@ -275,6 +279,33 @@ def _normalize_team_spec(
         "teammate_specs": teammates,
         "ownership_boundary": ownership,
     }
+
+
+def _plan_team_for_task(
+    target_phase: str,
+    task_spec: dict[str, Any],
+    team_spec: dict[str, Any],
+    phase_contracts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    configured = phase_contracts.get("team_planner") if isinstance(phase_contracts, dict) and isinstance(phase_contracts.get("team_planner"), dict) else {}
+    teammates = team_spec.get("teammate_specs") if isinstance(team_spec.get("teammate_specs"), list) else []
+    decision = RiskBasedTeamSelector().select(
+        target_phase=target_phase,
+        task_spec=task_spec,
+        policy_teammates=teammates,
+        config=configured,
+    )
+    planned = deepcopy(team_spec)
+    planned["teammate_specs"] = decision.selected_teammates
+    decision_payload = decision.as_dict()
+    decision_payload["policy_ref"] = "control/policy/phase_contracts.json#team_planner"
+    decision_payload["original_teammate_names"] = [
+        str(item.get("teammate_name") or "")
+        for item in teammates
+        if isinstance(item, dict) and item.get("teammate_name")
+    ]
+    planned["team_planning"] = decision_payload
+    return {"team_spec": planned, "decision": decision_payload}
 
 
 def _default_bridge_tools(target_phase: str, phase_contracts: dict[str, Any] | None = None) -> list[str]:
