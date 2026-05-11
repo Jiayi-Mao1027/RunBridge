@@ -21,6 +21,26 @@ http://127.0.0.1:8787/
 
 Without `BRIDGE_RUNTIME_ROOT`, the UI still opens with mock data. This is useful for UI/copy work.
 
+## Outer Host Input Path
+
+Run the long-lived outer host separately from Companion:
+
+```powershell
+cd C:\Users\admin\Desktop\Structure-config-1\<target-repo>
+python ..\.claude\control\runtime\outer_sdk_host.py --control-root ..\.claude\control --repo-root . --main-session-id outer-main --adapter auto
+```
+
+Then start Companion with a forwarding target:
+
+```powershell
+$env:BRIDGE_OUTER_HOST_URL="http://127.0.0.1:8791"
+node gateway\server.mjs
+```
+
+`POST /api/leader/input` forwards user text to the outer host. Companion does not write ledgers directly; the host records the authoritative runtime input event and SDK-observed stream records.
+
+`--adapter auto` is SDK-first and keeps one process-owned outer leader SDK client alive. It requires the optional `claude-agent-sdk` Python package. If that package is missing, the host still records the input and returns `OuterLeaderSdkDependencyMissing` rather than falling back to a one-shot bridge-like call. Use `--adapter unavailable` only for debug/smoke paths where the host boundary is being tested without model execution.
+
 ## Reading Real Runtime Data
 
 Point the gateway at a run root folder for hydration/backfill/audit, and when available connect it to the live SDK/hook stream source. During the transition, the gateway can tail observer JSONL files that emulate live event envelopes:

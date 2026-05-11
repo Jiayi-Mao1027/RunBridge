@@ -19,6 +19,8 @@ const MAX_EVENT_LIMIT = 1000;
 const DEFAULT_EVENT_LIMIT = 500;
 const RESPONSE_TEXT_LIMIT = 8000;
 const COMPANION_TOKEN = process.env.BRIDGE_COMPANION_TOKEN || "";
+const OUTER_HOST_URL = process.env.BRIDGE_OUTER_HOST_URL || process.env.OUTER_SDK_HOST_URL || "";
+const OUTER_HOST_TOKEN = process.env.BRIDGE_OUTER_HOST_TOKEN || process.env.OUTER_SDK_HOST_TOKEN || "";
 const ACCESS_CONTROL_ALLOW_ORIGIN =
   process.env.BRIDGE_COMPANION_ORIGIN ||
   process.env.BRIDGE_COMPANION_ALLOWED_ORIGIN ||
@@ -41,6 +43,7 @@ const BRIEF_SECRET_PATH =
 
 const runSourceFiles = [
   "sdk_stream_events.jsonl",
+  "outer_host_events.jsonl",
   "bridge_packets.jsonl",
   "tool_events.jsonl",
   "agent_messages.jsonl",
@@ -573,6 +576,9 @@ function sourceAndKind(sourceFile, record) {
     }
     return { source: "sdk_stream", kind: "assistant_message" };
   }
+  if (sourceFile === "outer_host_events.jsonl") {
+    return { source: "outer_host", kind: record.event_kind || record.event_type || "outer_host_event" };
+  }
   if (sourceFile === "bridge_packets.jsonl") {
     return { source: "bridge_packet", kind: "bridge_packet" };
   }
@@ -745,7 +751,7 @@ function laneFor(source, kind, status) {
   const normalizedKind = String(kind || "").toLowerCase();
   if (["failed", "blocked"].includes(normalizedStatus) || normalizedKind.includes("failed") || normalizedKind.includes("rejected")) return "failures";
   if (source === "hook_tool_event") return "tools";
-  if (source === "sdk_stream" || source === "agent_message") return "discussion";
+  if (source === "sdk_stream" || source === "agent_message" || source === "outer_host") return "discussion";
   if (source === "teammate_report" || source === "artifact") return "reports";
   if (source === "process_event") return "processes";
   if (source === "completion_check") return "completion";
@@ -1058,7 +1064,7 @@ function unknownsFor(data) {
   const events = data.events || [];
   const hasTool = events.some(event => event.source === "hook_tool_event");
   const hasDiscussion = events.some(event =>
-    ["sdk_stream", "agent_message"].includes(event.source)
+    ["sdk_stream", "agent_message", "outer_host"].includes(event.source)
   );
   const hasReport = events.some(event => event.source === "teammate_report");
   const hasCompletion = events.some(event => event.source === "completion_check");
@@ -1148,7 +1154,7 @@ async function buildProjection(repoKey, runId) {
     },
     timeline: events.slice(-300).map(projectTimelineEvent),
     liveToolCards: events.filter(event => event.source === "hook_tool_event").slice(-80).map(projectToolCard),
-    agentMessageCards: events.filter(event => event.source === "agent_message" || event.source === "sdk_stream").slice(-120).map(projectMessageCard),
+    agentMessageCards: events.filter(event => event.source === "agent_message" || event.source === "sdk_stream" || event.source === "outer_host").slice(-120).map(projectMessageCard),
     artifactCards: events.filter(event => event.source === "artifact" || event.evidenceRefs?.length).slice(-120).map(projectArtifactCard),
     completionChecklist: projectCompletionChecklist(events),
     failureRetryLane: events.filter(event => event.lane === "failures" || ["failed", "blocked", "rejected"].includes(String(event.status || ""))).slice(-80).map(projectTimelineEvent),
@@ -1303,14 +1309,15 @@ async function loadBriefSecret() {
   };
 }
 
-function httpsJson(url, payload, headers = {}) {
+function requestJson(url, payload, headers = {}) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const body = JSON.stringify(payload);
-    const req = https.request({
+    const transport = target.protocol === "http:" ? http : https;
+    const req = transport.request({
       method: "POST",
       hostname: target.hostname,
-      port: target.port || 443,
+      port: target.port || (target.protocol === "http:" ? 80 : 443),
       path: `${target.pathname}${target.search}`,
       headers: {
         "content-type": "application/json",
@@ -1335,6 +1342,23 @@ function httpsJson(url, payload, headers = {}) {
     req.write(body);
     req.end();
   });
+}
+
+function httpsJson(url, payload, headers = {}) {
+  return requestJson(url, payload, headers);
+}
+
+async function submitLeaderInput(input) {
+  if (!OUTER_HOST_URL) {
+    return {
+      accepted: false,
+      error: "outer_host_not_configured",
+      message: "Set BRIDGE_OUTER_HOST_URL to enable UI-to-host user input forwarding."
+    };
+  }
+  const endpoint = new URL("/v1/input", OUTER_HOST_URL).toString();
+  const headers = OUTER_HOST_TOKEN ? { "x-bridge-outer-host-token": OUTER_HOST_TOKEN } : {};
+  return requestJson(endpoint, { ...input, source: "bridge_companion_gateway" }, headers);
 }
 
 function buildBriefPrompt(input) {
@@ -1602,7 +1626,9 @@ async function handleApi(req, res, url) {
       registryRootExists: await exists(REGISTRY_ROOT),
       sessionObserverRoot: SESSION_OBSERVER_ROOT,
       streamIntervalMs: STREAM_INTERVAL_MS,
-      readOnly: true
+      readOnly: true,
+      outerHostConfigured: Boolean(OUTER_HOST_URL),
+      inputProxy: OUTER_HOST_URL ? "outer_sdk_host" : "disabled"
     });
     return;
   }
@@ -1704,6 +1730,21 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (pathname === "/api/leader/input") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "POST required" });
+      return;
+    }
+    const input = await parseBody(req);
+    try {
+      const response = await submitLeaderInput(input);
+      sendJson(res, response?.accepted === false ? 503 : 200, response);
+    } catch (error) {
+      sendJson(res, 502, { error: "outer_host_forward_failed", message: error.message });
+    }
+    return;
+  }
+
   if (pathname === "/api/brief" || pathname === "/brief") {
     if (req.method !== "POST") {
       sendJson(res, 405, { error: "POST required" });
@@ -1799,5 +1840,6 @@ export {
   projectCompletionChecklist,
   projectSemanticCoverage,
   requestHandler,
-  startServer
+  startServer,
+  submitLeaderInput
 };

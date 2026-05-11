@@ -769,7 +769,7 @@
       if (event.status === "failed" || event.status === "blocked" || kind.includes("failed") || kind.includes("rejected")) return "failures";
       return event.lane || (
         event.source === "hook_tool_event" ? "tools" :
-        event.source === "sdk_stream" || event.source === "agent_message" ? "discussion" :
+        event.source === "sdk_stream" || event.source === "agent_message" || event.source === "outer_host" ? "discussion" :
         event.source === "teammate_report" || event.source === "artifact" ? "reports" :
         event.source === "process_event" ? "processes" :
         event.source === "completion_check" ? "completion" :
@@ -781,7 +781,7 @@
       if (lane === "all") return true;
       const kind = String(event?.kind || "").toLowerCase();
       if (lane === "tools") return event?.source === "hook_tool_event";
-      if (lane === "discussion") return event?.source === "sdk_stream" || event?.source === "agent_message";
+      if (lane === "discussion") return event?.source === "sdk_stream" || event?.source === "agent_message" || event?.source === "outer_host";
       if (lane === "reports") return event?.source === "teammate_report" || event?.source === "artifact";
       if (lane === "processes") return event?.source === "process_event";
       if (lane === "completion") return event?.source === "completion_check";
@@ -792,6 +792,7 @@
     function isDiscussionEvent(event) {
       if (!event) return false;
       if (event.source === "agent_message") return true;
+      if (event.source === "outer_host") return true;
       if (event.source !== "sdk_stream") return false;
       return ["text_delta", "assistant_message", "sdk_delta", "sdk_tool_declared", "sdk_tool_result"].includes(event.kind);
     }

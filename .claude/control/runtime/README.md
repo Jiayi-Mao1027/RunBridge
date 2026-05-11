@@ -10,6 +10,7 @@ Bridge execution entry points:
 
 - `main_leader.decide_next_bridge_packet`: reads current runtime truth and builds one packet for exactly one bridge invocation window.
 - `bridge_sdk.call_bridge_sdk`: SDK/tool-facing call that records the main bridge lifecycle and invokes bridge-leader execution.
+- `outer_sdk_host.py`: long-lived outer host boundary for the leader SDK session. It records user input as runtime facts, exposes a process-owned input API, and selects `auto|sdk|unavailable` through `--adapter` / `BRIDGE_OUTER_LEADER_ADAPTER`.
 - `bridge_leader.execute_bridge_window`: bridge-owned team/task/message/completion/delete execution layer for one packet.
 - `bridge/executors/*`: shared `BridgeExecutor` boundary. `cli` wraps the current Claude CLI path, `simulate` wraps smoke execution, and `sdk` is the explicit SDK-in-SDK migration skeleton.
 - `workflow_runtime.reconcile_workflow_from_ledger`: replays `event_log.jsonl` and rebuilds derived run ledger, transitions, and snapshot.
@@ -31,6 +32,7 @@ Durability and recovery pieces:
 - `retry_driver.py`: disabled Beta2 driver contract for reading `retry_attempt_scheduled` events, checking delay/same-packet/max-attempt gates, and mapping recovery actions.
 - `output_guardrails.py`: structured output validation for packets, bridge results, teammate reports, completion reports, and log manifests. The local schema checker is intentionally minimal, not a full JSON Schema implementation.
 - `trajectory.py`: UI-safe timeline plus evidence links from completion, artifact, process, guardrail, and retry events.
+- `outer_sdk/`: host and adapter interfaces for replacing the outer Claude CLI session with a long-lived SDK leader process without letting Companion become the scheduler. The SDK wrapper uses `claude_agent_sdk.ClaudeSDKClient` when the optional `claude-agent-sdk` package is installed and otherwise returns an explicit dependency-missing result.
 
 SDK stream observability:
 
@@ -40,6 +42,8 @@ SDK stream observability:
 
 CLI examples:
 
+- Start outer host boundary: `python ../.claude/control/runtime/outer_sdk_host.py --control-root ../.claude/control --repo-root . --main-session-id outer-main --adapter auto`
+- Start outer host placeholder/debug mode: `python ../.claude/control/runtime/outer_sdk_host.py --control-root ../.claude/control --repo-root . --main-session-id outer-main --adapter unavailable`
 - Build a packet from a repo cwd: `python ../.claude/control/runtime/main.py --control-root ../.claude/control --run-id RUN --build-bridge-packet --user-instruction "..."`
 - Call bridge SDK from a repo cwd: `python ../.claude/control/runtime/main.py --control-root ../.claude/control --packet-file packet.json --call-bridge-sdk --persist`
 - Reconcile from event ledger from a repo cwd: `python ../.claude/control/runtime/main.py --control-root ../.claude/control --run-id RUN --reconcile-from-ledger --persist`

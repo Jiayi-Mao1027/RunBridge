@@ -13,7 +13,7 @@ process.env.BRIDGE_RUNTIME_PROJECTS_ROOT = projectsRoot;
 process.env.BRIDGE_SESSION_OBSERVER_ROOT = path.join(tmpRoot, "session_observer");
 process.env.BRIDGE_RUNTIME_REGISTRY_ROOT = path.join(tmpRoot, "registry");
 
-const { buildProjection } = await import("./server.mjs");
+const { buildProjection, submitLeaderInput } = await import("./server.mjs");
 
 try {
   await mkdir(runRoot, { recursive: true });
@@ -107,6 +107,9 @@ try {
   assert.equal(projection.completionChecklist.validatedBy, "completion_validator.v1");
   assert.ok(projection.semanticCoverageMatrix.some(row => row.disposition === "completed"));
   assert.ok(projection.rawJsonRefs.every(ref => ref.sourceAuthority !== "authoritative"));
+  const disabledInput = await submitLeaderInput({ text: "hello" });
+  assert.equal(disabledInput.accepted, false);
+  assert.equal(disabledInput.error, "outer_host_not_configured");
   console.log(JSON.stringify({ ok: true, projection: "passed" }, null, 2));
 } finally {
   await rm(tmpRoot, { recursive: true, force: true });

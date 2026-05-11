@@ -267,6 +267,33 @@ All workflow files live in the parent `.claude`. The target repo only contains t
 
 ## Startup
 
+The migration target is a long-lived outer SDK host plus a separate read-only Companion gateway. The host is the process that may accept user input and write runtime facts; Companion can forward input to it but does not become the scheduler or truth source.
+
+Start the outer host from inside the target repo:
+
+```powershell
+cd C:\path\to\workspace-parent\your-repo
+python ..\.claude\control\runtime\outer_sdk_host.py --control-root ..\.claude\control --repo-root . --main-session-id outer-main
+```
+
+Current status of this path:
+
+- The host is long-lived and process-owned.
+- `POST /v1/input` records `user_prompt_submitted` or `user_answer_received` through `workflow_runtime`.
+- It writes `outer_host_events.jsonl` and SDK-shaped `sdk_stream_events.jsonl` for Companion.
+- The default adapter is the outer Claude Agent SDK wrapper (`--adapter auto`, equivalent to SDK-first). It owns one persistent SDK client per host process and normalizes SDK messages into `sdk_stream_events.jsonl`.
+- If `claude-agent-sdk` is not installed, the host records the input and returns `OuterLeaderSdkDependencyMissing` instead of pretending leader reasoning ran. Use `--adapter unavailable` only for fallback/debug smoke.
+
+Start Companion separately:
+
+```powershell
+cd C:\path\to\workspace-parent\bridge-companion
+$env:BRIDGE_OUTER_HOST_URL="http://127.0.0.1:8791"
+node gateway\server.mjs
+```
+
+### Claude CLI Compatibility
+
 Claude Code must load both parent-level configuration files:
 
 - `../.claude/settings.json` for agent, environment, and hooks
@@ -279,6 +306,8 @@ cd C:\path\to\workspace-parent\your-repo
 claude --settings ../.claude/settings.json --mcp-config ../.claude/mcp.json --strict-mcp-config
 ```
 
+This remains a compatibility/debug path. It is not the target facing-leader topology; the target is `outer_sdk_host.py` with the SDK adapter and Companion forwarding input to that host.
+
 Use a wrapper if desired:
 
 ```powershell
@@ -288,6 +317,8 @@ function cc {
 ```
 
 `--strict-mcp-config` is recommended so Claude does not silently mix in repo-local MCP config.
+
+This remains the compatible fallback/debug startup while the real outer SDK adapter is being wired. It is no longer the intended long-term architecture.
 
 ## Key Configuration
 
@@ -334,6 +365,8 @@ The bridge MCP exposes:
 .claude/control/runtime/bridge_sdk.py
 .claude/control/runtime/bridge_leader.py
 .claude/control/runtime/claude_cli_executor.py
+.claude/control/runtime/outer_sdk_host.py
+.claude/control/runtime/outer_sdk/
 .claude/control/runtime/companion_observer.py
 .claude/hooks/*.py                        Claude hook adapters
 .claude/control/policy/*.json             Lifecycle, phase, approval policy

@@ -63,6 +63,7 @@ Each child directory is treated as one `repoKey`; each `repoKey/runs/<run-id>` d
 | Source file | Companion source | Display rule |
 | --- | --- | --- |
 | `sdk_stream_events.jsonl` | `sdk_stream` | discussion lane; assistant text, StreamEvent deltas, SDK tool declarations/results, and input JSON deltas |
+| `outer_host_events.jsonl` | `outer_host` | discussion lane; host input/result boundary events, source/projection only |
 | `tool_events.jsonl` | `hook_tool_event` | only source of tool started/completed/failed cards |
 | `agent_messages.jsonl` | `agent_message` | assignment cards |
 | `teammate_reports.jsonl` | `teammate_report` | report cards |
@@ -72,7 +73,7 @@ Each child directory is treated as one `repoKey`; each `repoKey/runs/<run-id>` d
 | `transitions.jsonl` | `runtime_snapshot` | lifecycle transitions |
 | `trajectory.jsonl` | `runtime_snapshot` | trajectory steps and audit context |
 
-The UI does not invent discussion text. If a run has tool events but no SDK text, agent message, or report text, the UI shows that only tool activity was captured.
+The UI does not invent discussion text. If a run has tool events but no SDK text, outer-host event, agent message, or report text, the UI shows that only tool activity was captured.
 
 SDK stream classification is explicit:
 
@@ -115,7 +116,7 @@ Each teammate card may show current tool, last completed tool, last discussion t
 Lane filters are multi-membership predicates:
 
 - Tools: `source == hook_tool_event`
-- Discussion: `source == sdk_stream || source == agent_message`
+- Discussion: `source == sdk_stream || source == outer_host || source == agent_message`
 - Reports: `source == teammate_report || source == artifact`
 - Processes: `source == process_event`
 - Completion: `source == completion_check`

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import importlib.util
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from claude_cli_executor import simulated_team_executor
 from artifact_refs import normalize_artifact_refs, validate_artifact_refs
 from completion_validator import completion_succeeded, validate_bridge_completion
 from main_leader import decide_next_bridge_packet
+from outer_sdk import ClaudeAgentSdkOuterLeaderAdapter, OuterSdkHost, OuterSdkHostConfig, UnavailableOuterLeaderAdapter
 from output_guardrails import validate_bridge_result, validate_completion_report, validate_log_manifest, validate_teammate_report
 from policy_compiler import compile_policy
 from repo_runtime import ensure_repo_registered, get_repo_runtime_root, list_registered_repos, resolve_repo_key
@@ -2613,6 +2615,154 @@ def run_policy_team_projection_tests(control_root: Path, runs_root: Path) -> dic
     return {"policy_team_projection": "passed"}
 
 
+def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
+    repo_root = runtime_dir / "target_repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    config = OuterSdkHostConfig.from_values(
+        control_root=control_root,
+        repo_root=repo_root,
+        default_main_session_id="outer_smoke_main",
+    )
+    host = OuterSdkHost(config, adapter=UnavailableOuterLeaderAdapter())
+    response = host.handle_user_input(
+        {
+            "text": "read the current runtime status and report",
+            "target_phase": "l3_bridge",
+            "task_spec": {"task_subject": "outer host smoke", "task_kind": "preflight"},
+        }
+    )
+    if response.get("accepted") is not True:
+        raise AssertionError(json.dumps(response, ensure_ascii=False, indent=2))
+    if response.get("leader_result", {}).get("error_or_null", {}).get("type") != "OuterLeaderSdkNotConfigured":
+        raise AssertionError(json.dumps(response, ensure_ascii=False, indent=2))
+    repo_key = response["host"]["repo_key"]
+    run_id = response["host"]["run_id"]
+    run_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / run_id
+    event_log = _read_jsonl(run_root / "event_log.jsonl")
+    if not any(item.get("event_kind") == "user_prompt_submitted" for item in event_log):
+        raise AssertionError(json.dumps(event_log, ensure_ascii=False, indent=2))
+    host_events = _read_jsonl(run_root / "outer_host_events.jsonl")
+    if not any((item.get("runtime_event") or {}).get("source") == "outer_sdk" for item in host_events):
+        raise AssertionError(json.dumps(host_events, ensure_ascii=False, indent=2))
+    stream_events = _read_jsonl(run_root / "sdk_stream_events.jsonl")
+    if not any(item.get("event_type") == "outer_user_input" for item in stream_events):
+        raise AssertionError(json.dumps(stream_events, ensure_ascii=False, indent=2))
+    sdk_adapter = ClaudeAgentSdkOuterLeaderAdapter(config)
+    sdk_adapter._load_sdk = lambda: None
+    sdk_missing = sdk_adapter.handle_user_input(
+        {
+            "repo_key": repo_key,
+            "run_id": run_id,
+            "main_session_id": "outer_smoke_main",
+            "input_id": "in_sdk_missing",
+            "text": "verify missing SDK dependency handling",
+        }
+    )
+    if sdk_missing.get("error_or_null", {}).get("type") != "OuterLeaderSdkDependencyMissing":
+        raise AssertionError(json.dumps(sdk_missing, ensure_ascii=False, indent=2))
+
+    class FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTextBlock:
+        def __init__(self, text: str):
+            self.type = "text"
+            self.text = text
+
+    class FakeAssistantMessage:
+        def __init__(self, text: str):
+            self.content = [FakeTextBlock(text)]
+
+    class FakeResultMessage:
+        def __init__(self):
+            self.subtype = "success"
+            self.result = "fake sdk success"
+            self.session_id = "outer_smoke_main"
+
+    class FakeClaudeSDKClient:
+        instances = []
+
+        def __init__(self, *, options):
+            self.options = options
+            self.queries = []
+            self.connected = False
+            self._pending = []
+            FakeClaudeSDKClient.instances.append(self)
+
+        async def connect(self):
+            self.connected = True
+
+        async def query(self, prompt, session_id=None):
+            self.queries.append({"prompt": prompt, "session_id": session_id})
+            self._pending = [FakeAssistantMessage(f"fake response {len(self.queries)}"), FakeResultMessage()]
+
+        async def receive_response(self):
+            for message in self._pending:
+                yield message
+            self._pending = []
+
+    class FakeSdkModule:
+        ClaudeAgentOptions = FakeOptions
+        ClaudeSDKClient = FakeClaudeSDKClient
+
+    sdk_adapter = ClaudeAgentSdkOuterLeaderAdapter(config)
+    sdk_adapter._load_sdk = lambda: FakeSdkModule
+    sdk_events = []
+    sdk_request = {
+        "repo_key": repo_key,
+        "run_id": run_id,
+        "main_session_id": "outer_smoke_main",
+        "input_id": "in_sdk_fake_1",
+        "text": "first fake SDK input",
+    }
+    sdk_first = sdk_adapter.handle_user_input(sdk_request, event_sink=lambda event_type, payload, **kwargs: sdk_events.append({"event_type": event_type, "payload": payload, **kwargs}))
+    sdk_request["input_id"] = "in_sdk_fake_2"
+    sdk_request["text"] = "second fake SDK input"
+    sdk_second = sdk_adapter.handle_user_input(sdk_request, event_sink=lambda event_type, payload, **kwargs: sdk_events.append({"event_type": event_type, "payload": payload, **kwargs}))
+    if sdk_first.get("status") != "succeeded" or sdk_second.get("status") != "succeeded":
+        raise AssertionError(json.dumps({"first": sdk_first, "second": sdk_second}, ensure_ascii=False, indent=2))
+    if len(FakeClaudeSDKClient.instances) != 1:
+        raise AssertionError(json.dumps({"client_instances": len(FakeClaudeSDKClient.instances)}, ensure_ascii=False, indent=2))
+    fake_client = FakeClaudeSDKClient.instances[0]
+    if [item.get("session_id") for item in fake_client.queries] != ["outer_smoke_main", "outer_smoke_main"]:
+        raise AssertionError(json.dumps(fake_client.queries, ensure_ascii=False, indent=2))
+    if not any(item.get("event_type") == "sdk_stream_assistant_text" for item in sdk_events):
+        raise AssertionError(json.dumps(sdk_events, ensure_ascii=False, indent=2))
+    if not fake_client.options.kwargs.get("mcp_servers", {}).get("bridge"):
+        raise AssertionError(json.dumps(fake_client.options.kwargs, ensure_ascii=False, indent=2))
+    if fake_client.options.kwargs.get("strict_mcp_config") is not True:
+        raise AssertionError(json.dumps(fake_client.options.kwargs, ensure_ascii=False, indent=2))
+    cli = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parent / "outer_sdk_host.py"),
+            "--control-root",
+            str(control_root),
+            "--repo-root",
+            str(repo_root),
+            "--main-session-id",
+            "outer_smoke_cli",
+            "--adapter",
+            "unavailable",
+            "--input-json",
+            json.dumps({"text": "record a CLI host input", "input_kind": "user_prompt"}, ensure_ascii=False),
+        ],
+        cwd=str(runtime_dir),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    if cli.returncode != 0:
+        raise AssertionError(json.dumps({"stdout": cli.stdout, "stderr": cli.stderr}, ensure_ascii=False, indent=2))
+    cli_response = json.loads(cli.stdout)
+    if cli_response.get("accepted") is not True or cli_response.get("host", {}).get("adapter") != "unavailable":
+        raise AssertionError(json.dumps(cli_response, ensure_ascii=False, indent=2))
+    return {"outer_sdk_host": "passed"}
+
+
 def main() -> None:
     workspace_tmp = Path.cwd() / ".runtime_smoke_tmp"
     workspace_tmp.mkdir(parents=True, exist_ok=True)
@@ -2626,6 +2776,7 @@ def main() -> None:
             raise AssertionError(json.dumps({"expected_phase": "l4_execute", "snapshot": success}, ensure_ascii=False, indent=2))
         bridge_boundary = run_bridge_boundary_tests(control_root, runs_root)
         event_artifact_completion = run_event_artifact_completion_tests(control_root, runs_root)
+        outer_sdk_host = run_outer_sdk_host_tests(control_root, runtime_dir)
         state_graph = run_state_graph_tests(control_root, runs_root)
         retry_control_root, retry_runs_root = build_fixture(runtime_dir / "retry")
         retry_policy = run_retry_policy_tests(retry_control_root, retry_runs_root)
@@ -2678,6 +2829,7 @@ def main() -> None:
             "guardrails": guardrails["guardrails"],
             "bridge_boundary": bridge_boundary["bridge_boundary"],
             "event_artifact_completion": event_artifact_completion["event_artifact_completion"],
+            "outer_sdk_host": outer_sdk_host["outer_sdk_host"],
             "policy_team_projection": policy_team_projection["policy_team_projection"],
             "checkpoint_trajectory": checkpoint_trajectory["checkpoint_trajectory"],
             "checkpoint_write_order": checkpoint_write_order["checkpoint_write_order"],
@@ -2709,6 +2861,7 @@ def main() -> None:
         assert summary["guardrails"] == "passed"
         assert summary["bridge_boundary"] == "passed"
         assert summary["event_artifact_completion"] == "passed"
+        assert summary["outer_sdk_host"] == "passed"
         assert summary["policy_team_projection"] == "passed"
         assert summary["checkpoint_trajectory"] == "passed"
         assert summary["checkpoint_write_order"] == "passed"

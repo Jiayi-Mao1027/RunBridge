@@ -60,14 +60,18 @@ Optional overrides:
 - `BRIDGE_COMPANION_STREAM_INTERVAL_MS`: default `750`
 - `BRIDGE_COMPANION_TOKEN`: optional bearer/query/header token required for `/api/*`
 - `BRIDGE_COMPANION_ORIGIN`: optional CORS allow origin; default `http://127.0.0.1:<port>`
+- `BRIDGE_OUTER_HOST_URL`: optional long-lived outer host URL, for example `http://127.0.0.1:8791`; enables `/api/leader/input` forwarding
+- `BRIDGE_OUTER_HOST_TOKEN`: optional token forwarded to the outer host as `x-bridge-outer-host-token`
 - `BRIDGE_COMPANION_ALLOW_PROJECT_SECRET=1`: allow loading `bridge-companion/key.json` for `/api/brief`. By default the gateway only uses `BRIDGE_BRIEF_API_KEY`.
 
 The gateway is a read-only projection layer. It redacts common token/password/secret patterns before responses and only serves files from the configured runtime roots and the Companion static directory.
+When `/api/leader/input` is enabled, the gateway only forwards the user message to the separate outer host. The outer host records runtime facts; Companion still does not own policy, routing, completion, or recovery truth.
 
 Projection fixture check:
 
 ```powershell
 npm run test:projection
+npm run test:leader-input
 ```
 
 ## Read-Only API
@@ -85,6 +89,7 @@ GET /api/repos/:repoKey/runs/:runId/stream?after=<seq>&afterId=<eventId>&afterCu
 GET /api/repos/:repoKey/runs/:runId/raw?file=<jsonl>&offset=<line>
 GET /api/session-observer/events?after=<seq>&afterId=<eventId>&afterCursor=<json>&limit=500
 GET /api/session-observer/stream?after=<seq>&afterId=<eventId>&afterCursor=<json>
+POST /api/leader/input
 POST /api/brief
 ```
 
@@ -129,12 +134,12 @@ The SSE path uses a per-source JSONL tailer after the initial backfill. It track
 
 If a tailed source file is truncated or rewritten, the gateway resets that file cursor and emits a `gateway_warning` SSE event. The UI displays the warning as a fact and does not infer task failure.
 
-SDK stream events are displayed in the discussion lane. SDK `tool_use` / `tool_result` / `input_json_delta` events are never rendered as real Read/Edit/Bash cards; those cards still require hook `tool_events.jsonl`.
+SDK stream and outer-host boundary events are displayed in the discussion lane. SDK `tool_use` / `tool_result` / `input_json_delta` events are never rendered as real Read/Edit/Bash cards; those cards still require hook `tool_events.jsonl`.
 
 The activity lanes are filters, not exclusive state buckets:
 
 - Tools: `hook_tool_event`
-- Discussion: `sdk_stream` or `agent_message`
+- Discussion: `sdk_stream`, `outer_host`, or `agent_message`
 - Reports: `teammate_report` or `artifact`
 - Processes: `process_event`
 - Completion: `completion_check`
