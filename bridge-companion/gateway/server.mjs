@@ -663,6 +663,21 @@ function messageFor(sourceFile, record) {
       ].filter(Boolean).join(" ")
     );
   }
+  if (sourceFile === "outer_host_events.jsonl") {
+    const payload = record.payload && typeof record.payload === "object" ? record.payload : {};
+    const leaderResult = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : {};
+    const request = payload.request && typeof payload.request === "object" ? payload.request : payload;
+    if (record.event_kind === "outer_leader_result" || leaderResult.status) {
+      const report = Array.isArray(leaderResult.reports) ? leaderResult.reports[0] : null;
+      return compactText([
+        "leader",
+        leaderResult.status,
+        report?.summary,
+        leaderResult.error_or_null?.type || leaderResult.error_or_null?.message
+      ].filter(Boolean).join(" "));
+    }
+    if (request.safe_preview) return compactText(request.safe_preview);
+  }
   if (record.message_preview) return compactText(record.message_preview);
   if (record.summary) return compactText(record.summary);
   if (record.title) return compactText(record.title);
@@ -692,7 +707,7 @@ function normalizeRunRecord(repoKey, runId, item) {
     sourceByteOffset: item.sourceByteOffset ?? undefined
   };
   const { source, kind } = sourceAndKind(item.sourceFile, record);
-  const status = normalizeStatus(record.status || record.state || record.lifecycle_status);
+  const status = normalizeStatus(record.status || record.state || record.lifecycle_status || record.payload?.leader_result?.status);
   const eventId = stableEventId(actualRepoKey, actualRunId, item.sourceFile, item.sourceOffset, item.sourceSequence);
   const textDelta = sdkTextDelta(record, item.sourceFile);
   const event = {
@@ -1157,6 +1172,7 @@ async function buildProjection(repoKey, runId) {
     agentMessageCards: events.filter(event => event.source === "agent_message" || event.source === "sdk_stream" || event.source === "outer_host").slice(-120).map(projectMessageCard),
     artifactCards: events.filter(event => event.source === "artifact" || event.evidenceRefs?.length).slice(-120).map(projectArtifactCard),
     completionChecklist: projectCompletionChecklist(events),
+    leaderReportCards: projectLeaderReportCards(events),
     failureRetryLane: events.filter(event => event.lane === "failures" || ["failed", "blocked", "rejected"].includes(String(event.status || ""))).slice(-80).map(projectTimelineEvent),
     semanticCoverageMatrix: projectSemanticCoverage(events),
     rawJsonRefs: events.slice(-300).map(event => ({ eventId: event.eventId, rawRef: event.rawRef, sourceAuthority: event.runtimeEvent?.authority || "observed" })),
@@ -1200,6 +1216,36 @@ function projectMessageCard(event) {
     textDelta: event.textDelta || undefined,
     toolInputDelta: event.toolInputDelta || undefined,
     sdkToolName: event.sdkToolName || undefined
+  };
+}
+
+function projectLeaderReportCards(events) {
+  const outerResults = events.filter(event => event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result");
+  const sourceEvents = outerResults.length ? outerResults : events;
+  return sourceEvents
+    .filter(event => {
+      const sdkType = String(event.raw?.sdk_message_type || event.raw?.event_type || "");
+      return (
+        (event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result") ||
+        (event.source === "sdk_stream" && ["ResultMessage", "sdk_stream_final_result"].includes(sdkType))
+      );
+    })
+    .slice(-40)
+    .map(projectLeaderReportCard);
+}
+
+function projectLeaderReportCard(event) {
+  const raw = event.raw || {};
+  const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+  const leaderResult = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : null;
+  const report = Array.isArray(leaderResult?.reports) ? leaderResult.reports[0] : null;
+  return {
+    ...projectTimelineEvent(event),
+    handledBy: leaderResult?.handled_by || raw.handled_by || raw.source || undefined,
+    reportStatus: leaderResult?.status || raw.status || event.status || "unknown",
+    summary: report?.summary || raw.result || event.messagePreview || "",
+    error: leaderResult?.error_or_null || raw.error_or_null || null,
+    evidence: leaderResult?.evidence || raw.evidence || null
   };
 }
 
@@ -1432,10 +1478,22 @@ async function generateBrief(input) {
 
 async function parseBody(req) {
   return new Promise(resolve => {
-    let body = "";
-    req.setEncoding("utf8");
-    req.on("data", chunk => { body += chunk; });
+    const chunks = [];
+    req.on("data", chunk => { chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)); });
     req.on("end", () => {
+      const buffer = Buffer.concat(chunks);
+      const candidates = [
+        () => new TextDecoder("utf-8", { fatal: true }).decode(buffer),
+        () => new TextDecoder("gb18030", { fatal: true }).decode(buffer),
+        () => buffer.toString("utf8")
+      ];
+      let body = "";
+      for (const decode of candidates) {
+        try {
+          body = decode();
+          break;
+        } catch {}
+      }
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch {

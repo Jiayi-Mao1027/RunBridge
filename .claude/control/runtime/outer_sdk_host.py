@@ -97,7 +97,7 @@ def serve(host: OuterSdkHost, *, bind_host: str, port: int) -> None:
         def _read_json_body(self) -> dict[str, Any]:
             length = int(self.headers.get("content-length") or 0)
             raw = self.rfile.read(length) if length else b"{}"
-            payload = json.loads(raw.decode("utf-8"))
+            payload = json.loads(_decode_request_body(raw))
             if not isinstance(payload, dict):
                 raise ValueError("request body must be a JSON object")
             return payload
@@ -132,6 +132,15 @@ def serve(host: OuterSdkHost, *, bind_host: str, port: int) -> None:
 def _first(query: dict[str, list[str]], key: str) -> str | None:
     values = query.get(key)
     return values[0] if values else None
+
+
+def _decode_request_body(raw: bytes) -> str:
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 if __name__ == "__main__":

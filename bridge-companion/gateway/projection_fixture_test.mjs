@@ -96,6 +96,29 @@ try {
     },
     sequence: 1
   });
+  await appendJsonl(path.join(runRoot, "outer_host_events.jsonl"), {
+    schema_version: "outer_sdk_host_event.v1",
+    timestamp: "2026-05-11T00:00:04.000Z",
+    event_kind: "outer_leader_result",
+    source: "outer_sdk_host",
+    authority: "source",
+    run_id: runId,
+    repo_key: repoKey,
+    payload: {
+      request: { run_id: runId, repo_key: repoKey, main_session_id: "outer-main" },
+      leader_result: {
+        status: "succeeded",
+        handled_by: "claude-agent-sdk",
+        reports: [{ summary: "leader reported runtime status" }],
+        artifact_refs: [],
+        evidence: { sdk_message_count: 2 },
+        error_or_null: null,
+        cleanup_required: false
+      }
+    },
+    runtime_event: { authority: "source", event_id: "evt_outer_result" },
+    sequence: 1
+  });
 
   const projection = await buildProjection(repoKey, runId);
   assert.equal(projection.schemaVersion, "companion_projection.v1");
@@ -105,6 +128,7 @@ try {
   assert.ok(projection.timeline.length >= 3);
   assert.ok(projection.liveToolCards.some(card => card.toolName === "Read"));
   assert.equal(projection.completionChecklist.validatedBy, "completion_validator.v1");
+  assert.ok(projection.leaderReportCards.some(card => card.reportStatus === "succeeded" && card.handledBy === "claude-agent-sdk"));
   assert.ok(projection.semanticCoverageMatrix.some(row => row.disposition === "completed"));
   assert.ok(projection.rawJsonRefs.every(ref => ref.sourceAuthority !== "authoritative"));
   const disabledInput = await submitLeaderInput({ text: "hello" });
