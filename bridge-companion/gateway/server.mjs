@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { reduceToTuiView } from "./tui_projection.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -95,6 +96,7 @@ const runSourceFiles = [
   "artifacts.jsonl",
   "completion_checks.jsonl",
   "transitions.jsonl",
+  "event_log.jsonl",
   "trajectory.jsonl"
 ];
 
@@ -103,6 +105,12 @@ const sessionObserverFiles = [
   "tool_events.jsonl",
   "session_events.jsonl",
   "session_bindings.jsonl"
+];
+
+const runJsonFiles = [
+  "runtime_snapshot.json",
+  "run_ledger.json",
+  "active_operations.json"
 ];
 
 const activeSseClients = new Set();
@@ -689,6 +697,10 @@ function sourceAndKind(sourceFile, record) {
       kind: text.includes("reject") || text.includes("fail") ? "completion_rejected" : "completion_passed"
     };
   }
+  if (sourceFile === "event_log.jsonl") {
+    const lifecycleKind = String(record.event_kind || eventType || "lifecycle_transition");
+    return { source: "runtime_snapshot", kind: lifecycleKind };
+  }
   if (sourceFile === "trajectory.jsonl") {
     return { source: "runtime_snapshot", kind: "lifecycle_transition" };
   }
@@ -1002,7 +1014,17 @@ async function loadCompanionData(repoKey, runId) {
   const snapshot = await readJsonIfExists(path.join(dir, "runtime_snapshot.json"), null);
   const runLedger = await readJsonIfExists(path.join(dir, "run_ledger.json"), null);
   const activeOperations = await readJsonIfExists(path.join(dir, "active_operations.json"), null);
-  const sessionBindings = await readJsonlWithMeta(path.join(dir, "session_bindings.jsonl"), "session_bindings.jsonl");
+  const sessionBindings = (await readJsonlWithMeta(path.join(dir, "session_bindings.jsonl"), "session_bindings.jsonl")).map(item => ({
+    ...item.record,
+    rawRef: {
+      sourceFile: item.sourceFile,
+      sourceOffset: item.sourceOffset,
+      sourceSequence: item.sourceSequence,
+      sourceByteOffset: item.sourceByteOffset ?? undefined
+    },
+    rawLine: item.rawLine,
+    parseError: item.parseError || undefined
+  }));
   const trajectory = (await readJsonlWithMeta(path.join(dir, "trajectory.jsonl"), "trajectory.jsonl")).map(item => ({
     ...item.record,
     rawRef: {
@@ -1021,7 +1043,7 @@ async function loadCompanionData(repoKey, runId) {
     snapshot,
     runLedger,
     activeOperations,
-    sessionBindings: sessionBindings.map(item => item.record),
+    sessionBindings,
     trajectory,
     events
   };
@@ -1255,6 +1277,15 @@ async function buildProjection(repoKey, runId) {
   if (!data) return null;
   const packetSummary = packetSummaryFrom(data.snapshot, data.runLedger, data.events);
   const events = data.events || [];
+  const unknowns = unknownsFor(data);
+  const tuiView = reduceToTuiView(events, data.snapshot, data.activeOperations, {
+    repoKey,
+    runId,
+    packetSummary,
+    runLedger: data.runLedger,
+    sessionBindings: data.sessionBindings,
+    unknowns
+  });
   return {
     schemaVersion: "companion_projection.v1",
     authority: "projection",
@@ -1288,7 +1319,8 @@ async function buildProjection(repoKey, runId) {
     failureRetryLane: events.filter(event => event.lane === "failures" || ["failed", "blocked", "rejected"].includes(String(event.status || ""))).slice(-80).map(projectTimelineEvent),
     semanticCoverageMatrix: projectSemanticCoverage(events),
     rawJsonRefs: events.slice(-300).map(event => ({ eventId: event.eventId, rawRef: event.rawRef, sourceAuthority: event.runtimeEvent?.authority || "observed" })),
-    unknowns: unknownsFor(data)
+    unknowns,
+    tuiView
   };
 }
 
@@ -1458,10 +1490,39 @@ async function rawRecord(repoKey, runId, sourceFile, sourceOffset) {
   const safeFile = runSourceFiles.includes(sourceFile) || sourceFile === "session_bindings.jsonl"
     ? sourceFile
     : null;
-  if (!safeFile) return null;
+  if (!safeFile && !runJsonFiles.includes(sourceFile)) return null;
   if (!Number.isInteger(Number(sourceOffset)) || Number(sourceOffset) < 1) return null;
   const dir = runDir(repoKey, runId);
   if (!dir) return null;
+  if (runJsonFiles.includes(sourceFile)) {
+    if (Number(sourceOffset) !== 1) return null;
+    const filePath = path.join(dir, sourceFile);
+    const rawLine = await readFile(filePath, "utf8").catch(() => "");
+    if (!rawLine) return null;
+    let record = null;
+    let parseError = null;
+    try {
+      record = JSON.parse(rawLine);
+    } catch (error) {
+      parseError = `${error.name}: ${error.message}`;
+    }
+    return {
+      record,
+      rawLine,
+      parseError,
+      sourceFile,
+      sourceOffset: 1,
+      sourceSequence: 1,
+      sourceByteOffset: 0,
+      rawRef: {
+        sourceFile,
+        sourceOffset: 1,
+        sourceSequence: 1,
+        sourceByteOffset: 0,
+        sourceKind: "json"
+      }
+    };
+  }
   const records = await readJsonlWithMeta(path.join(dir, safeFile), safeFile);
   return records.find(item => Number(item.sourceOffset) === Number(sourceOffset)) || null;
 }

@@ -189,11 +189,11 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .tree-list, .activity-list, .trajectory-list {
+    .tree-list, .activity-list, .trajectory-list, .completion-list {
       display: grid;
       gap: 8px;
     }
-    .member, .event, .step {
+    .member, .event, .step, .check-row {
       border: 1px solid var(--line);
       border-radius: 7px;
       background: #15191c;
@@ -239,7 +239,11 @@
       cursor: pointer;
       transition: border-color .15s ease, background .15s ease;
     }
-    .event:hover, .event.selected {
+    .member.selectable {
+      cursor: pointer;
+      transition: border-color .15s ease, background .15s ease;
+    }
+    .event:hover, .event.selected, .member.selectable:hover, .member.selected {
       border-color: var(--accent);
       background: #17201d;
     }
@@ -368,6 +372,39 @@
       max-height: 150px;
       overflow: auto;
     }
+    .leader-kv {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .leader-kv div {
+      display: grid;
+      grid-template-columns: 112px 1fr;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .leader-kv b {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .check-row {
+      display: grid;
+      grid-template-columns: 24px 1fr;
+      gap: 8px;
+      align-items: start;
+    }
+    .check-mark {
+      color: var(--muted);
+      font-weight: 700;
+      text-align: center;
+    }
+    .check-row.passed .check-mark { color: var(--ok); }
+    .check-row.failed .check-mark, .check-row.blocked .check-mark { color: var(--danger); }
+    .source-quality {
+      color: var(--accent-2);
+      font-size: 12px;
+    }
     .brief-output {
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -417,7 +454,7 @@
       <aside class="left-stack">
         <section class="panel">
           <div class="panel-header">
-            <h2>Run Summary</h2>
+            <h2>Main Task</h2>
             <span class="meta" id="summaryMeta">no run</span>
           </div>
           <div class="panel-body">
@@ -458,8 +495,8 @@
 
         <section class="panel">
           <div class="panel-header">
-            <h2>Team Tree</h2>
-            <span class="meta">sessions and tools</span>
+            <h2>Team</h2>
+            <span class="meta" id="teamMeta">0 teammates</span>
           </div>
           <div class="panel-body">
             <div class="tree-list" id="teamTree" data-testid="team-tree"></div>
@@ -470,7 +507,7 @@
       <section class="center-stack">
         <section class="panel">
           <div class="panel-header">
-            <h2>Leader Report</h2>
+            <h2>Main Leader View</h2>
             <span class="meta" id="leaderReportMeta">no result</span>
           </div>
           <div class="panel-body">
@@ -498,8 +535,8 @@
       <aside class="right-stack">
         <section class="panel">
           <div class="panel-header">
-            <h2>Live Activity Stream</h2>
-            <span class="meta" id="activityMeta">0 events</span>
+            <h2>Live Activity</h2>
+            <span class="meta" id="activityMeta">0 items</span>
           </div>
           <div class="panel-body">
             <div class="lane-tabs" id="laneTabs" aria-label="activity filters">
@@ -517,10 +554,12 @@
 
         <section class="panel">
           <div class="panel-header">
-            <h2>Unknowns</h2>
-            <span class="meta">from facts</span>
+            <h2>Completion / Unknowns</h2>
+            <span class="meta">contract and gaps</span>
           </div>
           <div class="panel-body">
+            <div class="completion-list" id="completionList" data-testid="completion-list"></div>
+            <div style="height:10px"></div>
             <div id="unknownsList" class="tree-list"></div>
           </div>
         </section>
@@ -553,6 +592,7 @@
       lastLeaderResponse: null,
       selectedEventSeq: null,
       selectedEventId: "",
+      selectedItemId: "",
       selectedTab: "raw",
       laneFilter: "all",
       briefText: "No model brief requested.",
@@ -632,6 +672,43 @@
         if (at !== bt) return at - bt;
         return String(a.eventId || a.seq).localeCompare(String(b.eventId || b.seq));
       });
+    }
+
+    function tuiView() {
+      return state.projection?.tuiView || {
+        header: {
+          repoKey: state.repoKey || "unknown",
+          runId: state.runId || "unknown",
+          taskTitle: state.status?.taskTitle || "No task packet recorded.",
+          phase: state.status?.phase || "unknown",
+          lifecycleState: state.status?.lifecycleState || "unknown",
+          latestMeaningfulEvent: "No meaningful event captured.",
+          nextStep: "Read runtime facts when projection is available."
+        },
+        mainReport: null,
+        teamTree: [],
+        activityItems: [],
+        completion: { status: "unknown", items: [], rawRefs: [] },
+        unknowns: state.status?.unknowns || [],
+        inspectorIndex: {}
+      };
+    }
+
+    function projectionItems() {
+      const view = tuiView();
+      return [
+        ...(view.activityItems || []),
+        ...(view.teamTree || []),
+        view.mainReport,
+        view.completion
+      ].filter(Boolean);
+    }
+
+    function projectionItemById(id) {
+      const view = tuiView();
+      return projectionItems().find(item => item.id === id || item.eventId === id) ||
+        view.inspectorIndex?.[id] ||
+        null;
     }
 
     function isFailureLike(event) {
@@ -763,6 +840,7 @@
       state.lastSeq = 0;
       state.lastEventId = "";
       state.sourceCursors = {};
+      state.selectedItemId = "";
       if (!state.repoKey) {
         state.runs = [];
         render();
@@ -802,6 +880,7 @@
       state.sourceCursors = {};
       state.selectedEventSeq = null;
       state.selectedEventId = "";
+      state.selectedItemId = "";
       if (!state.repoKey || !state.runId) {
         await refreshGatewayHealth();
         render();
@@ -863,7 +942,7 @@
         try {
           const parsed = JSON.parse(event.data);
           addEvents([parsed]);
-          render();
+          refreshProjection().finally(render);
         } catch {
           setChip("streamChip", "parse error", "warn");
         }
@@ -912,9 +991,9 @@
 
     function statusClass(status) {
       const value = String(status || "").toLowerCase();
-      if (value === "running" || value === "started") return "running";
-      if (value === "failed" || value === "blocked") return "failed";
-      if (value === "completed" || value === "succeeded" || value === "success") return "completed";
+      if (value === "running" || value === "started" || value === "active" || value === "waiting") return "running";
+      if (value === "failed" || value === "blocked" || value === "rejected") return "failed";
+      if (value === "completed" || value === "succeeded" || value === "success" || value === "satisfied" || value === "passed" || value === "reported") return "completed";
       return "";
     }
 
@@ -1027,6 +1106,15 @@
 
     function eventMatchesLane(event, lane) {
       if (lane === "all") return true;
+      if (event?.lane && event.source === undefined) {
+        if (lane === "tools") return event.lane === "tools" || event.kind === "tool";
+        if (lane === "discussion") return event.lane === "discussion" || event.kind === "discussion" || event.kind === "assignment";
+        if (lane === "reports") return event.lane === "reports" || event.kind === "teammate_report" || event.kind === "artifact";
+        if (lane === "processes") return event.lane === "processes" || event.kind === "process";
+        if (lane === "completion") return event.lane === "completion" || event.kind === "completion_check";
+        if (lane === "failures") return isFailureLike(event) || ["failed", "blocked", "rejected"].includes(String(event.status || "").toLowerCase());
+        return false;
+      }
       if (lane === "tools") return event?.source === "hook_tool_event";
       if (lane === "discussion") return event?.source === "sdk_stream" || event?.source === "agent_message" || event?.source === "outer_host";
       if (lane === "reports") return event?.source === "teammate_report" || event?.source === "artifact";
@@ -1114,16 +1202,16 @@
     }
 
     function renderSummary() {
-      const status = state.status || {};
-      const latestLifecycle = [...eventList()].reverse().find(event => event.kind === "lifecycle_transition");
+      const view = tuiView();
+      const header = view.header || {};
       $("repoValue").textContent = state.repoKey || "none";
       $("runValue").textContent = state.runId || "none";
-      $("eventCountValue").textContent = String(state.events.size);
-      $("trajectoryCountValue").textContent = String(status.trajectory?.length || 0);
-      $("taskValue").textContent = status.taskTitle || status.packetSummary?.objective || "No task packet recorded.";
-      $("summaryMeta").textContent = status.gateway?.state || "not connected";
-      setChip("phaseChip", status.phase || "unknown");
-      setChip("lifeChip", latestLifecycle?.messagePreview || status.lifecycleState || "unknown");
+      $("eventCountValue").textContent = String(view.debugSummary?.sourceDedupedEventCount ?? state.events.size);
+      $("trajectoryCountValue").textContent = String(state.status?.trajectory?.length || 0);
+      $("taskValue").textContent = header.taskTitle || "No task packet recorded.";
+      $("summaryMeta").textContent = state.status?.gateway?.state || "not connected";
+      setChip("phaseChip", header.phase || "unknown");
+      setChip("lifeChip", header.lifecycleState || "unknown");
     }
 
     function renderLeaderInput() {
@@ -1246,10 +1334,12 @@
     }
 
     function renderLeaderReports() {
-      const cards = dedupeLeaderReportCards([...projectedLeaderReportCards(), ...leaderReportEvents().map(leaderReportFromEvent)]);
-      $("leaderReportMeta").textContent = cards.length ? `${cards.length} result(s)` : "no result";
+      const view = tuiView();
+      const report = view.mainReport || {};
+      $("leaderReportMeta").textContent = report.status ? report.status : "no result";
       const response = state.lastLeaderResponse?.leader_result ? {
         eventId: "latest-response",
+        id: "latest-response",
         ts: new Date().toISOString(),
         status: state.lastLeaderResponse.leader_result.status || "unknown",
         handledBy: state.lastLeaderResponse.leader_result.handled_by || state.lastLeaderResponse.host?.adapter || "outer host",
@@ -1257,29 +1347,35 @@
         error: state.lastLeaderResponse.leader_result.error_or_null || null,
         evidence: state.lastLeaderResponse.leader_result.evidence || null
       } : null;
-      const responseKey = response ? leaderReportCardKey(response) : "";
-      const merged = response
-        ? [response, ...cards.filter(card => card.eventId !== response.eventId && leaderReportCardKey(card) !== responseKey)]
-        : cards;
-      $("leaderReportList").innerHTML = merged.length ? merged.slice(0, 10).map(card => `
-        <article class="leader-report ${card === merged[0] ? "primary" : ""}">
+      const cards = [response, report && report.summary ? {
+        id: report.id,
+        eventId: report.id,
+        status: report.status || "unknown",
+        handledBy: report.handledBy || "runtime",
+        summary: report.summary,
+        task: report.task,
+        currentState: report.currentState,
+        nextStep: report.nextStep,
+        rawRefs: report.rawRefs || []
+      } : null].filter(Boolean);
+      $("leaderReportList").innerHTML = cards.length ? cards.map((card, index) => `
+        <article class="leader-report selectable ${index === 0 ? "primary" : ""}" data-item-id="${escapeHtml(card.id || card.eventId || "")}">
           <div class="member-head">
             <div class="name">${escapeHtml(card.handledBy)}</div>
             <span class="badge ${escapeHtml(statusClass(card.status))}">${escapeHtml(card.status)}</span>
           </div>
           <div class="leader-summary">${escapeHtml(card.summary || "leader result recorded")}</div>
-          <div class="event-meta">
-            <span class="badge">${escapeHtml(card.ts || "no timestamp")}</span>
-            ${card.evidence?.sdk_message_count !== undefined ? `<span class="badge">SDK messages ${escapeHtml(card.evidence.sdk_message_count)}</span>` : ""}
-            ${card.rawRef ? `<button class="raw-link" data-report-raw="${escapeHtml(card.eventId)}">rawRef</button>` : ""}
+          <div class="leader-kv">
+            ${card.task ? `<div><b>Task</b><span>${escapeHtml(compact(card.task, 260))}</span></div>` : ""}
+            ${card.currentState ? `<div><b>State</b><span>${escapeHtml(card.currentState)}</span></div>` : ""}
+            ${card.nextStep ? `<div><b>Next</b><span>${escapeHtml(card.nextStep)}</span></div>` : ""}
           </div>
-          ${card.error ? `<pre>${escapeHtml(JSON.stringify(card.error, null, 2))}</pre>` : ""}
-          ${card.evidence ? `<pre>${escapeHtml(JSON.stringify(card.evidence, null, 2))}</pre>` : ""}
+          ${card.error ? `<div class="subtext">${escapeHtml(card.error.message || card.error.type || "error recorded")}</div>` : ""}
         </article>`).join("") : `<div class="empty">No leader result captured yet.</div>`;
-      document.querySelectorAll("[data-report-raw]").forEach(node => {
+      document.querySelectorAll("#leaderReportList [data-item-id]").forEach(node => {
         node.addEventListener("click", event => {
           event.stopPropagation();
-          openRawRef(node.dataset.reportRaw);
+          openInspectorItem(node.dataset.itemId);
         });
       });
     }
@@ -1336,6 +1432,47 @@
       });
     }
 
+    function renderTeamProjection() {
+      const members = tuiView().teamTree || [];
+      $("teamMeta").textContent = `${members.length} teammate(s)`;
+      $("teamTree").innerHTML = members.length ? members.map(member => {
+        const status = member.state || "unknown";
+        const actionText = member.currentAction || (member.currentTool ? `${member.currentTool} ${member.currentTarget || ""}` : "unknown");
+        const lastText = member.lastCompletedTool
+          ? `${member.lastCompletedTool.toolName || "tool"} ${member.lastCompletedTool.status || "completed"}${member.lastCompletedTool.target ? ` ${member.lastCompletedTool.target}` : ""}`
+          : "no completed tool captured";
+        const textPreview = member.lastTextPreview
+          ? `live text: ${compact(member.lastTextPreview, 120)}`
+          : "live text: not captured";
+        const reportText = member.lastReportSummary
+          ? `last report: ${compact(member.lastReportSummary, 120)}`
+          : "no report captured";
+        const unknownText = Array.isArray(member.unknowns) && member.unknowns.length
+          ? `<div class="subtext">${escapeHtml(member.unknowns.join("; "))}</div>`
+          : "";
+        return `
+          <article class="member selectable ${escapeHtml(statusClass(status))} ${state.selectedItemId === member.id ? "selected" : ""}" data-item-id="${escapeHtml(member.id)}">
+            <div class="member-head">
+              <div class="name">${escapeHtml(member.teammateId || member.role || member.id)}</div>
+              <span class="badge ${escapeHtml(statusClass(status))}">${escapeHtml(status)}</span>
+            </div>
+            <div class="subtext">role: ${escapeHtml(member.role || "unknown")}</div>
+            <div class="subtext">current: ${escapeHtml(compact(actionText, 130))}</div>
+            <div class="subtext">${escapeHtml(lastText)}</div>
+            <div class="subtext">${escapeHtml(textPreview)}</div>
+            <div class="subtext">${escapeHtml(reportText)}</div>
+            <div class="source-quality">source: ${escapeHtml(member.sourceQuality || "unknown")}</div>
+            ${unknownText}
+          </article>`;
+      }).join("") : `<div class="empty">No team/session binding captured.</div>`;
+      document.querySelectorAll("#teamTree [data-item-id]").forEach(node => {
+        node.addEventListener("click", event => {
+          event.stopPropagation();
+          openInspectorItem(node.dataset.itemId);
+        });
+      });
+    }
+
     function selectEvent(seq, tab = "raw") {
       state.selectedEventSeq = seq;
       const event = [...state.events.values()].find(item => item.seq === seq || item.eventId === seq);
@@ -1348,6 +1485,7 @@
       const event = state.events.get(id) || [...state.events.values()].find(item => item.seq === id || item.eventId === id) || projectedLeaderReportEvent(id);
       state.selectedEventSeq = event?.seq ?? null;
       state.selectedEventId = event?.eventId || String(id || "");
+      state.selectedItemId = "";
       state.selectedTab = "raw";
       render();
       if (!event?.rawRef || state.rawLookups.has(state.selectedEventId)) return;
@@ -1359,6 +1497,30 @@
       } catch (error) {
         state.rawLookups.set(state.selectedEventId, { error: error.message, rawRef: event.rawRef });
       }
+      renderDetail();
+    }
+
+    async function openInspectorItem(id) {
+      state.selectedItemId = id || "";
+      state.selectedEventId = "";
+      state.selectedEventSeq = null;
+      state.selectedTab = "raw";
+      render();
+      const payload = projectionItemById(id);
+      const rawRefs = payload?.rawRefs || payload?.inspector?.rawRefs || [];
+      if (!rawRefs.length || state.rawLookups.has(id)) return;
+      const rawRecords = [];
+      for (const ref of rawRefs.slice(0, 12)) {
+        if (!ref?.sourceFile || !ref?.sourceOffset) continue;
+        try {
+          const file = encodeURIComponent(ref.sourceFile);
+          const offset = encodeURIComponent(ref.sourceOffset);
+          rawRecords.push(await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/raw?file=${file}&offset=${offset}`));
+        } catch (error) {
+          rawRecords.push({ error: error.message, rawRef: ref });
+        }
+      }
+      state.rawLookups.set(id, { rawRecords, rawRefs });
       renderDetail();
     }
 
@@ -1426,6 +1588,52 @@
       });
     }
 
+    function projectionLaneCounts() {
+      const items = tuiView().activityItems || [];
+      const counts = { all: items.length, tools: 0, discussion: 0, reports: 0, processes: 0, completion: 0, failures: 0 };
+      for (const item of items) {
+        for (const lane of Object.keys(counts)) {
+          if (lane !== "all" && eventMatchesLane(item, lane)) counts[lane] += 1;
+        }
+      }
+      return counts;
+    }
+
+    function renderActivityProjection() {
+      const lane = state.laneFilter || "all";
+      const counts = projectionLaneCounts();
+      const items = (tuiView().activityItems || []).filter(item => eventMatchesLane(item, lane));
+      $("activityMeta").textContent = `${items.length} visible`;
+      document.querySelectorAll("#laneTabs button").forEach(button => {
+        button.classList.toggle("active", button.dataset.lane === lane);
+        const label = laneLabels[button.dataset.lane] || button.dataset.lane;
+        button.textContent = `${label} ${counts[button.dataset.lane] || 0}`;
+      });
+      $("activityList").innerHTML = items.length ? items.map(item => {
+        const selected = item.id === state.selectedItemId ? " selected" : "";
+        const files = Array.isArray(item.fileRefs) ? item.fileRefs.slice(0, 3) : [];
+        const stats = item.kind === "teammate_report"
+          ? `<span class="badge">done ${item.completedCount || 0}</span><span class="badge">open ${item.openCount || 0}</span><span class="badge">blocked ${item.blockedCount || 0}</span>`
+          : "";
+        return `
+          <article class="event${selected}" data-item-id="${escapeHtml(item.id)}">
+            <div class="event-head">
+              <div class="event-title">${escapeHtml(item.title || item.kind || "activity")}</div>
+              <span class="badge ${escapeHtml(statusClass(item.status))}">${escapeHtml(item.status || "recorded")}</span>
+            </div>
+            <div class="subtext">${escapeHtml(item.body || "recorded")}</div>
+            <div class="event-meta">
+              ${item.actor ? `<span class="badge">${escapeHtml(compact(item.actor, 64))}</span>` : ""}
+              ${stats}
+              ${files.map(file => `<span class="badge">${escapeHtml(compact(file, 48))}</span>`).join("")}
+            </div>
+          </article>`;
+      }).join("") : `<div class="empty">No ${escapeHtml(laneLabels[lane] || lane)} projected items for this run.</div>`;
+      document.querySelectorAll("#activityList [data-item-id]").forEach(node => {
+        node.addEventListener("click", () => openInspectorItem(node.dataset.itemId));
+      });
+    }
+
     function relatedTrajectory(event) {
       const steps = Array.isArray(state.status?.trajectory) ? state.status.trajectory : [];
       if (!event || !steps.length) return [];
@@ -1439,6 +1647,36 @@
         ...(event.evidenceRefs || [])
       ].filter(Boolean).map(String);
       if (!tokens.length) return steps.slice(-20);
+      return steps.filter(step => {
+        const text = JSON.stringify(step);
+        return tokens.some(token => text.includes(token));
+      }).slice(-40);
+    }
+
+    function relatedTrajectoryForInspector(selected, inspector) {
+      const events = Array.isArray(inspector?.normalizedEvents) ? inspector.normalizedEvents : [];
+      if (events.length) {
+        const merged = [];
+        const seen = new Set();
+        for (const event of events) {
+          for (const step of relatedTrajectory(event)) {
+            const key = step.trajectory_id || step.step_index || JSON.stringify(step).slice(0, 160);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            merged.push(step);
+          }
+        }
+        if (merged.length) return merged.slice(-40);
+      }
+      const steps = Array.isArray(state.status?.trajectory) ? state.status.trajectory : [];
+      const rawRefs = selected?.rawRefs || inspector?.rawRefs || [];
+      const evidenceRefs = selected?.evidenceRefs || inspector?.evidenceRefs || [];
+      const tokens = [
+        selected?.displayKey,
+        ...(rawRefs || []).map(ref => ref.sourceFile && ref.sourceOffset ? `${ref.sourceFile}:${ref.sourceOffset}` : ""),
+        ...(evidenceRefs || [])
+      ].filter(Boolean).map(String);
+      if (!tokens.length) return [];
       return steps.filter(step => {
         const text = JSON.stringify(step);
         return tokens.some(token => text.includes(token));
@@ -1499,6 +1737,58 @@
       $("terminalCommand").addEventListener("input", event => { state.terminal.command = event.target.value; });
     }
 
+    function renderProjectionDetail() {
+      const selected = projectionItemById(state.selectedItemId);
+      const inspector = tuiView().inspectorIndex?.[state.selectedItemId] || selected?.inspector || {};
+      if (!selected && !state.selectedItemId) {
+        $("detailMeta").textContent = "inspector";
+        $("detailBody").innerHTML = `<div class="empty">Select a team card, activity item, report, or completion item to inspect raw runtime data.</div>`;
+        return true;
+      }
+      if (!selected) return false;
+      $("detailMeta").textContent = selected.rawRefs?.length
+        ? `${selected.rawRefs.length} raw ref(s)`
+        : "projection";
+      if (state.selectedTab === "trajectory") {
+        const steps = relatedTrajectoryForInspector(selected, inspector);
+        $("detailBody").innerHTML = steps.length ? `
+          <div class="trajectory-list">
+            ${steps.map(step => `
+              <article class="step">
+                <div class="step-head">
+                  <div class="step-title">step ${escapeHtml(step.step_index ?? step.step ?? "?")}: ${escapeHtml(compact(trajectoryActionLabel(step), 100))}</div>
+                  <span class="badge">${escapeHtml(trajectoryActorLabel(step.actor || step.role))}</span>
+                </div>
+                <div class="subtext">${escapeHtml(compact(trajectoryObservationLabel(step), 260))}</div>
+                <pre>${escapeHtml(JSON.stringify(trajectoryStepView(step), null, 2))}</pre>
+              </article>`).join("")}
+          </div>` : `<div class="empty">No trajectory steps matched this selection.</div>`;
+        return true;
+      }
+      const rawLookup = state.rawLookups.get(state.selectedItemId);
+      const rawValue = rawLookup?.rawRecords?.length
+        ? rawLookup.rawRecords.map(item => ({
+          rawRef: item.rawRef,
+          record: item.record,
+          rawLine: item.rawLine,
+          parseError: item.parseError,
+          error: item.error
+        }))
+        : "Click an item to read its source JSON / JSONL records.";
+      $("detailBody").innerHTML = `<div class="detail-sections">
+        ${detailBlock("Raw JSON", rawValue)}
+        ${detailBlock("Projected Item", selected)}
+        ${detailBlock("Normalized Event", inspector.normalizedEvents || [])}
+        ${detailBlock("Related Trajectory", relatedTrajectoryForInspector(selected, inspector))}
+        ${detailBlock("Related Source Cursor", {
+          rawRefs: selected.rawRefs || inspector.rawRefs || [],
+          sourceCursors: inspector.sourceCursors || [],
+          evidenceRefs: selected.evidenceRefs || inspector.evidenceRefs || []
+        })}
+      </div>`;
+      return true;
+    }
+
     function renderDetail() {
       document.querySelectorAll(".tabs button").forEach(button => {
         button.classList.toggle("active", button.dataset.tab === state.selectedTab);
@@ -1507,6 +1797,8 @@
         renderTerminal();
         return;
       }
+      if (!state.selectedEventId && state.selectedTab !== "brief" && renderProjectionDetail()) return;
+      if (state.selectedItemId && state.selectedTab !== "brief" && renderProjectionDetail()) return;
       const selected =
         state.events.get(state.selectedEventId) ||
         [...state.events.values()].find(event => event.seq === state.selectedEventSeq) ||
@@ -1566,7 +1858,7 @@
     }
 
     function renderUnknowns() {
-      const unknowns = Array.isArray(state.status?.unknowns) ? state.status.unknowns : [];
+      const unknowns = Array.isArray(tuiView().unknowns) ? tuiView().unknowns : [];
       const warnings = state.gatewayWarnings || [];
       const items = [
         ...unknowns.map(item => ({ label: "unknown", text: item })),
@@ -1577,12 +1869,44 @@
         : `<div class="empty">No unknowns recorded.</div>`;
     }
 
+    function checkMark(status) {
+      const value = String(status || "").toLowerCase();
+      if (["passed", "pass", "satisfied", "completed"].includes(value)) return "✓";
+      if (["failed", "fail", "rejected", "blocked"].includes(value)) return "!";
+      return "";
+    }
+
+    function renderCompletion() {
+      const completion = tuiView().completion || { items: [] };
+      const items = Array.isArray(completion.items) ? completion.items : [];
+      const summary = `
+        <article class="member selectable ${state.selectedItemId === completion.id ? "selected" : ""}" data-item-id="${escapeHtml(completion.id || "")}">
+          <div class="member-head">
+            <div class="name">Completion contract</div>
+            <span class="badge ${escapeHtml(statusClass(completion.status))}">${escapeHtml(completion.status || "unknown")}</span>
+          </div>
+          ${completion.validatedBy ? `<div class="subtext">validated by ${escapeHtml(completion.validatedBy)}</div>` : ""}
+        </article>`;
+      $("completionList").innerHTML = `${summary}${items.length ? items.map(item => `
+        <article class="check-row ${escapeHtml(item.status || "unknown")}">
+          <div class="check-mark">${escapeHtml(checkMark(item.status))}</div>
+          <div>
+            <div class="name">${escapeHtml(item.label || item.name || "completion item")}</div>
+            <div class="subtext">${escapeHtml(item.message || item.status || "unknown")}</div>
+          </div>
+        </article>`).join("") : `<div class="empty">No completion checklist recorded.</div>`}`;
+      document.querySelectorAll("#completionList [data-item-id]").forEach(node => {
+        node.addEventListener("click", () => openInspectorItem(node.dataset.itemId));
+      });
+    }
+
     function render() {
       renderSummary();
       renderLeaderInput();
       renderLeaderReports();
-      renderTeam();
-      renderActivity();
+      renderTeamProjection();
+      renderActivityProjection();
+      renderCompletion();
       renderDetail();
       renderUnknowns();
     }
@@ -1739,7 +2063,7 @@
     document.querySelectorAll("#laneTabs button").forEach(button => {
       button.addEventListener("click", () => {
         state.laneFilter = button.dataset.lane || "all";
-        renderActivity();
+        renderActivityProjection();
       });
     });
     $("leaderInputForm").addEventListener("submit", submitLeaderMessage);

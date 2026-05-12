@@ -51,6 +51,33 @@ try {
     report_contract: { required_sections: ["summary", "evidence"] },
     sequence: 1
   });
+  await appendJsonl(path.join(runRoot, "session_bindings.jsonl"), {
+    timestamp: "2026-05-11T00:00:00.500Z",
+    event_type: "session_bindings",
+    run_id: runId,
+    bridge_window_id: "bw_projection",
+    team_id: "team_projection",
+    task_id: "task_projection",
+    session_id: "sess_executor",
+    teammate_id: "executor",
+    agent_type: "executor",
+    display_name: "executor",
+    run_binding_state: "bound_to_run",
+    sequence: 1
+  });
+  await appendJsonl(path.join(runRoot, "agent_messages.jsonl"), {
+    timestamp: "2026-05-11T00:00:00.750Z",
+    event_type: "agent_messages",
+    run_id: runId,
+    bridge_window_id: "bw_projection",
+    team_id: "team_projection",
+    task_id: "task_projection",
+    from: "bridge-leader",
+    to: "executor",
+    message_type: "assignment",
+    summary: "run fixture and report",
+    sequence: 1
+  });
   await appendJsonl(path.join(runRoot, "tool_events.jsonl"), {
     timestamp: "2026-05-11T00:00:01.000Z",
     event_type: "tool_events",
@@ -59,11 +86,55 @@ try {
     team_id: "team_projection",
     task_id: "task_projection",
     agent_id: "executor",
+    teammate_id: "executor",
+    agent_type: "executor",
+    session_id: "sess_executor",
+    tool_use_id: "tool_read_fixture",
+    tool_name: "Read",
+    status: "started",
+    target: "README.md",
+    runtime_event: { authority: "observed", event_id: "evt_tool_start" },
+    sequence: 1
+  });
+  await appendJsonl(path.join(runRoot, "tool_events.jsonl"), {
+    timestamp: "2026-05-11T00:00:01.500Z",
+    event_type: "tool_events",
+    run_id: runId,
+    bridge_window_id: "bw_projection",
+    team_id: "team_projection",
+    task_id: "task_projection",
+    agent_id: "executor",
+    teammate_id: "executor",
+    agent_type: "executor",
+    session_id: "sess_executor",
+    tool_use_id: "tool_read_fixture",
     tool_name: "Read",
     status: "completed",
     target: "README.md",
-    runtime_event: { authority: "projection", event_id: "evt_tool" },
-    sequence: 1
+    file_refs: [{ path: "README.md", role: "read" }],
+    duration_ms: 500,
+    runtime_event: { authority: "observed", event_id: "evt_tool" },
+    sequence: 2
+  });
+  await writeJson(path.join(runRoot, "active_operations.json"), {
+    run_id: runId,
+    updated_at: "2026-05-11T00:00:01.500Z",
+    teammates: [{
+      teammate_id: "executor",
+      agent_type: "executor",
+      display_name: "executor",
+      session_id: "sess_executor",
+      bridge_window_id: "bw_projection",
+      team_id: "team_projection",
+      task_id: "task_projection",
+      active_tool: null,
+      last_completed_tool: {
+        tool_use_id: "tool_read_fixture",
+        tool_name: "Read",
+        status: "completed",
+        target: "README.md"
+      }
+    }]
   });
   await appendJsonl(path.join(runRoot, "teammate_reports.jsonl"), {
     timestamp: "2026-05-11T00:00:02.000Z",
@@ -78,6 +149,25 @@ try {
       instruction_coverage: { "run fixture and report": "completed" },
       evidence_refs: ["event:evt_tool"]
     },
+    sequence: 1
+  });
+  await appendJsonl(path.join(runRoot, "transitions.jsonl"), {
+    timestamp: "2026-05-11T00:00:03.500Z",
+    event_kind: "bridge_window_opened",
+    run_id: runId,
+    bridge_window_id: "bw_projection",
+    from_status: "bridge_call_started",
+    to_status: "bridge_window_opened",
+    sequence: 1
+  });
+  await appendJsonl(path.join(runRoot, "event_log.jsonl"), {
+    timestamp: "2026-05-11T00:00:03.600Z",
+    event_kind: "bridge_window_opened",
+    event_type: "bridge_window_opened",
+    run_id: runId,
+    bridge_window_id: "bw_projection",
+    from_status: "bridge_call_started",
+    to_status: "bridge_window_opened",
     sequence: 1
   });
   await appendJsonl(path.join(runRoot, "completion_checks.jsonl"), {
@@ -221,6 +311,21 @@ try {
   assert.ok(redactedInputResponse.leader_result.reports[0].summary.includes("report-tail-marker"));
   assert.ok(projection.semanticCoverageMatrix.some(row => row.disposition === "completed"));
   assert.ok(projection.rawJsonRefs.every(ref => ref.sourceAuthority !== "authoritative"));
+  assert.equal(projection.tuiView.schemaVersion, "companion_tui_view.v1");
+  assert.equal(projection.tuiView.header.lifecycleState, "team_waiting");
+  assert.equal(projection.tuiView.mainReport.status, "succeeded");
+  const tuiReadCards = projection.tuiView.activityItems.filter(item => item.kind === "tool" && item.toolName === "Read");
+  assert.equal(tuiReadCards.length, 1);
+  assert.equal(tuiReadCards[0].status, "completed");
+  assert.equal(tuiReadCards[0].rawRefs.length, 2);
+  assert.ok(!("source" in tuiReadCards[0]));
+  assert.ok(projection.tuiView.activityItems.some(item => item.kind === "waiting" && item.title === "Waiting for teammate evidence"));
+  assert.equal(projection.tuiView.activityItems.filter(item => item.kind === "lifecycle" && item.status === "bridge_window_opened").length, 0);
+  const executorCard = projection.tuiView.teamTree.find(item => item.teammateId === "executor");
+  assert.equal(executorCard.sourceQuality, "tool_activity");
+  assert.equal(executorCard.lastCompletedTool.toolName, "Read");
+  assert.ok(projection.tuiView.unknowns.includes("teammate tool activity captured; teammate live text not captured."));
+  assert.ok(projection.tuiView.inspectorIndex[tuiReadCards[0].id].rawRefs.length >= 2);
   const syntheticEvents = Array.from({ length: 605 }, (_, index) => ({ seq: index + 1, eventId: `evt_${index + 1}` }));
   const initialTail = filterEvents(syntheticEvents, new URLSearchParams("limit=500&tail=1"));
   assert.equal(initialTail.events[0].seq, 106);

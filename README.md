@@ -276,6 +276,17 @@ cd C:\path\to\workspace-parent\your-repo
 python ..\.claude\control\runtime\outer_sdk_host.py --control-root ..\.claude\control --repo-root . --main-session-id outer-main
 ```
 
+SSH/Linux development example for the current remote layout:
+
+```bash
+cd /data03/liang/mjy/safe_opd
+python3 ../.claude/control/runtime/outer_sdk_host.py \
+  --control-root ../.claude/control \
+  --repo-root . \
+  --main-session-id outer-main \
+  --adapter auto
+```
+
 At startup, `outer_sdk_host.py` derives the interactive Claude wrapper from the target repo structure: it first looks for `../.claude` relative to `--repo-root`, sets the Claude subprocess `HOME` to that parent directory, and uses `../.claude/mcp.json` as the MCP config. This is the system-owned equivalent of a shell alias such as `HOME=<repo-parent> claude --mcp-config <repo-parent>/.claude/mcp.json`; callers should not need to export that alias manually.
 
 Current status of this path:
@@ -293,6 +304,28 @@ cd C:\path\to\workspace-parent\bridge-companion
 $env:BRIDGE_OUTER_HOST_URL="http://127.0.0.1:8791"
 node gateway\server.mjs
 ```
+
+SSH/Linux Companion example:
+
+```bash
+cd /data03/liang/mjy/bridge-companion
+export BRIDGE_OUTER_HOST_URL="http://127.0.0.1:8791"
+node gateway/server.mjs
+```
+
+When accessing the remote UI from a local machine, forward both ports:
+
+```bash
+ssh -L 8787:127.0.0.1:8787 -L 8791:127.0.0.1:8791 root@10.26.128.46
+```
+
+If the outer host start reports `Address already in use`, first inspect the existing process instead of starting a duplicate:
+
+```bash
+curl -s http://127.0.0.1:8791/v1/status | python3 -m json.tool | grep -E '"adapter"|"run_id"|"started_at"'
+```
+
+The expected custom-provider path reports `"adapter": "claude-tmux-repl"`.
 
 ### Claude CLI Compatibility
 

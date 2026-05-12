@@ -21,6 +21,41 @@ http://127.0.0.1:8787/
 
 Without `BRIDGE_RUNTIME_ROOT`, the UI still opens with mock data. This is useful for UI/copy work.
 
+## SSH Development Startup
+
+For the current remote development layout, open an SSH session that forwards both the UI gateway and the outer host:
+
+```bash
+ssh -L 8787:127.0.0.1:8787 -L 8791:127.0.0.1:8791 root@10.26.128.46
+```
+
+In one remote terminal, start the outer host from the target repo:
+
+```bash
+cd /data03/liang/mjy/safe_opd
+python3 ../.claude/control/runtime/outer_sdk_host.py \
+  --control-root ../.claude/control \
+  --repo-root . \
+  --main-session-id outer-main \
+  --adapter auto
+```
+
+In another remote terminal, start the Companion gateway:
+
+```bash
+cd /data03/liang/mjy/bridge-companion
+export BRIDGE_OUTER_HOST_URL="http://127.0.0.1:8791"
+node gateway/server.mjs
+```
+
+If a port is already occupied, inspect the live process before starting another copy:
+
+```bash
+curl -s http://127.0.0.1:8791/v1/status | python3 -m json.tool | grep -E '"adapter"|"run_id"|"started_at"'
+```
+
+The healthy custom-provider path reports `"adapter": "claude-tmux-repl"`. `Address already in use` on `8791` usually means the outer host is already running; it is only a problem if `/v1/status` reports the wrong adapter or stale configuration.
+
 ## Outer Host Input Path
 
 Run the long-lived outer host separately from Companion:

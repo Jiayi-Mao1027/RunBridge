@@ -234,27 +234,40 @@ class TmuxReplOuterLeaderAdapter:
 def extract_assistant_text(capture: str, prompt: str | None = None) -> str:
     lines = [_clean_line(line) for line in _strip_ansi(capture).splitlines()]
     lines = [line for line in lines if line.strip()]
-    start = None
     for index, line in enumerate(lines):
-        if line.lstrip().startswith("●"):
-            start = index
-            break
-    if start is None:
-        return ""
-    collected: list[str] = []
-    for line in lines[start:]:
-        stripped = line.strip()
-        if stripped.startswith("✻") or stripped.startswith("❯"):
-            break
-        if "leader-orchestrator" in stripped and set(stripped.replace("leader-orchestrator", "").strip()) <= {"─", "-"}:
-            break
-        collected.append(line.rstrip())
-    return _limit_text("\n".join(collected).strip(), REPORT_TEXT_LIMIT)
+        if not line.lstrip().startswith("●"):
+            continue
+        collected: list[str] = []
+        for item in lines[index:]:
+            stripped = item.strip()
+            if stripped.startswith("✻") or stripped.startswith("❯"):
+                break
+            if "leader-orchestrator" in stripped and set(stripped.replace("leader-orchestrator", "").strip()) <= {"─", "-"}:
+                break
+            if _is_transient_tui_status(stripped):
+                continue
+            collected.append(item.rstrip())
+        candidate = _limit_text("\n".join(collected).strip(), REPORT_TEXT_LIMIT)
+        if candidate and not _is_transient_tui_status(candidate):
+            return candidate
+    return ""
 
 
 def _looks_complete(capture: str, prompt: str) -> bool:
     text = _strip_ansi(capture)
-    return "✻" in text and text.count("❯") >= 1 and bool(extract_assistant_text(text, prompt))
+    assistant_text = extract_assistant_text(text, prompt)
+    return "✻" in text and text.count("❯") >= 1 and bool(assistant_text) and not _is_transient_tui_status(assistant_text)
+
+
+def _is_transient_tui_status(text: str) -> bool:
+    normalized = str(text or "").strip().lstrip("●").strip().lower()
+    if not normalized:
+        return False
+    if "ctrl+o to expand" in normalized:
+        return True
+    if normalized.startswith("calling ") and ("…" in normalized or "..." in normalized):
+        return True
+    return False
 
 
 def _assistant_record(request: dict[str, Any], text: str) -> dict[str, Any]:

@@ -38,6 +38,39 @@ cd C:\Users\admin\Desktop\Structure-config-1\bridge-companion
 node gateway\server.mjs
 ```
 
+Current SSH development startup uses two remote terminals. Start the outer host from the target repo:
+
+```bash
+cd /data03/liang/mjy/safe_opd
+python3 ../.claude/control/runtime/outer_sdk_host.py \
+  --control-root ../.claude/control \
+  --repo-root . \
+  --main-session-id outer-main \
+  --adapter auto
+```
+
+Then start the Companion gateway:
+
+```bash
+cd /data03/liang/mjy/bridge-companion
+export BRIDGE_OUTER_HOST_URL="http://127.0.0.1:8791"
+node gateway/server.mjs
+```
+
+From the local machine, forward both ports through SSH:
+
+```bash
+ssh -L 8787:127.0.0.1:8787 -L 8791:127.0.0.1:8791 root@10.26.128.46
+```
+
+If `8791` is already in use, check the live host before restarting it:
+
+```bash
+curl -s http://127.0.0.1:8791/v1/status | python3 -m json.tool | grep -E '"adapter"|"run_id"|"started_at"'
+```
+
+For the current custom-provider path the expected adapter is `claude-tmux-repl`. The gateway debug page and terminal runner can confirm the same status through `http://127.0.0.1:8787/api/debug`.
+
 Open:
 
 ```text

@@ -2716,6 +2716,12 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     tmux_text = extract_tmux_assistant_text(tmux_capture, "\u4f60\u662f\u8c01")
     if "I am Claude Code" not in tmux_text or "in this workflow" not in tmux_text:
         raise AssertionError(json.dumps({"tmux_text": tmux_text}, ensure_ascii=False, indent=2))
+    tmux_placeholder = "\n\u276f call bridge\n\n\u25cf Calling bridge\u2026 (ctrl+o to expand)\n\n\u273b Cooked for 10s\n\u276f "
+    if extract_tmux_assistant_text(tmux_placeholder, "call bridge"):
+        raise AssertionError(json.dumps({"tmux_placeholder": extract_tmux_assistant_text(tmux_placeholder, "call bridge")}, ensure_ascii=False, indent=2))
+    tmux_tool_then_final = "\n\u276f call bridge\n\n\u25cf Calling bridge\u2026 (ctrl+o to expand)\n\n\u25cf bridge result recorded\n\n\u273b Cooked for 10s\n\u276f "
+    if "bridge result recorded" not in extract_tmux_assistant_text(tmux_tool_then_final, "call bridge"):
+        raise AssertionError(json.dumps({"tmux_tool_then_final": extract_tmux_assistant_text(tmux_tool_then_final, "call bridge")}, ensure_ascii=False, indent=2))
 
     sdk_adapter = ClaudeAgentSdkOuterLeaderAdapter(config)
     sdk_adapter._load_sdk = lambda: None
