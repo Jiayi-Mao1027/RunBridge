@@ -30,6 +30,32 @@ cd C:\Users\admin\Desktop\Structure-config-1\<target-repo>
 python ..\.claude\control\runtime\outer_sdk_host.py --control-root ..\.claude\control --repo-root . --main-session-id outer-main --adapter auto
 ```
 
+The host derives the Claude launch wrapper from the target repo structure: it first looks for `../.claude` relative to `--repo-root`, sets the Claude subprocess `HOME` to that parent directory, and loads `../.claude/mcp.json`. You do not need to export an interactive `claude_mjy` alias for the host.
+
+Before sending any model request, verify the effective startup plan:
+
+```powershell
+python ..\.claude\control\runtime\outer_sdk_host.py --control-root ..\.claude\control --repo-root . --diagnose-startup
+```
+
+The healthy structural path reports `verdict.status=ok`, `checks.settings_arg_mode=home`, `checks.process_env_provider_overrides=false`, `effective_options.cli_home=<repo parent>`, and `effective_options.cli_mcp_config=<repo parent>\.claude\mcp.json`.
+
+For gateway-side diagnostics from the terminal, run:
+
+```powershell
+npm run debug
+```
+
+The command first queries the live gateway at `http://127.0.0.1:8787/api/debug`, so it can show the actual 8787 process environment and the proxied 8791 `startup_diagnostics`. If the gateway is not running, it falls back to a local read-only snapshot. Use `npm run debug -- --local` for local-only mode, or `npm run debug -- --gateway http://127.0.0.1:8787 --strict-live` to require a live gateway response.
+
+To include the latest run's recent `sdk_stream_events.jsonl`, `outer_host_events.jsonl`, and `tool_events.jsonl` records in the same terminal output:
+
+```powershell
+npm run debug -- --strict-live --events --event-limit 80
+```
+
+The same gateway-side command runner is available in the UI under `Detail Inspector` -> `Terminal`. It posts to `/api/debug/terminal`, runs inside the 8787 gateway process environment, redacts known provider and bridge secrets, and is enabled by default only when the gateway binds to loopback. Set `BRIDGE_COMPANION_ENABLE_TERMINAL=0` to disable it or `BRIDGE_COMPANION_ENABLE_TERMINAL=1` to explicitly enable it for a non-loopback bind.
+
 Then start Companion with a forwarding target:
 
 ```powershell
@@ -39,7 +65,7 @@ node gateway\server.mjs
 
 `POST /api/leader/input` forwards user text to the outer host. Companion does not write ledgers directly; the host records the authoritative runtime input event and SDK-observed stream records.
 
-`--adapter auto` is SDK-first and keeps one process-owned outer leader SDK client alive. It requires the optional `claude-agent-sdk` Python package. If that package is missing, the host still records the input and returns `OuterLeaderSdkDependencyMissing` rather than falling back to a one-shot bridge-like call. Use `--adapter unavailable` only for debug/smoke paths where the host boundary is being tested without model execution.
+`--adapter auto` uses the SDK adapter for first-party/default Claude API paths. For custom-provider `ANTHROPIC_BASE_URL` setups on Linux with `tmux` available, it uses the interactive TTY adapter so Companion follows the same Claude Code entrypoint as the working shell alias. Set `BRIDGE_OUTER_LEADER_AUTO_TMUX=0` or start with `--adapter sdk` to force SDK-first behavior. Use `--adapter unavailable` only for debug/smoke paths where the host boundary is being tested without model execution.
 
 ## Reading Real Runtime Data
 

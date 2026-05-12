@@ -1,5 +1,6 @@
 import http from "node:http";
 import https from "node:https";
+import { spawn } from "node:child_process";
 import { open, readFile, readdir, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -19,6 +20,8 @@ const MAX_EVENT_LIMIT = 1000;
 const DEFAULT_EVENT_LIMIT = 500;
 const RESPONSE_TEXT_LIMIT = 8000;
 const REPORT_RESPONSE_TEXT_LIMIT = Number(process.env.BRIDGE_COMPANION_REPORT_TEXT_LIMIT || 50000);
+const TERMINAL_TEXT_LIMIT = Number(process.env.BRIDGE_COMPANION_TERMINAL_TEXT_LIMIT || 120000);
+const TERMINAL_TIMEOUT_MS = Number(process.env.BRIDGE_COMPANION_TERMINAL_TIMEOUT_MS || 30000);
 const COMPANION_TOKEN = process.env.BRIDGE_COMPANION_TOKEN || "";
 const OUTER_HOST_URL = process.env.BRIDGE_OUTER_HOST_URL || process.env.OUTER_SDK_HOST_URL || "";
 const OUTER_HOST_TOKEN = process.env.BRIDGE_OUTER_HOST_TOKEN || process.env.OUTER_SDK_HOST_TOKEN || "";
@@ -41,6 +44,45 @@ const DEFAULT_BRIEF_MODEL = "deepseek-v4-pro";
 const BRIEF_SECRET_PATH =
   process.env.BRIDGE_BRIEF_SECRET_PATH ||
   path.join(os.homedir(), ".bridge-companion", "brief-secret.json");
+const DEBUG_ENV_KEYS = [
+  "HOME",
+  "PWD",
+  "USER",
+  "USERNAME",
+  "SHELL",
+  "BRIDGE_COMPANION_HOST",
+  "BRIDGE_COMPANION_PORT",
+  "BRIDGE_COMPANION_ORIGIN",
+  "BRIDGE_COMPANION_ALLOWED_ORIGIN",
+  "BRIDGE_COMPANION_ALLOWED_ORIGINS",
+  "BRIDGE_COMPANION_TOKEN",
+  "BRIDGE_RUNTIME_PROJECTS_ROOT",
+  "BRIDGE_RUNTIME_ROOT_PROJECTS",
+  "BRIDGE_RUNTIME_ROOT",
+  "BRIDGE_RUNTIME_RUNS_ROOT",
+  "BRIDGE_SESSION_OBSERVER_ROOT",
+  "BRIDGE_RUNTIME_REGISTRY_ROOT",
+  "BRIDGE_OUTER_HOST_URL",
+  "OUTER_SDK_HOST_URL",
+  "BRIDGE_OUTER_HOST_TOKEN",
+  "OUTER_SDK_HOST_TOKEN",
+  "OUTER_SDK_HOST",
+  "OUTER_SDK_HOST_PORT",
+  "BRIDGE_CLAUDE_COMMAND",
+  "BRIDGE_CLAUDE_CLI",
+  "BRIDGE_CLAUDE_SETTINGS",
+  "OUTER_LEADER_CLAUDE_CLI",
+  "OUTER_LEADER_CLAUDE_SETTINGS",
+  "BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS",
+  "BRIDGE_DISABLE_CLAUDE_MJY_AUTO",
+  "OUTER_LEADER_MODEL",
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_AUTH_TOKEN",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY"
+];
 
 const runSourceFiles = [
   "sdk_stream_events.jsonl",
@@ -62,6 +104,9 @@ const sessionObserverFiles = [
   "session_events.jsonl",
   "session_bindings.jsonl"
 ];
+
+const activeSseClients = new Set();
+let gatewayShuttingDown = false;
 
 function resolveProjectsRoot() {
   const explicit =
@@ -122,13 +167,20 @@ function redactForResponse(value, depth = 0, pathParts = []) {
   if (!value || typeof value !== "object") return value;
   const result = {};
   for (const [key, item] of Object.entries(value)) {
-    if (/api[_-]?key|authorization|token|password|secret/i.test(key)) {
+    if (shouldRedactResponseKey(key, item)) {
       result[key] = item ? "<redacted>" : item;
       continue;
     }
     result[key] = redactForResponse(item, depth + 1, [...pathParts, key]);
   }
   return result;
+}
+
+function shouldRedactResponseKey(key, value) {
+  if (typeof value === "boolean" || typeof value === "number" || value === null || value === undefined) {
+    return false;
+  }
+  return /api[_-]?key|authorization|auth[_-]?token|token|password|secret/i.test(key);
 }
 
 function responseTextLimitFor(pathParts) {
@@ -140,16 +192,32 @@ function responseTextLimitFor(pathParts) {
   ) {
     return Math.max(RESPONSE_TEXT_LIMIT, Math.min(REPORT_RESPONSE_TEXT_LIMIT || 50000, 200000));
   }
+  if (/(^|\.)(stdout|stderr)$/.test(pathText)) {
+    return Math.max(RESPONSE_TEXT_LIMIT, Math.min(TERMINAL_TEXT_LIMIT || 120000, 200000));
+  }
   return RESPONSE_TEXT_LIMIT;
 }
 
 function redactText(value, limit = RESPONSE_TEXT_LIMIT) {
   let text = String(value || "");
+  for (const secret of knownSecretValues()) {
+    text = text.split(secret).join("<redacted>");
+  }
   text = text.replace(/(api[_-]?key|token|password|secret)(\s*[:=]\s*)(\S+)/gi, "$1$2<redacted>");
   text = text.replace(/bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer <redacted>");
   text = text.replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<redacted>");
   if (text.length > limit) return `${text.slice(0, limit)}...<truncated>`;
   return text;
+}
+
+function knownSecretValues() {
+  const values = [];
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!value || value.length < 8) continue;
+    if (!/api[_-]?key|authorization|auth[_-]?token|token|password|secret/i.test(key)) continue;
+    values.push(value);
+  }
+  return values;
 }
 
 function safeSegment(value) {
@@ -690,6 +758,30 @@ function messageFor(sourceFile, record) {
       ].filter(Boolean).join(" "));
     }
     if (request.safe_preview) return compactText(request.safe_preview);
+  }
+  if (sourceFile === "sdk_stream_events.jsonl" && record.settings_diagnostics) {
+    const diag = record.settings_diagnostics && typeof record.settings_diagnostics === "object"
+      ? record.settings_diagnostics
+      : {};
+    return compactText([
+      record.event_type || "sdk_stream",
+      `model=${record.outer_leader_options?.model || diag.subprocess_anthropic_model || "none"}`,
+      `cli=${record.outer_leader_options?.cli_path || diag.claude_command || "default"}`,
+      `cli_source=${record.outer_leader_options?.cli_source || "unknown"}`,
+      `mcp_config=${record.outer_leader_options?.cli_mcp_config || "inline"}`,
+      `settings_arg=${record.outer_leader_options?.settings ? "flag" : "home"}`,
+      `setting_sources=${Array.isArray(record.outer_leader_options?.setting_sources) ? record.outer_leader_options.setting_sources.join(",") : "unknown"}`,
+      `settings=${diag.inferred_source_path || diag.settings_path || "none"}`,
+      `base_url=${diag.settings_anthropic_base_url || diag.subprocess_anthropic_base_url || "none"}`,
+      `settings_env_base_url=${Boolean(diag.settings_has_anthropic_base_url)}`,
+      `settings_env_auth_token=${Boolean(diag.settings_has_anthropic_auth_token)}`,
+      `settings_proxy_http=${Boolean(diag.settings_has_http_proxy)}`,
+      `settings_proxy_https=${Boolean(diag.settings_has_https_proxy)}`,
+      `process_env_base_url=${Boolean(diag.subprocess_env_has_anthropic_base_url)}`,
+      `process_env_auth_token=${Boolean(diag.subprocess_env_has_anthropic_auth_token)}`,
+      `process_proxy_http=${Boolean(diag.subprocess_env_has_http_proxy)}`,
+      `process_proxy_https=${Boolean(diag.subprocess_env_has_https_proxy)}`
+    ].join(" "));
   }
   if (record.message_preview) return compactText(record.message_preview);
   if (record.summary) return compactText(record.summary);
@@ -1451,6 +1543,309 @@ async function outerHostStatus() {
   return requestJson(endpoint, null, headers, "GET");
 }
 
+function selectedDebugEnv() {
+  const env = {};
+  for (const key of DEBUG_ENV_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(process.env, key)) {
+      env[key] = process.env[key];
+    }
+  }
+  return env;
+}
+
+async function pathStatus(filePath) {
+  const stats = await stat(filePath).catch(() => null);
+  return {
+    path: filePath,
+    exists: Boolean(stats),
+    isDirectory: Boolean(stats?.isDirectory?.()),
+    isFile: Boolean(stats?.isFile?.())
+  };
+}
+
+async function gatewayDebugSnapshot({ includeOuterHost = true, includeEvents = false, eventLineLimit = 80 } = {}) {
+  let outerHost = null;
+  if (includeOuterHost) {
+    try {
+      outerHost = await outerHostStatus();
+    } catch (error) {
+      outerHost = { ok: false, error: error.message };
+    }
+  }
+  const recentRuntime = includeEvents ? await latestRuntimeDebugTail(outerHost, eventLineLimit) : null;
+  return redactForResponse({
+    schemaVersion: "bridge_companion_debug.v1",
+    generatedAt: new Date().toISOString(),
+    source: "bridge_companion_gateway_process",
+    process: {
+      pid: process.pid,
+      ppid: process.ppid,
+      cwd: process.cwd(),
+      argv: process.argv,
+      execPath: process.execPath,
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      uptimeSeconds: Math.round(process.uptime())
+    },
+    gateway: {
+      host: HOST,
+      port: PORT,
+      companionRoot,
+      workspaceRoot,
+      prototypeRoot,
+      projectsRoot: PROJECTS_ROOT,
+      registryRoot: REGISTRY_ROOT,
+      sessionObserverRoot: SESSION_OBSERVER_ROOT,
+      streamIntervalMs: STREAM_INTERVAL_MS,
+      readOnly: true,
+      outerHostUrl: OUTER_HOST_URL || null,
+      outerHostConfigured: Boolean(OUTER_HOST_URL),
+      companionCredentialConfigured: Boolean(COMPANION_TOKEN),
+      outerHostCredentialConfigured: Boolean(OUTER_HOST_TOKEN),
+      terminalEnabled: terminalEnabled(),
+      activeSseClientCount: activeSseClients.size,
+      shuttingDown: gatewayShuttingDown
+    },
+    paths: {
+      projectsRoot: await pathStatus(PROJECTS_ROOT),
+      registryRoot: await pathStatus(REGISTRY_ROOT),
+      sessionObserverRoot: await pathStatus(SESSION_OBSERVER_ROOT),
+      prototypeRoot: await pathStatus(prototypeRoot)
+    },
+    env: selectedDebugEnv(),
+    envChecks: {
+      bridgeOuterHostUrlConfigured: Boolean(process.env.BRIDGE_OUTER_HOST_URL || process.env.OUTER_SDK_HOST_URL),
+      bridgeClaudeCommandConfigured: Boolean(process.env.BRIDGE_CLAUDE_COMMAND),
+      bridgeClaudeCliConfigured: Boolean(process.env.BRIDGE_CLAUDE_CLI),
+      outerLeaderClaudeCliConfigured: Boolean(process.env.OUTER_LEADER_CLAUDE_CLI),
+      bridgeDisableStartupDefaults: ["1", "true", "yes"].includes(String(process.env.BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS || "").trim().toLowerCase()),
+      processHasAnthropicBaseUrl: Boolean(process.env.ANTHROPIC_BASE_URL),
+      processHasAnthropicAuthCredential: Boolean(process.env.ANTHROPIC_AUTH_TOKEN),
+      processHasHttpProxy: Boolean(process.env.HTTP_PROXY || process.env.http_proxy),
+      processHasHttpsProxy: Boolean(process.env.HTTPS_PROXY || process.env.https_proxy)
+    },
+    outerHost,
+    recentRuntime
+  });
+}
+
+function terminalEnabled() {
+  const explicit = String(process.env.BRIDGE_COMPANION_ENABLE_TERMINAL || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(explicit)) return true;
+  if (["0", "false", "no", "off"].includes(explicit)) return false;
+  return ["127.0.0.1", "localhost", "::1"].includes(String(HOST || "").trim().toLowerCase());
+}
+
+async function runTerminalCommand(input = {}) {
+  if (!terminalEnabled()) {
+    return {
+      ok: false,
+      error: "terminal_disabled",
+      message: "Set BRIDGE_COMPANION_ENABLE_TERMINAL=1 or bind the gateway to loopback to enable the terminal endpoint."
+    };
+  }
+  const command = String(input.command || "").trim();
+  if (!command) {
+    return { ok: false, error: "empty_command", message: "command is required" };
+  }
+  if (command.length > 6000) {
+    return { ok: false, error: "command_too_long", message: "command exceeds 6000 characters" };
+  }
+  const cwd = await resolveTerminalCwd(input.cwd);
+  const timeoutMs = Math.max(1000, Math.min(Number(input.timeoutMs || input.timeout_ms || TERMINAL_TIMEOUT_MS) || TERMINAL_TIMEOUT_MS, 120000));
+  const shell = terminalShell(command);
+  const startedAt = new Date();
+  return new Promise(resolve => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    let child = null;
+    try {
+      child = spawn(shell.command, shell.args, {
+        cwd,
+        env: { ...process.env, TERM: process.env.TERM || "dumb", NO_COLOR: process.env.NO_COLOR || "1" },
+        windowsHide: true,
+        detached: process.platform !== "win32"
+      });
+    } catch (error) {
+      resolve(redactForResponse({
+        ok: false,
+        command,
+        cwd,
+        shell: shell.label,
+        error: "spawn_failed",
+        message: error.message,
+        stdout: "",
+        stderr: ""
+      }));
+      return;
+    }
+    const finish = (exitCode, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const endedAt = new Date();
+      resolve(redactForResponse({
+        ok: !timedOut && exitCode === 0,
+        command,
+        cwd,
+        shell: shell.label,
+        exitCode,
+        signal,
+        timedOut,
+        durationMs: endedAt.getTime() - startedAt.getTime(),
+        startedAt: startedAt.toISOString(),
+        endedAt: endedAt.toISOString(),
+        stdout: limitTerminalText(stdout),
+        stderr: limitTerminalText(stderr)
+      }));
+    };
+    const append = (stream, chunk) => {
+      const text = chunk.toString("utf8");
+      if (stream === "stdout") stdout = appendLimited(stdout, text, TERMINAL_TEXT_LIMIT);
+      else stderr = appendLimited(stderr, text, TERMINAL_TEXT_LIMIT);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGTERM");
+        else child.kill("SIGTERM");
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+      }
+    }, timeoutMs);
+    child.stdout.on("data", chunk => append("stdout", chunk));
+    child.stderr.on("data", chunk => append("stderr", chunk));
+    child.on("error", error => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(redactForResponse({
+        ok: false,
+        command,
+        cwd,
+        shell: shell.label,
+        error: "spawn_failed",
+        message: error.message,
+        stdout: limitTerminalText(stdout),
+        stderr: limitTerminalText(stderr)
+      }));
+    });
+    child.on("close", finish);
+  });
+}
+
+async function resolveTerminalCwd(value) {
+  const raw = String(value || "").trim();
+  const cwd = raw ? path.resolve(raw) : process.cwd();
+  const stats = await stat(cwd).catch(() => null);
+  if (!stats || !stats.isDirectory()) {
+    throw new Error(`terminal cwd is not a directory: ${cwd}`);
+  }
+  return cwd;
+}
+
+function terminalShell(command) {
+  if (process.platform === "win32") {
+    return {
+      label: "powershell",
+      command: "powershell.exe",
+      args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command]
+    };
+  }
+  const shell = process.env.SHELL || "/bin/bash";
+  return { label: path.basename(shell), command: shell, args: ["-lc", command] };
+}
+
+function appendLimited(current, next, limit) {
+  const combined = `${current}${next}`;
+  if (combined.length <= limit) return combined;
+  return combined.slice(combined.length - limit);
+}
+
+function limitTerminalText(value) {
+  const text = redactText(String(value || ""), TERMINAL_TEXT_LIMIT);
+  if (text.length <= TERMINAL_TEXT_LIMIT) return text;
+  return `<truncated to latest ${TERMINAL_TEXT_LIMIT} chars>\n${text}`;
+}
+
+async function latestRuntimeDebugTail(outerHost, eventLineLimit) {
+  const limit = Math.max(1, Math.min(Number(eventLineLimit) || 80, 500));
+  const runsRoot = outerHost?.runtime_runs_root || outerHost?.runtimeRunsRoot || "";
+  const runId = outerHost?.run_id || outerHost?.runId || "";
+  if (!runsRoot || !runId) {
+    return { ok: false, error: "outer host status does not include runtime_runs_root/run_id" };
+  }
+  const runRoot = path.resolve(String(runsRoot), String(runId));
+  const projectsRoot = path.resolve(PROJECTS_ROOT);
+  if (runRoot !== projectsRoot && !runRoot.startsWith(projectsRoot + path.sep)) {
+    return { ok: false, error: "outer host run root is outside gateway projects root", runRoot, projectsRoot };
+  }
+  const files = ["sdk_stream_events.jsonl", "outer_host_events.jsonl", "tool_events.jsonl"];
+  const result = {
+    ok: true,
+    repoKey: outerHost?.repo_key || outerHost?.repoKey || null,
+    runId,
+    runRoot,
+    limit,
+    files: {}
+  };
+  for (const sourceFile of files) {
+    const filePath = path.join(runRoot, sourceFile);
+    const stats = await stat(filePath).catch(() => null);
+    if (!stats) {
+      result.files[sourceFile] = { exists: false, records: [] };
+      continue;
+    }
+    const records = await readJsonlWithMeta(filePath, sourceFile);
+    result.files[sourceFile] = {
+      exists: true,
+      lineCount: records.length,
+      byteSize: stats.size,
+      records: records.slice(-limit).map(item => ({
+        sourceFile: item.sourceFile,
+        sourceOffset: item.sourceOffset,
+        sourceSequence: item.sourceSequence,
+        parseError: item.parseError || null,
+        summary: debugRecordSummary(item.record),
+        record: item.record
+      }))
+    };
+  }
+  return result;
+}
+
+function debugRecordSummary(record) {
+  const payload = record?.payload && typeof record.payload === "object" ? record.payload : {};
+  const leaderResult = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : {};
+  const request = payload.request && typeof payload.request === "object" ? payload.request : {};
+  const error = leaderResult.error_or_null || record?.error_or_null || payload.error_or_null || null;
+  return {
+    timestamp: record?.timestamp || null,
+    eventType: record?.event_type || record?.eventType || null,
+    eventKind: record?.event_kind || record?.eventKind || null,
+    sdkMessageType: record?.sdk_message_type || null,
+    status: leaderResult.status || record?.status || null,
+    resultSubtype: record?.result_subtype || null,
+    messagePreview: record?.message_preview || record?.result || leaderResult.reports?.[0]?.summary || null,
+    errorType: error?.type || null,
+    errorMessage: error?.message || null,
+    systemFailure: record?.system_failure || leaderResult.system_failure || null,
+    settingsMode: record?.outer_leader_options?.settings ? "flag" : record?.outer_leader_options ? "home" : null,
+    cliSource: record?.outer_leader_options?.cli_source || null,
+    cliHome: record?.outer_leader_options?.cli_home || null,
+    cliMcpConfig: record?.outer_leader_options?.cli_mcp_config || null,
+    processEnvBaseUrl: Boolean(record?.settings_diagnostics?.subprocess_env_has_anthropic_base_url),
+    processEnvAuth: Boolean(record?.settings_diagnostics?.subprocess_env_has_anthropic_auth_token),
+    settingsBaseUrl: record?.settings_diagnostics?.settings_anthropic_base_url || null,
+    requestPreview: request.safe_preview || null
+  };
+}
+
 function buildBriefPrompt(input) {
   const unknowns = Array.isArray(input?.unknowns)
     ? input.unknowns
@@ -1557,6 +1952,35 @@ function writeSseEvent(res, eventName, data, id = null) {
   res.write("\n");
 }
 
+function writeSseRetry(res, milliseconds) {
+  res.write(`retry: ${Math.max(0, Math.trunc(milliseconds))}\n\n`);
+}
+
+function registerSseClient(res) {
+  activeSseClients.add(res);
+  return () => activeSseClients.delete(res);
+}
+
+function closeSseClients(reason = "gateway_shutdown") {
+  gatewayShuttingDown = true;
+  for (const res of [...activeSseClients]) {
+    try {
+      writeSseRetry(res, 86400000);
+      writeSseEvent(res, "gateway_shutdown", {
+        reason,
+        message: "Bridge Companion gateway is shutting down; live stream stopped."
+      });
+      res.end();
+    } catch {
+      try {
+        res.destroy?.();
+      } catch {}
+    } finally {
+      activeSseClients.delete(res);
+    }
+  }
+}
+
 async function createTailer(rootDir, files) {
   const cursors = [];
   for (const sourceFile of files) {
@@ -1594,6 +2018,13 @@ async function streamRun(req, res, repoKey, runId, query) {
     "connection": "keep-alive",
     "access-control-allow-origin": ACCESS_CONTROL_ALLOW_ORIGIN
   });
+  if (gatewayShuttingDown) {
+    writeSseRetry(res, 86400000);
+    writeSseEvent(res, "gateway_shutdown", { repoKey, runId, reason: "gateway_shutdown" }, null);
+    res.end();
+    return;
+  }
+  const unregisterSseClient = registerSseClient(res);
   const dir = runDir(repoKey, runId);
   let sourceCursor = parseSourceCursor(query.get("afterCursor") || query.get("after_cursor") || "");
   let lastSeq = Number(query.get("after") || 0);
@@ -1638,7 +2069,10 @@ async function streamRun(req, res, repoKey, runId, query) {
       writeSseEvent(res, "gateway_error", { message: error.message }, null);
     });
   }, Math.max(250, STREAM_INTERVAL_MS));
-  req.on("close", () => clearInterval(timer));
+  req.on("close", () => {
+    clearInterval(timer);
+    unregisterSseClient();
+  });
 }
 
 async function streamSessionObserver(req, res, query) {
@@ -1648,6 +2082,13 @@ async function streamSessionObserver(req, res, query) {
     "connection": "keep-alive",
     "access-control-allow-origin": ACCESS_CONTROL_ALLOW_ORIGIN
   });
+  if (gatewayShuttingDown) {
+    writeSseRetry(res, 86400000);
+    writeSseEvent(res, "gateway_shutdown", { repoKey: "session_observer", runId: "unbound", reason: "gateway_shutdown" }, null);
+    res.end();
+    return;
+  }
+  const unregisterSseClient = registerSseClient(res);
   let sourceCursor = parseSourceCursor(query.get("afterCursor") || query.get("after_cursor") || "");
   let lastSeq = Number(query.get("after") || 0);
   let lastEventId = query.get("afterId") || query.get("after_id") || req.headers["last-event-id"] || "";
@@ -1690,7 +2131,10 @@ async function streamSessionObserver(req, res, query) {
       writeSseEvent(res, "gateway_error", { message: error.message }, null);
     });
   }, Math.max(250, STREAM_INTERVAL_MS));
-  req.on("close", () => clearInterval(timer));
+  req.on("close", () => {
+    clearInterval(timer);
+    unregisterSseClient();
+  });
 }
 
 async function serveStatic(req, res, pathname) {
@@ -1875,6 +2319,28 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (pathname === "/api/debug") {
+    const includeOuterHost = url.searchParams.get("outer") !== "0";
+    const includeEvents = ["1", "true", "yes"].includes(String(url.searchParams.get("events") || "").trim().toLowerCase());
+    const eventLineLimit = Number(url.searchParams.get("eventLimit") || url.searchParams.get("event_limit") || 80);
+    sendJson(res, 200, await gatewayDebugSnapshot({ includeOuterHost, includeEvents, eventLineLimit }));
+    return;
+  }
+
+  if (pathname === "/api/debug/terminal") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "POST required" });
+      return;
+    }
+    try {
+      const input = await parseBody(req);
+      sendJson(res, 200, await runTerminalCommand(input));
+    } catch (error) {
+      sendJson(res, 400, { ok: false, error: "terminal_failed", message: error.message });
+    }
+    return;
+  }
+
   if (pathname === "/api/brief" || pathname === "/brief") {
     if (req.method !== "POST") {
       sendJson(res, 405, { error: "POST required" });
@@ -1951,6 +2417,7 @@ async function requestHandler(req, res) {
 }
 
 function startServer() {
+  gatewayShuttingDown = false;
   return http.createServer(requestHandler).listen(PORT, HOST, () => {
     console.log(`Bridge Companion gateway listening on http://${HOST}:${PORT}`);
     console.log(`projects root: ${PROJECTS_ROOT}`);
@@ -1958,14 +2425,34 @@ function startServer() {
   });
 }
 
+function installShutdownHandlers(server) {
+  let stopping = false;
+  const shutdown = signal => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`Bridge Companion received ${signal}; closing live streams.`);
+    closeSseClients(signal);
+    server.close(() => {
+      process.exitCode = 0;
+    });
+    setTimeout(() => {
+      process.exit(0);
+    }, 1500).unref();
+  };
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
-  startServer();
+  installShutdownHandlers(startServer());
 }
 
 export {
   buildProjection,
   buildStatus,
+  closeSseClients,
   filterEvents,
+  gatewayDebugSnapshot,
   loadRunEvents,
   normalizeRunRecord,
   outerHostStatus,
@@ -1973,6 +2460,7 @@ export {
   projectSemanticCoverage,
   redactForResponse,
   requestHandler,
+  runTerminalCommand,
   startServer,
   submitLeaderInput
 };

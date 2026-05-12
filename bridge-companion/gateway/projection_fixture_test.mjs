@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,7 +14,7 @@ process.env.BRIDGE_RUNTIME_PROJECTS_ROOT = projectsRoot;
 process.env.BRIDGE_SESSION_OBSERVER_ROOT = path.join(tmpRoot, "session_observer");
 process.env.BRIDGE_RUNTIME_REGISTRY_ROOT = path.join(tmpRoot, "registry");
 
-const { buildProjection, filterEvents, redactForResponse, submitLeaderInput } = await import("./server.mjs");
+const { buildProjection, closeSseClients, filterEvents, redactForResponse, requestHandler, submitLeaderInput } = await import("./server.mjs");
 
 try {
   await mkdir(runRoot, { recursive: true });
@@ -120,6 +121,33 @@ try {
     sequence: 1
   });
   await appendJsonl(path.join(runRoot, "sdk_stream_events.jsonl"), {
+    timestamp: "2026-05-11T00:00:04.250Z",
+    event_type: "sdk_stream_started",
+    session_id: "outer-main",
+    status: "running",
+    outer_leader_options: {
+      model: "gpt-main",
+      cli_path: "/tmp/bin/claude_mjy",
+      cli_source: "BRIDGE_CLAUDE_COMMAND",
+      cli_mcp_config: "/tmp/.claude/mcp.json"
+    },
+    settings_diagnostics: {
+      settings_path: "/tmp/.claude/runtime_state/generated/outer_leader_settings.json",
+      inferred_source_path: "/tmp/.claude/settings.json",
+      settings_has_anthropic_base_url: true,
+      settings_anthropic_base_url: "https://provider.example/v1",
+      settings_has_anthropic_auth_token: true,
+      settings_has_http_proxy: false,
+      settings_has_https_proxy: false,
+      subprocess_env_has_anthropic_base_url: true,
+      subprocess_anthropic_base_url: "https://provider.example/v1",
+      subprocess_env_has_anthropic_auth_token: true,
+      subprocess_anthropic_model: "gpt-main",
+      subprocess_env_has_http_proxy: false,
+      subprocess_env_has_https_proxy: false
+    }
+  });
+  await appendJsonl(path.join(runRoot, "sdk_stream_events.jsonl"), {
     timestamp: "2026-05-11T00:00:04.500Z",
     event_type: "ResultMessage",
     sdk_message_type: "ResultMessage",
@@ -173,6 +201,7 @@ try {
   assert.equal(projection.activeTask.title, "fixture execute task");
   assert.equal(projection.activeTask.targetPhase, "l4_execute");
   assert.ok(projection.timeline.length >= 3);
+  assert.ok(projection.timeline.some(event => event.messagePreview.includes("model=gpt-main") && event.messagePreview.includes("cli=/tmp/bin/claude_mjy") && event.messagePreview.includes("cli_source=BRIDGE_CLAUDE_COMMAND") && event.messagePreview.includes("mcp_config=/tmp/.claude/mcp.json") && event.messagePreview.includes("base_url=https://provider.example/v1") && event.messagePreview.includes("settings_proxy_https=false")));
   assert.ok(projection.liveToolCards.some(card => card.toolName === "Read"));
   assert.equal(projection.completionChecklist.validatedBy, "completion_validator.v1");
   assert.ok(projection.leaderReportCards.some(card => card.reportStatus === "succeeded" && card.handledBy === "claude-agent-sdk"));
@@ -203,6 +232,7 @@ try {
   const disabledInput = await submitLeaderInput({ text: "hello" });
   assert.equal(disabledInput.accepted, false);
   assert.equal(disabledInput.error, "outer_host_not_configured");
+  await assertSseShutdown(repoKey, runId);
   console.log(JSON.stringify({ ok: true, projection: "passed" }, null, 2));
 } finally {
   await rm(tmpRoot, { recursive: true, force: true });
@@ -214,4 +244,44 @@ async function writeJson(filePath, payload) {
 
 async function appendJsonl(filePath, payload) {
   await writeFile(filePath, `${JSON.stringify(payload)}\n`, { encoding: "utf8", flag: "a" });
+}
+
+async function assertSseShutdown(repoKey, runId) {
+  const server = http.createServer(requestHandler);
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  try {
+    const streamText = await new Promise((resolve, reject) => {
+      let body = "";
+      const timeout = setTimeout(() => reject(new Error("gateway_shutdown SSE event not received")), 3000);
+      const req = http.get(
+        {
+          hostname: "127.0.0.1",
+          port,
+          path: `/api/repos/${encodeURIComponent(repoKey)}/runs/${encodeURIComponent(runId)}/stream?after=999999`,
+          headers: { accept: "text/event-stream" }
+        },
+        res => {
+          res.setEncoding("utf8");
+          res.on("data", chunk => {
+            body += chunk;
+          });
+          res.on("end", () => {
+            clearTimeout(timeout);
+            resolve(body);
+          });
+        }
+      );
+      req.on("error", error => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      setTimeout(() => closeSseClients("fixture_shutdown"), 50);
+    });
+    assert.match(streamText, /retry: 86400000/);
+    assert.match(streamText, /event: gateway_shutdown/);
+    assert.match(streamText, /fixture_shutdown/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
 }

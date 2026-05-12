@@ -128,6 +128,7 @@ class OuterSdkHost:
         runs_root = get_repo_runtime_root(self.config.control_root, resolved_repo_key)
         run = run_id or self.default_run_id or _latest_run_id(runs_root)
         snapshot = load_json_file(runs_root / run / "runtime_snapshot.json", default={}) if run else {}
+        startup_diagnostics = _startup_diagnostics(self.config.control_root, self.config.repo_root)
         return {
             "schema_version": "outer_sdk_host_status.v1",
             "mode": "outer_sdk_host",
@@ -138,6 +139,7 @@ class OuterSdkHost:
             "host_instance_id": self.host_instance_id,
             "started_at": self.started_at,
             "runtime_runs_root": str(runs_root),
+            "startup_diagnostics": startup_diagnostics,
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
         }
 
@@ -317,6 +319,11 @@ class OuterSdkHost:
             "total_cost_usd",
             "duration_ms",
             "num_turns",
+            "stop_reason",
+            "permission_denials",
+            "errors",
+            "settings_diagnostics",
+            "outer_leader_options",
             "timeout_seconds",
             "error_type",
         ):
@@ -357,6 +364,15 @@ def _latest_run_id(runs_root: Path) -> str | None:
     if not dirs:
         return None
     return sorted(dirs, key=lambda item: item.stat().st_mtime, reverse=True)[0].name
+
+
+def _startup_diagnostics(control_root: Path, repo_root: Path | None) -> dict[str, Any]:
+    try:
+        from .claude_agent_adapter import outer_leader_startup_diagnostics
+
+        return outer_leader_startup_diagnostics(control_root, repo_root)
+    except Exception as exc:
+        return {"schema_version": "outer_leader_startup_diagnostics.v1", "error": type(exc).__name__, "message": str(exc)}
 
 
 def _new_run_id() -> str:

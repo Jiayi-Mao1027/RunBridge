@@ -8,9 +8,13 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
+import shlex
+import shutil
 import sys
 import threading
 from typing import Any
+from urllib.parse import urlsplit
 
 from .adapters import OuterLeaderEventSink
 
@@ -27,6 +31,7 @@ DEFAULT_ALLOWED_TOOLS = [
     "LS",
 ]
 DEFAULT_DISALLOWED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]
+DEFAULT_PERMISSION_MODE = "dontAsk"
 PREVIEW_LIMIT = 700
 REPORT_TEXT_LIMIT = 20000
 
@@ -50,6 +55,7 @@ class ClaudeAgentSdkOuterLeaderAdapter:
         self._sdk: Any = None
         self._request_lock = threading.Lock()
         self._sequence = 0
+        self._options_diagnostics: dict[str, Any] = {}
 
     def handle_user_input(
         self,
@@ -65,6 +71,8 @@ class ClaudeAgentSdkOuterLeaderAdapter:
                     self._handle_user_input_async(dict(request), event_sink),
                     loop,
                 )
+                if timeout is None:
+                    return future.result()
                 return future.result(timeout=timeout)
             except TimeoutError:
                 self._emit(event_sink, request, "sdk_stream_timeout", {"timeout_seconds": timeout}, status="failed")
@@ -106,11 +114,16 @@ class ClaudeAgentSdkOuterLeaderAdapter:
 
         client = await self._ensure_client(sdk, request)
         prompt = _build_user_prompt(request)
+        start_payload = {"session_id": request.get("main_session_id"), "input_id": request.get("input_id")}
+        if self._options_diagnostics:
+            start_payload["outer_leader_options"] = self._options_diagnostics
+            if self._options_diagnostics.get("settings_diagnostics"):
+                start_payload["settings_diagnostics"] = self._options_diagnostics["settings_diagnostics"]
         self._emit(
             event_sink,
             request,
             "sdk_stream_started",
-            {"session_id": request.get("main_session_id"), "input_id": request.get("input_id")},
+            start_payload,
         )
         try:
             await client.query(prompt, session_id=str(request.get("main_session_id") or "default"))
@@ -165,34 +178,53 @@ class ClaudeAgentSdkOuterLeaderAdapter:
         control_root = Path(self.config.control_root)
         repo_root = Path(self.config.repo_root) if self.config.repo_root else Path.cwd()
         leader_prompt = _leader_prompt(control_root)
+        leader_model = _leader_model(control_root)
+        tools = _env_list("OUTER_LEADER_TOOLS", _env_list("OUTER_LEADER_ALLOWED_TOOLS", DEFAULT_ALLOWED_TOOLS))
+        allowed_tools = _env_list("OUTER_LEADER_ALLOWED_TOOLS", tools)
+        cli_info = _outer_leader_cli_info(control_root, repo_root)
+        settings_path = _outer_leader_settings_path(control_root, cli_info, repo_root)
+        env = {
+            "CLAUDE_CONTROL_ROOT": str(control_root),
+            "BRIDGE_RUNTIME_REPO_KEY": str(request.get("repo_key") or ""),
+            "BRIDGE_RUN_ID": str(request.get("run_id") or ""),
+            "CLAUDE_CONTROL_RUN_ID": str(request.get("run_id") or ""),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        env.update(_bridge_process_env_overrides(control_root, cli_info, repo_root))
+        env.update(cli_info.get("env") or {})
+        env["ANTHROPIC_MODEL"] = leader_model
+        env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = leader_model
+        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = leader_model
         system_prompt = {
             "type": "preset",
             "preset": "claude_code",
             "append": leader_prompt,
             "exclude_dynamic_sections": True,
         }
+        option_values = {
+            "system_prompt": system_prompt,
+            "cwd": str(repo_root),
+            "tools": tools,
+            "mcp_servers": cli_info.get("mcp_config") or _bridge_mcp_servers(control_root),
+            "strict_mcp_config": cli_info.get("strict_mcp_config", True),
+            "allowed_tools": allowed_tools,
+            "disallowed_tools": _env_list("OUTER_LEADER_DISALLOWED_TOOLS", DEFAULT_DISALLOWED_TOOLS),
+            "permission_mode": _outer_leader_permission_mode(),
+            "model": leader_model,
+            "cli_path": cli_info.get("cli_path"),
+            "settings": str(settings_path) if settings_path and not _settings_loaded_by_home(cli_info) else None,
+            "setting_sources": _outer_leader_setting_sources(cli_info),
+            "include_partial_messages": True,
+            "max_turns": _env_int("OUTER_LEADER_MAX_TURNS"),
+            "max_budget_usd": _env_float("OUTER_LEADER_MAX_BUDGET_USD"),
+            "env": env,
+            "extra_args": cli_info.get("extra_args") or {},
+        }
+        self._options_diagnostics = _options_diagnostics(option_values, settings_path, cli_info)
         return _construct_options(
             options_cls,
-            {
-                "system_prompt": system_prompt,
-                "cwd": str(repo_root),
-                "mcp_servers": _bridge_mcp_servers(control_root),
-                "strict_mcp_config": True,
-                "allowed_tools": _env_list("OUTER_LEADER_ALLOWED_TOOLS", DEFAULT_ALLOWED_TOOLS),
-                "disallowed_tools": _env_list("OUTER_LEADER_DISALLOWED_TOOLS", DEFAULT_DISALLOWED_TOOLS),
-                "setting_sources": [],
-                "include_partial_messages": True,
-                "max_turns": _env_int("OUTER_LEADER_MAX_TURNS"),
-                "max_budget_usd": _env_float("OUTER_LEADER_MAX_BUDGET_USD"),
-                "env": {
-                    "CLAUDE_CONTROL_ROOT": str(control_root),
-                    "BRIDGE_RUNTIME_REPO_KEY": str(request.get("repo_key") or ""),
-                    "BRIDGE_RUN_ID": str(request.get("run_id") or ""),
-                    "CLAUDE_CONTROL_RUN_ID": str(request.get("run_id") or ""),
-                    "PYTHONNOUSERSITE": "1",
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                },
-            },
+            option_values,
         )
 
     def _load_sdk(self) -> Any | None:
@@ -239,18 +271,523 @@ class ClaudeAgentSdkOuterLeaderAdapter:
 
 
 def _bridge_mcp_servers(control_root: Path) -> dict[str, dict[str, Any]]:
+    bridge_env = {
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "CLAUDE_CONTROL_ROOT": str(control_root),
+    }
+    bridge_env.update(_bridge_process_env_overrides(control_root))
     return {
         "bridge": {
             "type": "stdio",
             "command": sys.executable,
             "args": [str(control_root / "mcp" / "bridge_server.py")],
-            "env": {
-                "PYTHONNOUSERSITE": "1",
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "CLAUDE_CONTROL_ROOT": str(control_root),
-            },
+            "env": bridge_env,
         }
     }
+
+
+def _bridge_process_env_overrides(control_root: Path, cli_info: dict[str, Any] | None = None, repo_root: Path | None = None) -> dict[str, str]:
+    keys = (
+        "BRIDGE_CLAUDE_COMMAND",
+        "BRIDGE_CLAUDE_CLI",
+        "BRIDGE_CLAUDE_SETTINGS",
+        "BRIDGE_DISABLE_CLAUDE_MJY_AUTO",
+    )
+    overrides = {key: value for key in keys if (value := os.environ.get(key))}
+    cli_info = cli_info or _default_outer_leader_cli_info(control_root, repo_root)
+    if "BRIDGE_CLAUDE_COMMAND" not in overrides and cli_info.get("bridge_claude_command"):
+        overrides["BRIDGE_CLAUDE_COMMAND"] = str(cli_info["bridge_claude_command"])
+    return overrides
+
+
+def _outer_leader_settings_path(control_root: Path, cli_info: dict[str, Any] | None = None, repo_root: Path | None = None) -> Path | None:
+    explicit = os.environ.get("OUTER_LEADER_CLAUDE_SETTINGS") or os.environ.get("BRIDGE_CLAUDE_SETTINGS")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+
+    cli_settings = (cli_info or {}).get("settings")
+    if cli_settings:
+        return Path(str(cli_settings)).expanduser().resolve()
+
+    claude_root = _discover_parent_claude_root(control_root, repo_root)
+    default_settings = claude_root / "settings.json"
+    if default_settings.exists():
+        return _materialize_outer_leader_settings(control_root, default_settings)
+
+    hook_settings = claude_root / "hooks" / "settings.json"
+    if hook_settings.exists():
+        return _materialize_outer_leader_settings(control_root, hook_settings)
+
+    return None
+
+
+def _materialize_outer_leader_settings(control_root: Path, source: Path) -> Path:
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid Claude settings payload: {source}")
+    normalized = _normalize_hook_commands(payload, source.parent / "hooks")
+    target = source.parent / "runtime_state" / "generated" / "outer_leader_settings.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target.resolve()
+
+
+def _normalize_hook_commands(value: Any, hooks_root: Path) -> Any:
+    if isinstance(value, dict):
+        return {key: _normalize_hook_commands(item, hooks_root) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_hook_commands(item, hooks_root) for item in value]
+    if isinstance(value, str):
+        return _absolute_hook_command(value, hooks_root)
+    return value
+
+
+def _absolute_hook_command(command: str, hooks_root: Path) -> str:
+    normalized = command.replace("\\", "/")
+    match = None
+    for pattern in ("../.claude/hooks/", ".claude/hooks/"):
+        index = normalized.find(pattern)
+        if index >= 0:
+            tail = normalized[index + len(pattern) :].strip()
+            script = tail.split()[0] if tail else ""
+            if script:
+                match = hooks_root / script
+                break
+    if match is None:
+        return command
+    return f"{_quote_cmd_arg(sys.executable)} {_quote_cmd_arg(str(match))}"
+
+
+def _quote_cmd_arg(value: str) -> str:
+    return '"' + value.replace('"', '\\"') + '"'
+
+
+def _settings_env(settings_path: Path | None) -> dict[str, str]:
+    payload = _read_settings(settings_path)
+    env = payload.get("env") if isinstance(payload, dict) else None
+    if not isinstance(env, dict):
+        return {}
+    return {str(key): str(value) for key, value in env.items() if value is not None}
+
+
+def _read_settings(settings_path: Path | None) -> dict[str, Any]:
+    if not settings_path or not settings_path.exists():
+        return {}
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _infer_outer_settings_source(settings_path: Path | None) -> str | None:
+    if not settings_path:
+        return None
+    generated = (settings_path.parent / "outer_leader_settings.json").resolve()
+    if settings_path.resolve() != generated:
+        return str(settings_path)
+    claude_root = settings_path.parent.parent.parent
+    default_settings = claude_root / "settings.json"
+    if default_settings.exists():
+        return str(default_settings.resolve())
+    hook_settings = claude_root / "hooks" / "settings.json"
+    if hook_settings.exists():
+        return str(hook_settings.resolve())
+    return str(settings_path)
+
+
+def _outer_leader_permission_mode() -> str | None:
+    raw = os.environ.get("OUTER_LEADER_PERMISSION_MODE")
+    if raw is None:
+        return DEFAULT_PERMISSION_MODE
+    return raw.strip() or None
+
+
+def _outer_leader_cli_info(control_root: Path, repo_root: Path | None = None) -> dict[str, Any]:
+    for name in ("OUTER_LEADER_CLAUDE_CLI", "BRIDGE_CLAUDE_CLI"):
+        value = os.environ.get(name)
+        if value and value.strip():
+            return {
+                "cli_path": _resolve_cli_path(value.strip()),
+                "cli_source": name,
+                "cli_warning": None,
+                "env": {},
+                "mcp_config": None,
+                "settings": None,
+                "extra_args": {},
+                "strict_mcp_config": True,
+            }
+
+    command = os.environ.get("BRIDGE_CLAUDE_COMMAND")
+    if command and command.strip():
+        parsed = _parse_claude_command(command)
+        if parsed.get("command"):
+            return {
+                "cli_path": _resolve_cli_path(str(parsed["command"])),
+                "cli_source": "BRIDGE_CLAUDE_COMMAND",
+                "cli_warning": parsed.get("warning"),
+                "env": parsed.get("env") or {},
+                "mcp_config": parsed.get("mcp_config"),
+                "settings": parsed.get("settings"),
+                "extra_args": parsed.get("extra_args") or {},
+                "strict_mcp_config": parsed.get("strict_mcp_config", True),
+                "raw_args": parsed.get("raw_args") or [],
+                "ignored_args": parsed.get("ignored_args") or [],
+            }
+        return {
+            "cli_path": None,
+            "cli_source": "BRIDGE_CLAUDE_COMMAND",
+            "cli_warning": parsed.get("warning") or "command_not_parseable",
+            "env": parsed.get("env") or {},
+            "mcp_config": parsed.get("mcp_config"),
+            "settings": parsed.get("settings"),
+            "extra_args": parsed.get("extra_args") or {},
+            "strict_mcp_config": parsed.get("strict_mcp_config", True),
+            "raw_args": parsed.get("raw_args") or [],
+            "ignored_args": parsed.get("ignored_args") or [],
+        }
+
+    default_info = _default_outer_leader_cli_info(control_root, repo_root)
+    if default_info.get("mcp_config"):
+        return default_info
+
+    if os.environ.get("BRIDGE_DISABLE_CLAUDE_MJY_AUTO", "").strip().lower() not in {"1", "true", "yes"}:
+        preferred = shutil.which("claude_mjy")
+        if preferred:
+            return {
+                "cli_path": str(Path(preferred).expanduser()),
+                "cli_source": "PATH:claude_mjy",
+                "cli_warning": None,
+                "env": {},
+                "mcp_config": None,
+                "settings": None,
+                "extra_args": {},
+                "strict_mcp_config": True,
+            }
+
+    return {
+        "cli_path": None,
+        "cli_source": "default",
+        "cli_warning": None,
+        "env": {},
+        "mcp_config": None,
+        "settings": None,
+        "extra_args": {},
+        "strict_mcp_config": True,
+    }
+
+
+def _default_outer_leader_cli_info(control_root: Path, repo_root: Path | None = None) -> dict[str, Any]:
+    claude_root = _discover_parent_claude_root(control_root, repo_root)
+    workspace_home = claude_root.parent
+    mcp_config = claude_root / "mcp.json"
+    if not mcp_config.exists() or os.environ.get("BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS", "").strip().lower() in {"1", "true", "yes"}:
+        return {
+            "cli_path": None,
+            "cli_source": "default",
+            "cli_warning": None,
+            "env": {},
+            "mcp_config": None,
+            "settings": None,
+            "extra_args": {},
+            "strict_mcp_config": True,
+        }
+    command = f"HOME={_shell_quote(str(workspace_home))} claude --mcp-config {_shell_quote(str(mcp_config))}"
+    return {
+        "cli_path": _resolve_cli_path("claude"),
+        "cli_source": "control_root_default",
+        "cli_warning": None,
+        "env": {"HOME": str(workspace_home)},
+        "mcp_config": str(mcp_config),
+        "settings": None,
+        "extra_args": {},
+        "strict_mcp_config": True,
+        "bridge_claude_command": command,
+    }
+
+
+def _discover_parent_claude_root(control_root: Path, repo_root: Path | None = None) -> Path:
+    if repo_root:
+        candidate = Path(repo_root).expanduser().resolve().parent / ".claude"
+        if candidate.exists():
+            return candidate
+    return Path(control_root).expanduser().resolve().parent
+
+
+def _shell_quote(value: str) -> str:
+    if os.name != "nt":
+        return shlex.quote(value)
+    if not value or any(ch.isspace() for ch in value) or '"' in value:
+        return '"' + value.replace('"', '\\"') + '"'
+    return value
+
+
+def _parse_claude_command(command: str) -> dict[str, Any]:
+    try:
+        parts = shlex.split(command, posix=(os.name != "nt"))
+    except ValueError as exc:
+        return {"command": command.strip(), "env": {}, "warning": f"command_parse_failed:{type(exc).__name__}"}
+
+    env: dict[str, str] = {}
+    while parts and _is_env_assignment(parts[0]):
+        key, value = parts.pop(0).split("=", 1)
+        env[key] = value
+
+    if not parts:
+        return {"command": None, "env": env, "warning": "command_missing_after_env_assignments"}
+
+    executable = parts.pop(0)
+    parsed_args = _parse_sdk_compatible_cli_args(parts)
+    warning = parsed_args.get("warning")
+    if parsed_args.get("ignored_args") and not warning:
+        warning = "unsupported_bridge_claude_command_args_ignored"
+    return {
+        "command": executable,
+        "env": env,
+        **parsed_args,
+        "warning": warning,
+    }
+
+
+def _parse_sdk_compatible_cli_args(parts: list[str]) -> dict[str, Any]:
+    mcp_config: str | None = None
+    settings: str | None = None
+    strict_mcp_config = True
+    extra_args: dict[str, str | None] = {}
+    ignored_args: list[str] = []
+    index = 0
+    while index < len(parts):
+        part = parts[index]
+        if part == "--mcp-config":
+            if index + 1 < len(parts):
+                mcp_config = parts[index + 1]
+                index += 2
+                continue
+            ignored_args.append(part)
+            index += 1
+            continue
+        if part.startswith("--mcp-config="):
+            mcp_config = part.split("=", 1)[1]
+            index += 1
+            continue
+        if part == "--settings":
+            if index + 1 < len(parts):
+                settings = parts[index + 1]
+                index += 2
+                continue
+            ignored_args.append(part)
+            index += 1
+            continue
+        if part.startswith("--settings="):
+            settings = part.split("=", 1)[1]
+            index += 1
+            continue
+        if part == "--strict-mcp-config":
+            strict_mcp_config = True
+            index += 1
+            continue
+        if part.startswith("--") and index + 1 < len(parts) and not parts[index + 1].startswith("--"):
+            extra_args[part[2:]] = parts[index + 1]
+            index += 2
+            continue
+        if part.startswith("--"):
+            extra_args[part[2:]] = None
+            index += 1
+            continue
+        ignored_args.append(part)
+        index += 1
+    return {
+        "mcp_config": _expand_cli_path(mcp_config),
+        "settings": _expand_cli_path(settings),
+        "strict_mcp_config": strict_mcp_config,
+        "extra_args": extra_args,
+        "raw_args": parts,
+        "ignored_args": ignored_args,
+    }
+
+
+def _is_env_assignment(value: str) -> bool:
+    key, sep, _rest = value.partition("=")
+    if sep != "=" or not key:
+        return False
+    if not (key[0].isalpha() or key[0] == "_"):
+        return False
+    return all(ch.isalnum() or ch == "_" for ch in key)
+
+
+def _expand_cli_path(value: str | None) -> str | None:
+    if not value:
+        return None
+    if os.name == "nt" and value.startswith("/"):
+        return value
+    return str(Path(value).expanduser()) if any(sep in value for sep in ("/", "\\")) else value
+
+
+def _resolve_cli_path(value: str) -> str:
+    expanded = Path(value).expanduser()
+    if expanded.is_absolute() or any(sep in value for sep in ("/", "\\")):
+        return str(expanded)
+    return shutil.which(value) or value
+
+
+def _outer_leader_setting_sources(cli_info: dict[str, Any]) -> list[str]:
+    raw = os.environ.get("OUTER_LEADER_SETTING_SOURCES")
+    if raw is not None:
+        raw = raw.strip()
+        return [item.strip() for item in raw.split(",") if item.strip()] if raw else []
+    if (cli_info.get("env") or {}).get("HOME") or cli_info.get("mcp_config"):
+        return ["user"]
+    return []
+
+
+def _settings_loaded_by_home(cli_info: dict[str, Any]) -> bool:
+    return bool((cli_info.get("env") or {}).get("HOME") and not cli_info.get("settings"))
+
+
+def _options_diagnostics(values: dict[str, Any], settings_path: Path | None, cli_info: dict[str, Any] | None = None) -> dict[str, Any]:
+    env = values.get("env") if isinstance(values.get("env"), dict) else {}
+    settings_env = _settings_env(settings_path)
+    cli_info = cli_info or {}
+    cli_home = (cli_info.get("env") or {}).get("HOME")
+    cli_mcp_config = cli_info.get("mcp_config")
+    return {
+        "tools": list(values.get("tools") or []),
+        "allowed_tools": list(values.get("allowed_tools") or []),
+        "disallowed_tools": list(values.get("disallowed_tools") or []),
+        "permission_mode": values.get("permission_mode"),
+        "model": values.get("model"),
+        "cli_path": values.get("cli_path"),
+        "cli_source": cli_info.get("cli_source"),
+        "cli_warning": cli_info.get("cli_warning"),
+        "cli_env_keys": sorted((cli_info.get("env") or {}).keys()),
+        "cli_home": str(cli_home) if cli_home else None,
+        "cli_mcp_config": cli_info.get("mcp_config"),
+        "cli_mcp_config_exists": _path_exists(cli_mcp_config),
+        "cli_extra_args": cli_info.get("extra_args") or {},
+        "cli_ignored_args": cli_info.get("ignored_args") or [],
+        "bridge_claude_command": _safe_command_preview(os.environ.get("BRIDGE_CLAUDE_COMMAND") or cli_info.get("bridge_claude_command")),
+        "fallback_model": values.get("fallback_model"),
+        "settings": values.get("settings"),
+        "setting_sources": list(values.get("setting_sources") or []),
+        "settings_diagnostics": {
+            "settings_path": str(settings_path) if settings_path else None,
+            "settings_path_exists": bool(settings_path and settings_path.exists()),
+            "inferred_source_path": _infer_outer_settings_source(settings_path),
+            "settings_env_keys": sorted(settings_env.keys()),
+            "settings_has_anthropic_base_url": _has_nonempty(settings_env.get("ANTHROPIC_BASE_URL")),
+            "settings_anthropic_base_url": _safe_url_preview(settings_env.get("ANTHROPIC_BASE_URL")),
+            "settings_has_anthropic_auth_token": _has_nonempty(settings_env.get("ANTHROPIC_AUTH_TOKEN")),
+            "settings_has_http_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTP_PROXY")),
+            "settings_has_https_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTPS_PROXY")),
+            "subprocess_env_has_anthropic_base_url": _has_nonempty(env.get("ANTHROPIC_BASE_URL")),
+            "subprocess_anthropic_base_url": _safe_url_preview(env.get("ANTHROPIC_BASE_URL")),
+            "subprocess_env_has_anthropic_auth_token": _has_nonempty(env.get("ANTHROPIC_AUTH_TOKEN")),
+            "subprocess_anthropic_model": env.get("ANTHROPIC_MODEL"),
+            "subprocess_default_sonnet_model": env.get("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            "subprocess_default_haiku_model": env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            "subprocess_env_has_http_proxy": _has_nonempty(_env_value_ci(env, "HTTP_PROXY")),
+            "subprocess_env_has_https_proxy": _has_nonempty(_env_value_ci(env, "HTTPS_PROXY")),
+        },
+    }
+
+
+def outer_leader_startup_diagnostics(
+    control_root: str | Path,
+    repo_root: str | Path | None = None,
+    request: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the outer leader startup plan without sending an API request."""
+
+    control = Path(control_root).expanduser().resolve()
+    repo = Path(repo_root).expanduser().resolve() if repo_root else Path.cwd().resolve()
+    request = dict(request or {})
+    leader_model = _leader_model(control)
+    tools = _env_list("OUTER_LEADER_TOOLS", _env_list("OUTER_LEADER_ALLOWED_TOOLS", DEFAULT_ALLOWED_TOOLS))
+    allowed_tools = _env_list("OUTER_LEADER_ALLOWED_TOOLS", tools)
+    cli_info = _outer_leader_cli_info(control, repo)
+    settings_path = _outer_leader_settings_path(control, cli_info, repo)
+    env = {
+        "CLAUDE_CONTROL_ROOT": str(control),
+        "BRIDGE_RUNTIME_REPO_KEY": str(request.get("repo_key") or ""),
+        "BRIDGE_RUN_ID": str(request.get("run_id") or ""),
+        "CLAUDE_CONTROL_RUN_ID": str(request.get("run_id") or ""),
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    env.update(_bridge_process_env_overrides(control, cli_info, repo))
+    env.update(cli_info.get("env") or {})
+    env["ANTHROPIC_MODEL"] = leader_model
+    env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = leader_model
+    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = leader_model
+    option_values = {
+        "cwd": str(repo),
+        "tools": tools,
+        "mcp_servers": cli_info.get("mcp_config") or _bridge_mcp_servers(control),
+        "strict_mcp_config": cli_info.get("strict_mcp_config", True),
+        "allowed_tools": allowed_tools,
+        "disallowed_tools": _env_list("OUTER_LEADER_DISALLOWED_TOOLS", DEFAULT_DISALLOWED_TOOLS),
+        "permission_mode": _outer_leader_permission_mode(),
+        "model": leader_model,
+        "cli_path": cli_info.get("cli_path"),
+        "settings": str(settings_path) if settings_path and not _settings_loaded_by_home(cli_info) else None,
+        "setting_sources": _outer_leader_setting_sources(cli_info),
+        "include_partial_messages": True,
+        "max_turns": _env_int("OUTER_LEADER_MAX_TURNS"),
+        "max_budget_usd": _env_float("OUTER_LEADER_MAX_BUDGET_USD"),
+        "env": env,
+        "extra_args": cli_info.get("extra_args") or {},
+    }
+    effective = _options_diagnostics(option_values, settings_path, cli_info)
+    settings_diag = effective.get("settings_diagnostics", {})
+    checks = {
+        "home_env_present": bool(effective.get("cli_home")),
+        "mcp_config_present": bool(effective.get("cli_mcp_config")),
+        "mcp_config_exists": bool(effective.get("cli_mcp_config_exists")),
+        "settings_arg_mode": "flag" if effective.get("settings") else "home",
+        "setting_sources_user_only": effective.get("setting_sources") == ["user"],
+        "process_env_provider_overrides": bool(
+            settings_diag.get("subprocess_env_has_anthropic_base_url")
+            or settings_diag.get("subprocess_env_has_anthropic_auth_token")
+        ),
+        "settings_file_provider_env_present": bool(
+            settings_diag.get("settings_has_anthropic_base_url")
+            or settings_diag.get("settings_has_anthropic_auth_token")
+        ),
+    }
+    return {
+        "schema_version": "outer_leader_startup_diagnostics.v1",
+        "control_root": str(control),
+        "repo_root": str(repo),
+        "parent_claude_root": str(_discover_parent_claude_root(control, repo)),
+        "effective_options": effective,
+        "checks": checks,
+        "verdict": _startup_diagnostic_verdict(checks),
+    }
+
+
+def _startup_diagnostic_verdict(checks: dict[str, Any]) -> dict[str, Any]:
+    problems: list[str] = []
+    warnings: list[str] = []
+    if checks.get("process_env_provider_overrides"):
+        problems.append("ANTHROPIC_BASE_URL/AUTH_TOKEN is being injected into the actual SDK subprocess environment")
+    if not checks.get("home_env_present"):
+        warnings.append("HOME is not set by the Claude startup wrapper")
+    if not checks.get("mcp_config_present"):
+        warnings.append("no --mcp-config path is active")
+    elif not checks.get("mcp_config_exists"):
+        problems.append("active --mcp-config path does not exist")
+    if checks.get("settings_arg_mode") == "flag":
+        warnings.append("SDK will pass --settings instead of relying on HOME/user settings")
+    if not checks.get("setting_sources_user_only"):
+        warnings.append("setting_sources is not exactly ['user']")
+    if problems:
+        status = "fail"
+    elif warnings:
+        status = "warn"
+    else:
+        status = "ok"
+    return {"status": status, "problems": problems, "warnings": warnings}
 
 
 def _construct_options(options_cls: Any, values: dict[str, Any]) -> Any:
@@ -270,6 +807,34 @@ def _leader_prompt(control_root: Path) -> str:
     if not path.exists():
         return "You are leader-orchestrator. Use runtime truth and bridge MCP tools as the control path."
     return _strip_frontmatter(path.read_text(encoding="utf-8", errors="replace")).strip()
+
+
+def _leader_model(control_root: Path) -> str:
+    explicit = os.environ.get("OUTER_LEADER_MODEL")
+    if explicit and explicit.strip():
+        return explicit.strip()
+    path = control_root.parent / "agents" / "leader-orchestrator.md"
+    if path.exists():
+        frontmatter = _frontmatter(path.read_text(encoding="utf-8-sig", errors="replace"))
+        model = str(frontmatter.get("model") or "").strip()
+        if model:
+            return model
+    return os.environ.get("BRIDGE_FALLBACK_MODEL", "gpt-main").strip() or "gpt-main"
+
+
+def _frontmatter(text: str) -> dict[str, str]:
+    if not text.startswith("---"):
+        return {}
+    marker = text.find("\n---", 3)
+    if marker == -1:
+        return {}
+    data: dict[str, str] = {}
+    for line in text[3:marker].splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        data[key.strip()] = value.strip()
+    return data
 
 
 def _strip_frontmatter(text: str) -> str:
@@ -368,10 +933,13 @@ def _result_fields(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
     fields: dict[str, Any] = {}
-    for key in ("subtype", "result", "session_id", "total_cost_usd", "duration_ms", "num_turns"):
+    for key in ("subtype", "result", "session_id", "total_cost_usd", "duration_ms", "num_turns", "stop_reason", "is_error"):
         if key in payload:
             value = payload.get(key)
             fields[key] = _safe_report_text(value) if key == "result" else value
+    for key in ("permission_denials", "errors"):
+        if key in payload:
+            fields[key] = _to_jsonable(payload.get(key))
     return fields
 
 
@@ -412,8 +980,16 @@ def _sdk_result(
     handled_by: str,
 ) -> dict[str, Any]:
     subtype = result_message.get("subtype") if result_message else None
-    status = "succeeded" if subtype in {None, "success"} else "failed"
     summary = _result_text(result_message) or _last_result_text(messages) or _last_preview(messages) or "outer leader SDK response completed"
+    contract_violation = _outer_leader_contract_violation(summary, result_message)
+    system_failure = _outer_leader_system_failure(summary, result_message)
+    status = (
+        "blocked"
+        if contract_violation
+        else "failed"
+        if system_failure
+        else ("succeeded" if subtype in {None, "success"} else "failed")
+    )
     return {
         "status": status,
         "handled_by": handled_by,
@@ -431,15 +1007,87 @@ def _sdk_result(
             "sdk_message_count": len(messages),
             "result_subtype": subtype,
             "runtime_event_id": request.get("runtime_event_id"),
+            "permission_denials": result_message.get("permission_denials") if isinstance(result_message, dict) else None,
+            "contract_violation": contract_violation,
+            "system_failure": system_failure,
         },
         "error_or_null": None
         if status == "succeeded"
-        else {
-            "type": "OuterLeaderSdkResultNotSuccess",
-            "message": str(subtype or "SDK response ended without a success result"),
-        },
+        else (
+            {
+                "type": "OuterLeaderContractViolation",
+                "message": contract_violation,
+            }
+            if contract_violation
+            else (
+                system_failure
+                if system_failure
+                else {
+                "type": "OuterLeaderSdkResultNotSuccess",
+                "message": str(subtype or "SDK response ended without a success result"),
+                }
+            )
+        ),
         "cleanup_required": False,
     }
+
+
+def _outer_leader_contract_violation(summary: str, result_message: dict[str, Any] | None = None) -> str | None:
+    permission_denials = result_message.get("permission_denials") if isinstance(result_message, dict) else None
+    if permission_denials:
+        return "Outer leader hit tool permission denials instead of using the approved bridge control path."
+
+    text = str(summary or "")
+    lowered = text.lower()
+    asks_for_mcp_auth = (
+        "mcp__" in text
+        and (
+            "\u6388\u6743" in text
+            or "\u5141\u8bb8" in text
+            or "permission" in lowered
+            or "allow" in lowered
+        )
+    )
+    if asks_for_mcp_auth:
+        return "Outer leader asked the user to authorize MCP tools instead of reporting a workflow-system failure."
+    if "mcp__codex__codex" in text:
+        return "Outer leader attempted to delegate implementation through Codex MCP instead of L4 bridge routing."
+    if "dispatch_workflow_event" in text and (
+        "\u5f00\u653e" in text or "\u6388\u6743" in text or "reroute_phase" in text
+    ):
+        return "Outer leader attempted to mutate workflow routing directly instead of using build_bridge_packet/call_bridge_sdk."
+    if "\u4f60\u9700\u8981\u624b\u52a8\u6267\u884c" in text or "\u6211\u5f53\u524d\u7684\u5de5\u5177\u6743\u9650\u65e0\u6cd5\u76f4\u63a5\u7f16\u8f91" in text:
+        return "Outer leader asked the user to perform manual implementation instead of routing to L4 bridge."
+    return None
+
+
+def _outer_leader_system_failure(summary: str, result_message: dict[str, Any] | None = None) -> dict[str, str] | None:
+    text = str(summary or "")
+    if isinstance(result_message, dict):
+        errors = result_message.get("errors")
+        if errors:
+            text = f"{text}\n{json.dumps(errors, ensure_ascii=False, default=str)}"
+    lowered = text.lower()
+    connection_refused = "connectionrefused" in lowered or "connection refused" in lowered or "econnrefused" in lowered
+    api_connect_error = "api error" in lowered and ("connect" in lowered or "connection" in lowered)
+    invalid_model = "api error" in lowered and "invalid model name" in lowered
+    api_400 = "api error: 400" in lowered or "api error 400" in lowered
+    if invalid_model:
+        return {
+            "type": "OuterLeaderSdkInvalidModel",
+            "message": _safe_report_text(summary or "Outer leader SDK used a model name rejected by the configured LLM API."),
+        }
+    if api_400:
+        return {
+            "type": "OuterLeaderSdkApiRequestFailed",
+            "message": _safe_report_text(summary or "Outer leader SDK request was rejected by the configured LLM API."),
+        }
+    if connection_refused or api_connect_error:
+        return {
+            "type": "OuterLeaderSdkApiConnectionFailed",
+            "message": _safe_report_text(summary or "Outer leader SDK could not connect to the configured LLM API."),
+        }
+    return None
 
 
 def _last_preview(messages: list[dict[str, Any]]) -> str | None:
@@ -531,6 +1179,81 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _has_nonempty(value: Any) -> bool:
+    return bool(str(value or "").strip())
+
+
+def _env_value_ci(env: dict[Any, Any], key: str) -> Any:
+    target = key.lower()
+    for item_key, value in env.items():
+        if str(item_key).lower() == target:
+            return value
+    return None
+
+
+def _safe_url_preview(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return "<set>"
+    if not parts.scheme or not parts.hostname:
+        return "<set>"
+    host = parts.hostname
+    port = ""
+    try:
+        if parts.port is not None:
+            port = f":{parts.port}"
+    except ValueError:
+        port = ""
+    path = parts.path.rstrip("/")
+    return f"{parts.scheme}://{host}{port}{path}"
+
+
+def _path_exists(value: Any) -> bool:
+    if not value:
+        return False
+    try:
+        return Path(str(value)).expanduser().exists()
+    except Exception:
+        return False
+
+
+def _safe_command_preview(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parts = shlex.split(raw, posix=(os.name != "nt"))
+    except ValueError:
+        return _redact_secret_text(raw)
+    redacted: list[str] = []
+    for part in parts:
+        if _is_env_assignment(part):
+            key, item_value = part.split("=", 1)
+            if _secretish_key(key):
+                redacted.append(f"{key}=<redacted>")
+            else:
+                redacted.append(f"{key}={item_value}")
+            continue
+        redacted.append(_redact_secret_text(part))
+    return " ".join(redacted)
+
+
+def _secretish_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(token in lowered for token in ("token", "key", "secret", "password", "authorization", "auth"))
+
+
+def _redact_secret_text(value: str) -> str:
+    text = str(value)
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}", r"\1<redacted>", text)
+    text = re.sub(r"sk-[A-Za-z0-9_-]{12,}", "sk-<redacted>", text)
+    return text
+
+
 def _env_int(name: str) -> int | None:
     raw = os.environ.get(name)
     if not raw:
@@ -551,8 +1274,8 @@ def _env_float(name: str) -> float | None:
         return None
 
 
-def _sdk_timeout_seconds() -> int:
-    return _env_int("OUTER_LEADER_SDK_TIMEOUT_SECONDS") or 600
+def _sdk_timeout_seconds() -> int | None:
+    return _env_int("OUTER_LEADER_SDK_TIMEOUT_SECONDS")
 
 
 def _now_iso() -> str:

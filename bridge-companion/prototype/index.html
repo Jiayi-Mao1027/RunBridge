@@ -30,7 +30,7 @@
       font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       overflow: hidden;
     }
-    button, select, textarea {
+    button, select, textarea, input {
       font: inherit;
       color: var(--text);
       background: #15191c;
@@ -42,13 +42,14 @@
       padding: 0 11px;
       cursor: pointer;
     }
-    button:hover, select:hover { border-color: var(--line-strong); }
+    button:hover, select:hover, input:hover { border-color: var(--line-strong); }
     button.active { border-color: var(--accent); color: var(--accent); }
-    select {
+    select, input {
       width: 100%;
       height: 34px;
       padding: 0 9px;
     }
+    input[type="number"] { min-width: 110px; }
     textarea {
       width: 100%;
       min-height: 112px;
@@ -56,7 +57,7 @@
       padding: 9px;
       line-height: 1.45;
     }
-    textarea:focus, select:focus, button:focus {
+    textarea:focus, select:focus, button:focus, input:focus {
       outline: 1px solid rgba(125, 183, 162, .65);
       outline-offset: 1px;
     }
@@ -305,6 +306,24 @@
       display: grid;
       gap: 10px;
     }
+    .terminal-box {
+      display: grid;
+      gap: 10px;
+    }
+    .terminal-row {
+      grid-template-columns: minmax(180px, 1fr) 130px;
+    }
+    .terminal-actions {
+      grid-template-columns: minmax(180px, 1fr) auto auto;
+    }
+    .terminal-output {
+      display: grid;
+      gap: 10px;
+    }
+    .terminal-output pre {
+      max-height: 240px;
+      overflow: auto;
+    }
     .leader-input {
       display: grid;
       gap: 9px;
@@ -469,6 +488,7 @@
               <button class="active" data-tab="raw">Raw</button>
               <button data-tab="trajectory">Trajectory</button>
               <button data-tab="brief">Model Brief</button>
+              <button data-tab="terminal">Terminal</button>
             </div>
             <div class="panel-body" id="detailBody" data-testid="detail-inspector"></div>
           </div>
@@ -536,7 +556,17 @@
       selectedTab: "raw",
       laneFilter: "all",
       briefText: "No model brief requested.",
-      streamConnected: false
+      terminal: {
+        cwd: "",
+        command: "npm run debug -- --strict-live --events --event-limit 80",
+        timeoutMs: 30000,
+        pending: false,
+        status: "ready",
+        statusClass: "",
+        result: null
+      },
+      streamConnected: false,
+      streamStoppedByGateway: false
     };
 
     const laneLabels = {
@@ -610,10 +640,25 @@
       return ["failed", "blocked", "rejected"].includes(status) || kind.includes("failed") || kind.includes("rejected") || kind.includes("error") || kind.includes("timeout");
     }
 
+    function isMeaningfulSdkStreamEvent(event) {
+      if (!event || event.source !== "sdk_stream") return false;
+      if (isFailureLike(event)) return true;
+      if (event.textDelta || event.accumulatedText || event.toolInputDelta || event.accumulatedToolInput) return true;
+      if (event.sdkToolName || event.toolName || event.toolId) return true;
+      const kind = String(event.kind || "").toLowerCase();
+      if (["text_delta", "assistant_message", "sdk_tool_declared", "sdk_tool_result"].includes(kind)) return true;
+      const rawType = String(event.raw?.sdk_message_type || event.raw?.event_type || event.raw?.raw_stream_event_type || event.streamEventType || "").toLowerCase();
+      if (rawType === "resultmessage" || rawType === "sdk_stream_final_result") return true;
+      if (kind === "sdk_delta") return false;
+      const preview = String(event.messagePreview || "").trim();
+      if (!preview) return false;
+      return !["streamevent", "sdk_stream_started", "sdk_stream_final", "content_block_delta", "tool_use", "tool_result"].includes(preview.toLowerCase());
+    }
+
     function isTransportNoise(event) {
       if (!event || isFailureLike(event)) return false;
       if (event.source === "sdk_stream") {
-        return true;
+        return !isMeaningfulSdkStreamEvent(event);
       }
       if (event.source === "outer_host") {
         const eventKind = String(event.raw?.event_kind || event.kind || "");
@@ -805,6 +850,7 @@
     function startStream() {
       if (!state.repoKey || !state.runId || typeof EventSource === "undefined") return;
       stopStream();
+      state.streamStoppedByGateway = false;
       setChip("streamChip", "connecting", "warn");
       const cursor = encodeURIComponent(JSON.stringify(state.sourceCursors || {}));
       const url = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/stream?afterCursor=${cursor}&afterId=${encodeURIComponent(state.lastEventId || "")}`;
@@ -836,19 +882,32 @@
           state.gatewayWarnings.push({ message: event.data || "gateway warning" });
         }
       });
+      state.source.addEventListener("gateway_shutdown", event => {
+        state.streamStoppedByGateway = true;
+        try {
+          state.gatewayWarnings.push(JSON.parse(event.data));
+        } catch {
+          state.gatewayWarnings.push({ message: event.data || "gateway shutdown" });
+        }
+        state.gatewayWarnings = state.gatewayWarnings.slice(-20);
+        stopStream("server stopped");
+        render();
+      });
       state.source.onerror = () => {
+        if (state.streamStoppedByGateway) return;
         state.streamConnected = false;
         setChip("streamChip", "reconnecting", "warn");
       };
     }
 
-    function stopStream() {
+    function stopStream(label = "off") {
       if (state.source) {
         state.source.close();
         state.source = null;
       }
       state.streamConnected = false;
-      setChip("streamChip", "off");
+      setChip("streamChip", label);
+      $("liveButton")?.classList.toggle("active", false);
     }
 
     function statusClass(status) {
@@ -1394,7 +1453,60 @@
         </section>`;
     }
 
+    function renderTerminal() {
+      const term = state.terminal;
+      $("detailMeta").textContent = "gateway terminal";
+      const result = term.result;
+      const resultSummary = result
+        ? {
+          ok: result.ok,
+          exitCode: result.exitCode,
+          signal: result.signal,
+          timedOut: result.timedOut,
+          durationMs: result.durationMs,
+          cwd: result.cwd,
+          shell: result.shell,
+          error: result.error,
+          message: result.message
+        }
+        : null;
+      $("detailBody").innerHTML = `
+        <form class="terminal-box" id="terminalForm">
+          <div class="input-row terminal-row">
+            <input id="terminalCwd" data-testid="terminal-cwd" placeholder="cwd blank = gateway process cwd" value="${escapeHtml(term.cwd)}" ${term.pending ? "disabled" : ""} />
+            <input id="terminalTimeout" data-testid="terminal-timeout" type="number" min="1000" max="120000" step="1000" value="${escapeHtml(term.timeoutMs)}" ${term.pending ? "disabled" : ""} />
+          </div>
+          <textarea id="terminalCommand" data-testid="terminal-command" spellcheck="false" ${term.pending ? "disabled" : ""}></textarea>
+          <div class="input-row terminal-actions">
+            <div class="submit-status ${escapeHtml(term.statusClass)}">${escapeHtml(term.status)}</div>
+            <button type="button" id="terminalDebugDefault" ${term.pending ? "disabled" : ""}>Debug</button>
+            <button type="submit" id="terminalRunButton" ${term.pending ? "disabled" : ""}>Run</button>
+          </div>
+        </form>
+        <div class="terminal-output">
+          ${resultSummary ? detailBlock("Command Result", resultSummary) : ""}
+          ${result?.stdout ? detailBlock("stdout", result.stdout) : ""}
+          ${result?.stderr ? detailBlock("stderr", result.stderr) : ""}
+        </div>`;
+      $("terminalCommand").value = term.command;
+      $("terminalForm").addEventListener("submit", submitTerminalCommand);
+      $("terminalDebugDefault").addEventListener("click", () => {
+        state.terminal.command = "npm run debug -- --strict-live --events --event-limit 80";
+        renderDetail();
+      });
+      $("terminalCwd").addEventListener("input", event => { state.terminal.cwd = event.target.value; });
+      $("terminalTimeout").addEventListener("input", event => { state.terminal.timeoutMs = Number(event.target.value) || 30000; });
+      $("terminalCommand").addEventListener("input", event => { state.terminal.command = event.target.value; });
+    }
+
     function renderDetail() {
+      document.querySelectorAll(".tabs button").forEach(button => {
+        button.classList.toggle("active", button.dataset.tab === state.selectedTab);
+      });
+      if (state.selectedTab === "terminal") {
+        renderTerminal();
+        return;
+      }
       const selected =
         state.events.get(state.selectedEventId) ||
         [...state.events.values()].find(event => event.seq === state.selectedEventSeq) ||
@@ -1404,9 +1516,6 @@
       $("detailMeta").textContent = selected?.rawRef
         ? `${selected.rawRef.sourceFile}:${selected.rawRef.sourceOffset}`
         : "rawRef";
-      document.querySelectorAll(".tabs button").forEach(button => {
-        button.classList.toggle("active", button.dataset.tab === state.selectedTab);
-      });
       if (state.selectedTab === "brief") {
         $("detailBody").innerHTML = `
           <div class="brief-box">
@@ -1496,6 +1605,46 @@
         state.briefText = `Model brief failed. Main UI state is unchanged.\n\nUnknowns:\n${(state.status?.unknowns || ["none recorded"]).map(item => `- ${item}`).join("\n")}`;
       }
       renderDetail();
+    }
+
+    async function submitTerminalCommand(event) {
+      event.preventDefault();
+      state.terminal.cwd = $("terminalCwd").value.trim();
+      state.terminal.timeoutMs = Number($("terminalTimeout").value) || 30000;
+      state.terminal.command = $("terminalCommand").value;
+      if (!state.terminal.command.trim()) {
+        state.terminal.status = "command is empty";
+        state.terminal.statusClass = "warn";
+        renderDetail();
+        return;
+      }
+      state.terminal.pending = true;
+      state.terminal.status = "running in gateway process...";
+      state.terminal.statusClass = "warn";
+      renderDetail();
+      try {
+        const result = await apiJson("/api/debug/terminal", {
+          method: "POST",
+          headers: { "content-type": "application/json; charset=utf-8" },
+          body: JSON.stringify({
+            command: state.terminal.command,
+            cwd: state.terminal.cwd || undefined,
+            timeoutMs: state.terminal.timeoutMs
+          })
+        });
+        state.terminal.result = result;
+        state.terminal.status = result.ok
+          ? `exit 0 in ${result.durationMs ?? "?"}ms`
+          : `${result.error || "failed"}${result.exitCode !== undefined ? ` exit=${result.exitCode}` : ""}`;
+        state.terminal.statusClass = result.ok ? "ok" : "failed";
+      } catch (error) {
+        state.terminal.result = error.payload || { ok: false, error: "request_failed", message: error.message };
+        state.terminal.status = error.message || "terminal request failed";
+        state.terminal.statusClass = "failed";
+      } finally {
+        state.terminal.pending = false;
+        renderDetail();
+      }
     }
 
     async function submitLeaderMessage(event) {

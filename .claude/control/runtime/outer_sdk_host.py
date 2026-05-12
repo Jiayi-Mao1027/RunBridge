@@ -5,10 +5,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import shlex
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from outer_sdk import OuterSdkHost, OuterSdkHostConfig, build_outer_leader_adapter
+from outer_sdk.claude_agent_adapter import outer_leader_startup_diagnostics
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,15 +24,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--adapter",
         default=os.environ.get("BRIDGE_OUTER_LEADER_ADAPTER") or os.environ.get("OUTER_LEADER_ADAPTER") or "auto",
-        help="Outer leader adapter: auto|sdk|unavailable. auto uses the Claude Agent SDK wrapper.",
+        help="Outer leader adapter: auto|sdk|tmux|unavailable. auto uses tmux for custom providers on Linux when available, otherwise the Claude Agent SDK wrapper.",
     )
     parser.add_argument("--input-json", default=None, help="Submit one input JSON and exit")
     parser.add_argument("--status", action="store_true", help="Print host status and exit")
+    parser.add_argument("--diagnose-startup", action="store_true", help="Print Claude startup diagnostics and exit without sending an API request")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    applied_defaults = install_claude_startup_defaults(args.control_root, repo_root=args.repo_root)
+    if args.diagnose_startup:
+        diagnostics = outer_leader_startup_diagnostics(args.control_root, repo_root=args.repo_root)
+        if applied_defaults:
+            diagnostics["applied_startup_defaults"] = applied_defaults
+        print(json.dumps(diagnostics, ensure_ascii=False, indent=2))
+        return
     config = OuterSdkHostConfig.from_values(
         control_root=args.control_root,
         repo_root=args.repo_root,
@@ -46,6 +56,52 @@ def main() -> None:
         print(json.dumps(host.status(repo_key=args.repo_key), ensure_ascii=False, indent=2))
         return
     serve(host, bind_host=args.host, port=args.port)
+
+
+def install_claude_startup_defaults(control_root: str | Path, repo_root: str | Path | None = None) -> dict[str, str]:
+    """Install the same Claude startup defaults users normally put in an alias.
+
+    The outer host is the system entrypoint, so it must not rely on an
+    interactive shell alias such as:
+      HOME=/path/to/workspace claude --mcp-config /path/to/.claude/mcp.json
+    """
+
+    claude_root = _discover_parent_claude_root(control_root, repo_root=repo_root)
+    workspace_home = claude_root.parent
+    mcp_config = claude_root / "mcp.json"
+    applied: dict[str, str] = {}
+
+    disabled = os.environ.get("BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS", "").strip().lower()
+    if disabled in {"1", "true", "yes"}:
+        return applied
+
+    has_explicit_command = bool((os.environ.get("BRIDGE_CLAUDE_COMMAND") or "").strip())
+    has_explicit_cli = bool((os.environ.get("BRIDGE_CLAUDE_CLI") or "").strip())
+    has_outer_cli = bool((os.environ.get("OUTER_LEADER_CLAUDE_CLI") or "").strip())
+    if not has_explicit_command and not has_explicit_cli and not has_outer_cli and mcp_config.exists():
+        command = f"HOME={_shell_quote(str(workspace_home))} claude --mcp-config {_shell_quote(str(mcp_config))}"
+        os.environ["BRIDGE_CLAUDE_COMMAND"] = command
+        applied["BRIDGE_CLAUDE_COMMAND"] = command
+
+    return applied
+
+
+def _discover_parent_claude_root(control_root: str | Path, repo_root: str | Path | None = None) -> Path:
+    if repo_root:
+        repo = Path(repo_root).expanduser().resolve()
+        candidate = repo.parent / ".claude"
+        if candidate.exists():
+            return candidate
+    control = Path(control_root).expanduser().resolve()
+    return control.parent
+
+
+def _shell_quote(value: str) -> str:
+    if os.name != "nt":
+        return shlex.quote(value)
+    if not value or any(ch.isspace() for ch in value) or '"' in value:
+        return '"' + value.replace('"', '\\"') + '"'
+    return value
 
 
 def serve(host: OuterSdkHost, *, bind_host: str, port: int) -> None:

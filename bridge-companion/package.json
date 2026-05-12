@@ -7,7 +7,9 @@
   "scripts": {
     "gateway": "node gateway/server.mjs",
     "start": "node gateway/server.mjs",
+    "debug": "node gateway/debug.mjs",
     "test:projection": "node gateway/projection_fixture_test.mjs",
-    "test:leader-input": "node gateway/leader_input_fixture_test.mjs"
+    "test:leader-input": "node gateway/leader_input_fixture_test.mjs",
+    "test:debug": "node gateway/debug_fixture_test.mjs"
   }
 }

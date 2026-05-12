@@ -12,6 +12,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from output_guardrails import validate_bridge_result
 from persist import append_jsonl, sanitize_json_value
@@ -92,8 +93,8 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     bridge_model = agent_models.get("bridge-leader") or os.environ.get("BRIDGE_FALLBACK_MODEL") or "gpt-main"
 
     cmd = (
-        _claude_command_prefix()
-        + _settings_args()
+        _claude_command_prefix(project_root)
+        + _settings_args(project_root)
         + [
             "-p",
             "--agent",
@@ -136,6 +137,9 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
         agent_models=agent_models,
         project_root=project_root,
     )
+    _merge_settings_env_into_subprocess_env(cmd, env)
+    _merge_claude_command_env_into_subprocess_env(env, project_root)
+    _force_bridge_model_env(env, bridge_model)
     _bind_bridge_child_session_env(env, execution_input)
 
     try:
@@ -381,7 +385,10 @@ def _run_claude_streaming(
         project_root,
         execution_input,
         "sdk_stream_started",
-        {"cmd_preview": _redact_cmd(cmd)},
+        {
+            "cmd_preview": _redact_cmd(cmd),
+            "settings_diagnostics": _settings_diagnostics(cmd, env),
+        },
         sequence=next_sequence(),
     )
 
@@ -521,6 +528,8 @@ def _emit_sdk_stream_event(
     record.update(_sdk_compact_tool_fields(payload))
     if "cmd_preview" in payload:
         record["cmd_preview"] = sanitize_json_value(payload.get("cmd_preview"))
+    if "settings_diagnostics" in payload:
+        record["settings_diagnostics"] = sanitize_json_value(payload.get("settings_diagnostics"))
     if "returncode" in payload:
         record["returncode"] = payload.get("returncode")
     if "timeout_seconds" in payload:
@@ -844,45 +853,190 @@ def _source_agent_dir() -> Path:
     return _control_claude_dir() / "agents"
 
 
-def _settings_args() -> list[str]:
+def _settings_args(project_root: Path | None = None) -> list[str]:
     explicit = os.environ.get("BRIDGE_CLAUDE_SETTINGS")
     if explicit:
         return ["--settings", str(Path(explicit).expanduser().resolve())]
 
-    default_settings = _control_claude_dir() / "settings.json"
+    if _default_claude_command_parts(project_root):
+        return []
+
+    parent_claude = _discover_parent_claude_dir(project_root)
+    default_settings = parent_claude / "settings.json"
     if default_settings.exists():
         return ["--settings", str(_materialize_bridge_settings(default_settings))]
 
-    hook_settings = _control_claude_dir() / "hooks" / "settings.json"
+    hook_settings = parent_claude / "hooks" / "settings.json"
     if hook_settings.exists():
         return ["--settings", str(_materialize_bridge_settings(hook_settings))]
 
     return []
 
 
+def _settings_diagnostics(cmd: list[str], env: dict[str, str]) -> dict[str, Any]:
+    settings_path = _settings_path_from_cmd(cmd)
+    settings_payload = _read_settings_payload(settings_path)
+    settings_env = settings_payload.get("env") if isinstance(settings_payload, dict) else None
+    settings_env = settings_env if isinstance(settings_env, dict) else {}
+    return {
+        "claude_command": _claude_command_preview(cmd),
+        "bridge_claude_command_configured": _has_nonempty(os.environ.get("BRIDGE_CLAUDE_COMMAND")),
+        "bridge_claude_cli_configured": _has_nonempty(os.environ.get("BRIDGE_CLAUDE_CLI")),
+        "settings_path": str(settings_path) if settings_path else None,
+        "settings_path_exists": bool(settings_path and settings_path.exists()),
+        "inferred_source_path": _infer_settings_source(settings_path),
+        "bridge_claude_settings_env": _redacted_env_path(os.environ.get("BRIDGE_CLAUDE_SETTINGS")),
+        "control_settings_exists": (_control_claude_dir() / "settings.json").exists(),
+        "hook_settings_exists": (_control_claude_dir() / "hooks" / "settings.json").exists(),
+        "settings_env_keys": sorted(str(key) for key in settings_env.keys()),
+        "settings_has_anthropic_base_url": _has_nonempty(settings_env.get("ANTHROPIC_BASE_URL")),
+        "settings_anthropic_base_url": _safe_url_preview(settings_env.get("ANTHROPIC_BASE_URL")),
+        "settings_has_anthropic_auth_token": _has_nonempty(settings_env.get("ANTHROPIC_AUTH_TOKEN")),
+        "settings_has_http_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTP_PROXY")),
+        "settings_has_https_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTPS_PROXY")),
+        "subprocess_env_has_anthropic_base_url": _has_nonempty(env.get("ANTHROPIC_BASE_URL")),
+        "subprocess_anthropic_base_url": _safe_url_preview(env.get("ANTHROPIC_BASE_URL")),
+        "subprocess_env_has_anthropic_auth_token": _has_nonempty(env.get("ANTHROPIC_AUTH_TOKEN")),
+        "subprocess_env_has_http_proxy": _has_nonempty(_env_value_ci(env, "HTTP_PROXY")),
+        "subprocess_env_has_https_proxy": _has_nonempty(_env_value_ci(env, "HTTPS_PROXY")),
+    }
+
+
+def _claude_command_preview(cmd: list[str]) -> str | None:
+    if not cmd:
+        return None
+    stop = len(cmd)
+    for marker in ("--settings", "-p", "--agent", "--model"):
+        try:
+            stop = min(stop, cmd.index(marker))
+        except ValueError:
+            continue
+    prefix = cmd[: max(1, stop)]
+    return " ".join(_redact_cmd(prefix))
+
+
+def _merge_settings_env_into_subprocess_env(cmd: list[str], env: dict[str, str]) -> list[str]:
+    settings_payload = _read_settings_payload(_settings_path_from_cmd(cmd))
+    settings_env = settings_payload.get("env") if isinstance(settings_payload, dict) else None
+    if not isinstance(settings_env, dict):
+        return []
+    copied: list[str] = []
+    for key, value in settings_env.items():
+        if value is None:
+            continue
+        env[str(key)] = str(value)
+        copied.append(str(key))
+    return sorted(copied)
+
+
+def _merge_claude_command_env_into_subprocess_env(env: dict[str, str], project_root: Path | None = None) -> list[str]:
+    command_env, _parts = _configured_claude_command(project_root)
+    for key, value in command_env.items():
+        env[key] = value
+    return sorted(command_env.keys())
+
+
+def _settings_path_from_cmd(cmd: list[str]) -> Path | None:
+    try:
+        index = cmd.index("--settings")
+    except ValueError:
+        return None
+    if index + 1 >= len(cmd):
+        return None
+    value = str(cmd[index + 1]).strip()
+    return Path(value).expanduser().resolve() if value else None
+
+
+def _read_settings_payload(settings_path: Path | None) -> dict[str, Any]:
+    if not settings_path or not settings_path.exists():
+        return {}
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _infer_settings_source(settings_path: Path | None) -> str | None:
+    if not settings_path:
+        return None
+    if settings_path.name != "bridge_hooks_settings.json" or settings_path.parent.name != "generated":
+        return str(settings_path)
+    claude_root = settings_path.parent.parent.parent
+    default_settings = claude_root / "settings.json"
+    if default_settings.exists():
+        return str(default_settings.resolve())
+    hook_settings = claude_root / "hooks" / "settings.json"
+    if hook_settings.exists():
+        return str(hook_settings.resolve())
+    return str(settings_path)
+
+
+def _redacted_env_path(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return str(Path(value).expanduser().resolve())
+    except Exception:
+        return "<set>"
+
+
+def _has_nonempty(value: Any) -> bool:
+    return bool(str(value or "").strip())
+
+
+def _env_value_ci(env: dict[Any, Any], key: str) -> Any:
+    target = key.lower()
+    for item_key, value in env.items():
+        if str(item_key).lower() == target:
+            return value
+    return None
+
+
+def _safe_url_preview(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return "<set>"
+    if not parts.scheme or not parts.hostname:
+        return "<set>"
+    host = parts.hostname
+    port = ""
+    try:
+        if parts.port is not None:
+            port = f":{parts.port}"
+    except ValueError:
+        port = ""
+    path = parts.path.rstrip("/")
+    return f"{parts.scheme}://{host}{port}{path}"
+
+
 def _materialize_bridge_settings(source: Path) -> Path:
     payload = json.loads(source.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"invalid Claude settings payload: {source}")
-    normalized = _normalize_hook_commands(payload)
-    target = _control_claude_dir() / "runtime_state" / "generated" / "bridge_hooks_settings.json"
+    normalized = _normalize_hook_commands(payload, source.parent)
+    target = source.parent / "runtime_state" / "generated" / "bridge_hooks_settings.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
     return target
 
 
-def _normalize_hook_commands(value: Any) -> Any:
+def _normalize_hook_commands(value: Any, claude_root: Path | None = None) -> Any:
     if isinstance(value, dict):
-        return {key: _normalize_hook_commands(item) for key, item in value.items()}
+        return {key: _normalize_hook_commands(item, claude_root) for key, item in value.items()}
     if isinstance(value, list):
-        return [_normalize_hook_commands(item) for item in value]
+        return [_normalize_hook_commands(item, claude_root) for item in value]
     if isinstance(value, str):
-        return _absolute_hook_command(value)
+        return _absolute_hook_command(value, claude_root)
     return value
 
 
-def _absolute_hook_command(command: str) -> str:
-    hooks_root = _control_claude_dir() / "hooks"
+def _absolute_hook_command(command: str, claude_root: Path | None = None) -> str:
+    hooks_root = (claude_root or _control_claude_dir()) / "hooks"
     normalized = command.replace("\\", "/")
     match = None
     for pattern in ("../.claude/hooks/", ".claude/hooks/"):
@@ -1102,10 +1256,7 @@ def _subprocess_env(
         env.setdefault("LC_ALL", "C.UTF-8")
         env.setdefault("LANG", "C.UTF-8")
 
-    # Force the bridge-leader process itself away from Claude Code's provider default.
-    env.setdefault("ANTHROPIC_MODEL", bridge_model)
-    env.setdefault("ANTHROPIC_DEFAULT_SONNET_MODEL", bridge_model)
-    env.setdefault("ANTHROPIC_DEFAULT_HAIKU_MODEL", bridge_model)
+    _force_bridge_model_env(env, bridge_model)
 
     # If all teammates use one model, set the subagent override as a hard guard.
     # If teammates are heterogeneous, leave it unset so static per-agent frontmatter can decide.
@@ -1126,6 +1277,13 @@ def _subprocess_env(
         env.setdefault("CLAUDE_CODE_SUBAGENT_MODEL", next(iter(teammate_models)))
 
     return env
+
+
+def _force_bridge_model_env(env: dict[str, str], bridge_model: str) -> None:
+    # Settings own provider connection details; agent frontmatter owns model routing.
+    env["ANTHROPIC_MODEL"] = bridge_model
+    env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = bridge_model
+    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = bridge_model
 
 
 def _bind_bridge_child_session_env(env: dict[str, str], execution_input: dict[str, Any]) -> None:
@@ -1162,28 +1320,99 @@ def _timeout_seconds(packet: dict[str, Any]) -> int:
         return 3600
 
 
-def _claude_command_prefix() -> list[str]:
-    configured = os.environ.get("BRIDGE_CLAUDE_COMMAND")
-    if configured:
+def _claude_command_prefix(project_root: Path | None = None) -> list[str]:
+    configured_cli = os.environ.get("BRIDGE_CLAUDE_CLI")
+    if configured_cli and configured_cli.strip():
+        return _claude_prefix_for_executable(configured_cli.strip())
+
+    configured_env, configured_parts = _configured_claude_command(project_root)
+    if configured_parts:
         # Supports either:
         #   BRIDGE_CLAUDE_COMMAND=claude
         #   BRIDGE_CLAUDE_COMMAND="C:\path\to\claude.cmd"
         #   BRIDGE_CLAUDE_COMMAND="claude --some-wrapper-arg"
-        try:
-            parts = shlex.split(configured, posix=(os.name != "nt"))
-            if parts:
-                return parts
-        except ValueError:
-            return [configured]
+        #   BRIDGE_CLAUDE_COMMAND="HOME=/data03/liang/mjy claude --mcp-config /data03/liang/mjy/.claude/mcp.json"
+        return configured_parts
+    if configured_env:
+        return ["claude"]
+
+    if os.environ.get("BRIDGE_DISABLE_CLAUDE_MJY_AUTO", "").strip().lower() not in {"1", "true", "yes"}:
+        preferred = shutil.which("claude_mjy")
+        if preferred:
+            return _claude_prefix_for_resolved(preferred)
 
     resolved = shutil.which("claude")
     if not resolved:
         return ["claude"]
 
+    return _claude_prefix_for_resolved(resolved)
+
+
+def _claude_prefix_for_executable(value: str) -> list[str]:
+    expanded = Path(value).expanduser()
+    if expanded.is_absolute() or any(sep in value for sep in ("/", "\\")):
+        return _claude_prefix_for_resolved(str(expanded))
+    return _claude_prefix_for_resolved(shutil.which(value) or value)
+
+
+def _configured_claude_command(project_root: Path | None = None) -> tuple[dict[str, str], list[str]]:
+    configured = os.environ.get("BRIDGE_CLAUDE_COMMAND")
+    if configured and configured.strip():
+        try:
+            parts = shlex.split(configured, posix=(os.name != "nt"))
+        except ValueError:
+            return {}, [configured]
+    else:
+        if os.environ.get("BRIDGE_CLAUDE_CLI") or os.environ.get("OUTER_LEADER_CLAUDE_CLI"):
+            return {}, []
+        if os.environ.get("BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS", "").strip().lower() in {"1", "true", "yes"}:
+            return {}, []
+        parts = _default_claude_command_parts(project_root)
+        if not parts:
+            return {}, []
+    env: dict[str, str] = {}
+    while parts and _shell_env_assignment(parts[0]):
+        key, value = parts.pop(0).split("=", 1)
+        env[key] = value
+    return env, parts
+
+
+def _default_claude_command_parts(project_root: Path | None = None) -> list[str]:
+    if os.environ.get("BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS", "").strip().lower() in {"1", "true", "yes"}:
+        return []
+    claude_root = _discover_parent_claude_dir(project_root)
+    mcp_config = claude_root / "mcp.json"
+    if not mcp_config.exists():
+        return []
+    return [f"HOME={claude_root.parent}", "claude", "--mcp-config", str(mcp_config)]
+
+
+def _discover_parent_claude_dir(project_root: Path | None = None) -> Path:
+    if project_root is None:
+        raw_project_root = os.environ.get("BRIDGE_PROJECT_ROOT")
+        if raw_project_root:
+            project_root = Path(raw_project_root)
+    if project_root is not None:
+        candidate = Path(project_root).expanduser().resolve().parent / ".claude"
+        if candidate.exists():
+            return candidate
+    return _control_claude_dir()
+
+
+def _shell_env_assignment(value: str) -> bool:
+    key, sep, _rest = value.partition("=")
+    if sep != "=" or not key:
+        return False
+    if not (key[0].isalpha() or key[0] == "_"):
+        return False
+    return all(ch.isalnum() or ch == "_" for ch in key)
+
+
+def _claude_prefix_for_resolved(resolved: str) -> list[str]:
     path = Path(resolved)
 
     exe_from_npm = path.parent / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
-    if exe_from_npm.exists():
+    if path.stem.lower() == "claude" and exe_from_npm.exists():
         return [str(exe_from_npm)]
 
     suffix = path.suffix.lower()

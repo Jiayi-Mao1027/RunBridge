@@ -28,6 +28,8 @@ from artifact_refs import normalize_artifact_refs, validate_artifact_refs
 from completion_validator import completion_succeeded, validate_bridge_completion
 from main_leader import decide_next_bridge_packet
 from outer_sdk import ClaudeAgentSdkOuterLeaderAdapter, OuterSdkHost, OuterSdkHostConfig, UnavailableOuterLeaderAdapter
+from outer_sdk.tmux_repl_adapter import _build_user_prompt as _build_tmux_user_prompt
+from outer_sdk.tmux_repl_adapter import extract_assistant_text as extract_tmux_assistant_text
 from output_guardrails import validate_bridge_result, validate_completion_report, validate_log_manifest, validate_teammate_report
 from policy_compiler import compile_policy
 from repo_runtime import ensure_repo_registered, get_repo_runtime_root, list_registered_repos, resolve_repo_key
@@ -1514,11 +1516,17 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         raise AssertionError(str(project_root / ".claude" / "agents"))
 
     old_settings = os.environ.pop("BRIDGE_CLAUDE_SETTINGS", None)
+    old_disable_startup_defaults = os.environ.get("BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS")
+    os.environ["BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS"] = "1"
     try:
-        settings_args = _settings_args()
+        settings_args = _settings_args(project_root)
     finally:
         if old_settings is not None:
             os.environ["BRIDGE_CLAUDE_SETTINGS"] = old_settings
+        if old_disable_startup_defaults is None:
+            os.environ.pop("BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS", None)
+        else:
+            os.environ["BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS"] = old_disable_startup_defaults
     if not settings_args or settings_args[0] != "--settings":
         raise AssertionError(json.dumps(settings_args, ensure_ascii=False, indent=2))
     generated_settings = Path(settings_args[1])
@@ -2697,6 +2705,17 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     new_default = long_host.handle_user_input({"text": "force a new host default run", "start_new_run": True})
     if new_default.get("host", {}).get("run_id") == long_response.get("host", {}).get("default_run_id"):
         raise AssertionError(json.dumps({"old": long_response.get("host"), "new": new_default.get("host")}, ensure_ascii=False, indent=2))
+
+    tmux_prompt = _build_tmux_user_prompt({"text": "\u4f60\u662f\u8c01", "run_id": run_id})
+    if tmux_prompt != "\u4f60\u662f\u8c01" or "\n[outer_host_context]" in tmux_prompt:
+        raise AssertionError(json.dumps({"tmux_prompt": tmux_prompt}, ensure_ascii=False, indent=2))
+    tmux_multiline_prompt = _build_tmux_user_prompt({"text": "first line\nsecond line", "run_id": run_id})
+    if "\nsecond line" in tmux_multiline_prompt or "[outer_host_context]" in tmux_multiline_prompt:
+        raise AssertionError(json.dumps({"tmux_multiline_prompt": tmux_multiline_prompt}, ensure_ascii=False, indent=2))
+    tmux_capture = "\n\u276f \u4f60\u662f\u8c01\n\n\u25cf I am Claude Code\n  in this workflow.\n\n\u273b Cooked for 7s\n\u276f "
+    tmux_text = extract_tmux_assistant_text(tmux_capture, "\u4f60\u662f\u8c01")
+    if "I am Claude Code" not in tmux_text or "in this workflow" not in tmux_text:
+        raise AssertionError(json.dumps({"tmux_text": tmux_text}, ensure_ascii=False, indent=2))
 
     sdk_adapter = ClaudeAgentSdkOuterLeaderAdapter(config)
     sdk_adapter._load_sdk = lambda: None

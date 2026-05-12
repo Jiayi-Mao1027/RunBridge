@@ -276,12 +276,14 @@ cd C:\path\to\workspace-parent\your-repo
 python ..\.claude\control\runtime\outer_sdk_host.py --control-root ..\.claude\control --repo-root . --main-session-id outer-main
 ```
 
+At startup, `outer_sdk_host.py` derives the interactive Claude wrapper from the target repo structure: it first looks for `../.claude` relative to `--repo-root`, sets the Claude subprocess `HOME` to that parent directory, and uses `../.claude/mcp.json` as the MCP config. This is the system-owned equivalent of a shell alias such as `HOME=<repo-parent> claude --mcp-config <repo-parent>/.claude/mcp.json`; callers should not need to export that alias manually.
+
 Current status of this path:
 
 - The host is long-lived and process-owned.
 - `POST /v1/input` records `user_prompt_submitted` or `user_answer_received` through `workflow_runtime`.
 - It writes `outer_host_events.jsonl` and SDK-shaped `sdk_stream_events.jsonl` for Companion.
-- The default adapter is the outer Claude Agent SDK wrapper (`--adapter auto`, equivalent to SDK-first). It owns one persistent SDK client per host process and normalizes SDK messages into `sdk_stream_events.jsonl`.
+- The default adapter is `--adapter auto`. For first-party/default Claude API paths it uses the outer Claude Agent SDK wrapper. For custom-provider `ANTHROPIC_BASE_URL` setups on Linux with `tmux` available, it uses the interactive TTY adapter so Companion follows the same Claude Code entrypoint as the working shell alias.
 - If `claude-agent-sdk` is not installed, the host records the input and returns `OuterLeaderSdkDependencyMissing` instead of pretending leader reasoning ran. Use `--adapter unavailable` only for fallback/debug smoke.
 
 Start Companion separately:
@@ -407,4 +409,4 @@ Without `BRIDGE_EXECUTOR=simulate` or `BRIDGE_EXECUTOR=sdk`, the bridge executor
 - No `~/.claude` changes are required.
 - No repo-local workflow code, `.claude/` directory, or `.mcp.json` file is required.
 - The only required shared artifact is the sibling parent `.claude` directory.
-- The startup command or wrapper must pass both `--settings ../.claude/settings.json` and `--mcp-config ../.claude/mcp.json`.
+- `outer_sdk_host.py` installs the default Claude startup wrapper from `--repo-root`'s sibling parent `.claude` directory. Set `BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS=1` only when explicitly testing a custom Claude launch path.
