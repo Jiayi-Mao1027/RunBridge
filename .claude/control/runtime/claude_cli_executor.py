@@ -24,9 +24,9 @@ BRIDGE_RESULT_SCHEMA = {
     "properties": {
         "status": {"type": "string", "enum": ["succeeded", "failed", "partial", "partial_or_failed"]},
         "reports": {"type": "array", "items": {"type": "object"}},
-        "artifact_refs": {"type": "array", "items": {"type": ["string", "object"]}},
-        "evidence": {"type": ["object", "null"]},
-        "error_or_null": {"type": ["object", "null"]},
+        "artifact_refs": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "object"}]}},
+        "evidence": {"anyOf": [{"type": "object"}, {"type": "null"}]},
+        "error_or_null": {"anyOf": [{"type": "object"}, {"type": "null"}]},
         "cleanup_required": {"type": "boolean"},
         "waiting": {"type": "boolean"},
         "wait_reason": {"type": "string"},

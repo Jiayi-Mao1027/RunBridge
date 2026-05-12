@@ -12,6 +12,7 @@ import uuid
 
 from bridge_sdk import call_bridge_sdk
 from bridge.executors import BridgeExecutionRequest, CliBridgeExecutor, SdkBridgeExecutor, SimulateBridgeExecutor, bridge_executor_from_env
+from claude_cli_executor import BRIDGE_RESULT_SCHEMA
 from claude_cli_executor import _allowed_tools
 from claude_cli_executor import _bridge_leader_prompt
 from claude_cli_executor import _ensure_project_agent_files
@@ -1398,6 +1399,7 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
 
 
 def run_cli_executor_policy_tests(root: Path) -> dict:
+    _assert_no_cli_schema_union_types(BRIDGE_RESULT_SCHEMA)
     wrapped_stdout = json.dumps(
         {
             "type": "result",
@@ -1661,6 +1663,24 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         if not tool_records or tool_records[0].get("tool_name") != "Read" or "file_path" not in tool_records[0].get("tool_input_keys", []):
             raise AssertionError(json.dumps(tool_records, ensure_ascii=False, indent=2))
     return {"cli_executor_policy": "passed"}
+
+
+def _assert_no_cli_schema_union_types(schema: dict) -> None:
+    """Claude CLI validates --json-schema in strict mode and rejects type arrays."""
+
+    def walk(value: object, path: str) -> None:
+        if isinstance(value, dict):
+            type_value = value.get("type")
+            if isinstance(type_value, list):
+                raise AssertionError(f"CLI JSON schema uses strict-incompatible type array at {path}.type")
+            for key, item in value.items():
+                walk(item, f"{path}.{key}")
+            return
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, f"{path}[{index}]")
+
+    walk(schema, "$")
 
 
 def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
