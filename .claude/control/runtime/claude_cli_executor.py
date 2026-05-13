@@ -699,7 +699,7 @@ def _run_claude_tmux(
                 "-s",
                 session_name,
                 "-x",
-                "240",
+                "1000",
                 "-y",
                 "60",
                 _tmux_launch_command(cmd, project_root, env),
@@ -792,6 +792,10 @@ def _emit_sdk_stream_event(
     record.update(_sdk_compact_tool_fields(payload))
     if "cmd_preview" in payload:
         record["cmd_preview"] = sanitize_json_value(payload.get("cmd_preview"))
+    if "adapter" in payload:
+        record["adapter"] = sanitize_json_value(payload.get("adapter"))
+    if "tmux_session" in payload:
+        record["tmux_session"] = sanitize_json_value(payload.get("tmux_session"))
     if "settings_diagnostics" in payload:
         record["settings_diagnostics"] = sanitize_json_value(payload.get("settings_diagnostics"))
     if "returncode" in payload:
@@ -1891,7 +1895,12 @@ def _tmux_paste_prompt(session_name: str, prompt: str) -> None:
     _tmux_run(["tmux", "load-buffer", "-b", buffer_name, "-"], input_text=prompt)
     _tmux_run(["tmux", "paste-buffer", "-b", buffer_name, "-t", session_name])
     _tmux_run(["tmux", "delete-buffer", "-b", buffer_name], check=False)
+    time.sleep(_tmux_submit_delay_seconds(prompt))
     _tmux_run(["tmux", "send-keys", "-t", session_name, "Enter"])
+
+
+def _tmux_submit_delay_seconds(prompt: str) -> float:
+    return min(2.0, max(0.2, len(prompt) / 20000.0))
 
 
 def _tmux_capture(session_name: str) -> str:
@@ -2195,12 +2204,13 @@ def _parse_json_object_text(text: str) -> dict[str, Any] | None:
     if start != -1 and end > start:
         candidates.append(s[start : end + 1])
     for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
+        for normalized in _json_text_variants(candidate):
+            try:
+                parsed = json.loads(normalized)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
     return None
 
 
@@ -2218,13 +2228,22 @@ def _parse_bridge_json_from_text(text: str) -> dict[str, Any] | None:
         for end in reversed(ends):
             if end <= start:
                 continue
-            try:
-                candidate = json.loads(s[start:end])
-            except json.JSONDecodeError:
-                continue
-            if _has_structured_bridge_payload(candidate):
-                return candidate
+            for normalized in _json_text_variants(s[start:end]):
+                try:
+                    candidate = json.loads(normalized)
+                except json.JSONDecodeError:
+                    continue
+                if _has_structured_bridge_payload(candidate):
+                    return candidate
     return None
+
+
+def _json_text_variants(text: str) -> list[str]:
+    variants = [text]
+    flattened = text.replace("\r", " ").replace("\n", " ")
+    if flattened != text:
+        variants.append(flattened)
+    return variants
 
 
 def _normalize_bridge_payload(payload: dict[str, Any], stdout: str, stderr: str) -> dict[str, Any]:

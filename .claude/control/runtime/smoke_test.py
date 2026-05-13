@@ -32,6 +32,7 @@ from claude_cli_executor import _settings_args
 from claude_cli_executor import _should_use_bare_print_mode
 from claude_cli_executor import _strip_claude_mcp_args
 from claude_cli_executor import _tmux_assistant_text
+from claude_cli_executor import _tmux_submit_delay_seconds
 from claude_cli_executor import should_use_tmux_bridge_executor
 from claude_cli_executor import simulated_team_executor
 from artifact_refs import normalize_artifact_refs, validate_artifact_refs
@@ -1575,6 +1576,16 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     parsed_tmux_json = _parse_bridge_json_from_text(tmux_text)
     if not parsed_tmux_json or parsed_tmux_json.get("reports", [{}])[0].get("summary") != "agent smoke ok":
         raise AssertionError(tmux_text)
+    wrapped_tmux_json = (
+        '{"status":"succeeded","reports":[{"summary":"wrapped visual\n'
+        '  line ok"}],"artifact_refs":[],"evidence":{"note":"screen\n'
+        '  wrapped"},"error_or_null":null,"cleanup_required":false}'
+    )
+    parsed_wrapped_tmux_json = _parse_bridge_json_from_text(wrapped_tmux_json)
+    if not parsed_wrapped_tmux_json or parsed_wrapped_tmux_json.get("reports", [{}])[0].get("summary") != "wrapped visual   line ok":
+        raise AssertionError(wrapped_tmux_json)
+    if _tmux_submit_delay_seconds("short") < 0.2 or _tmux_submit_delay_seconds("x" * 100000) > 2.0:
+        raise AssertionError("tmux submit delay bounds failed")
     old_tmux_override = os.environ.get("BRIDGE_TMUX_EXECUTOR")
     try:
         os.environ["BRIDGE_TMUX_EXECUTOR"] = "1"
