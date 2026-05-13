@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -92,9 +94,11 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     agent_models: dict[str, str] = agent_models_result["models"]
     bridge_model = agent_models.get("bridge-leader") or os.environ.get("BRIDGE_FALLBACK_MODEL") or "gpt-main"
 
+    bare_print_mode = _should_use_bare_print_mode(project_root)
     cmd = (
         _claude_command_prefix(project_root)
         + _settings_args(project_root)
+        + (["--bare"] if bare_print_mode else [])
         + [
             "-p",
             "--agent",
@@ -139,6 +143,9 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     )
     _merge_settings_env_into_subprocess_env(cmd, env)
     _merge_claude_command_env_into_subprocess_env(env, project_root)
+    _ensure_claude_api_key_alias(env)
+    if bare_print_mode:
+        env.setdefault("CLAUDE_CODE_SIMPLE", "1")
     _force_bridge_model_env(env, bridge_model)
     _bind_bridge_child_session_env(env, execution_input)
 
@@ -215,6 +222,164 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
         normalized["evidence"].setdefault("bridge_window_id", execution_input["bridge_window_id"])
         normalized["evidence"].setdefault("prompt_file", str(prompt_path))
         normalized["evidence"].setdefault("agent_models", agent_models)
+
+    normalized.setdefault("artifact_refs", [])
+    normalized.setdefault("error_or_null", None)
+    normalized.setdefault("cleanup_required", False)
+    return normalized
+
+
+def claude_tmux_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
+    """Interactive Claude Code bridge executor for custom-provider CLI setups."""
+    project_root = Path(os.environ.get("BRIDGE_PROJECT_ROOT") or Path.cwd()).resolve()
+    packet = _repair_mojibake_value(execution_input["packet"])
+
+    if os.name == "nt":
+        return _failure(
+            message="tmux bridge executor is unavailable on Windows",
+            error_type="ClaudeTmuxUnsupportedPlatform",
+            evidence={"platform": os.name},
+        )
+    if not shutil.which("tmux"):
+        return _failure(
+            message="tmux bridge executor requires tmux",
+            error_type="ClaudeTmuxMissing",
+            evidence={"project_root": str(project_root)},
+        )
+
+    prompt = _bridge_leader_prompt(packet, execution_input, project_root)
+    prompt_path = _write_bridge_prompt_file(project_root, prompt, execution_input)
+
+    teammate_names = _teammate_agent_names(packet)
+    required_agent_names = ["bridge-leader", *teammate_names]
+
+    sync_result = _ensure_project_agent_files(project_root, required_agent_names)
+    if sync_result.get("error_or_null"):
+        return _failure(
+            message="failed to validate required control-plane agent files",
+            error_type="AgentSyncFailed",
+            evidence={
+                "prompt_file": str(prompt_path),
+                "agent_sync": sync_result,
+                "executor": "tmux",
+            },
+        )
+
+    agent_models_result = _required_agent_models(required_agent_names)
+    if agent_models_result.get("error_or_null"):
+        return _failure(
+            message="required agent model validation failed",
+            error_type="AgentModelValidationFailed",
+            evidence={
+                "prompt_file": str(prompt_path),
+                "agent_models": agent_models_result,
+                "executor": "tmux",
+            },
+        )
+
+    agent_models: dict[str, str] = agent_models_result["models"]
+    bridge_model = agent_models.get("bridge-leader") or os.environ.get("BRIDGE_FALLBACK_MODEL") or "gpt-main"
+    cmd = (
+        _claude_tty_command_prefix(project_root)
+        + _settings_args(project_root)
+        + [
+            "--agent",
+            "bridge-leader",
+            "--model",
+            bridge_model,
+            "--append-system-prompt",
+            "Return one compact JSON object only. Do not wrap it in Markdown.",
+            "--add-dir",
+            str(project_root),
+        ]
+    )
+    allowed_tools = _allowed_tools(packet, teammate_names)
+    if allowed_tools:
+        cmd.extend(["--allowedTools", ",".join(allowed_tools)])
+
+    env = _subprocess_env(
+        bridge_model=bridge_model,
+        teammate_names=teammate_names,
+        agent_models=agent_models,
+        project_root=project_root,
+    )
+    _merge_settings_env_into_subprocess_env(cmd, env)
+    _merge_claude_command_env_into_subprocess_env(env, project_root)
+    _ensure_claude_api_key_alias(env)
+    _force_bridge_model_env(env, bridge_model)
+    _bind_bridge_child_session_env(env, execution_input)
+
+    try:
+        tmux_result = _run_claude_tmux(
+            cmd,
+            project_root,
+            env=env,
+            timeout=_timeout_seconds(packet),
+            execution_input=execution_input,
+            prompt=prompt,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return _failure(
+            message="claude tmux bridge executor timed out",
+            error_type="ClaudeTmuxTimeout",
+            evidence={
+                "prompt_file": str(prompt_path),
+                "timeout_seconds": _timeout_seconds(packet),
+                "stdout": (exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else "",
+                "stderr": (exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else "",
+                "agent_models": agent_models,
+                "cmd_preview": _redact_cmd(cmd),
+                "executor": "tmux",
+            },
+        )
+    except Exception as exc:
+        return _failure(
+            message="claude tmux bridge executor could not start",
+            error_type=type(exc).__name__,
+            evidence={
+                "prompt_file": str(prompt_path),
+                "exception": repr(exc),
+                "agent_models": agent_models,
+                "cmd_preview": _redact_cmd(cmd),
+                "executor": "tmux",
+            },
+        )
+
+    assistant_text = tmux_result.get("assistant_text") or ""
+    capture = tmux_result.get("capture") or ""
+    payload = _parse_bridge_json_from_text(assistant_text)
+    if not payload:
+        result = _failure(
+            message="claude tmux bridge executor returned no BridgeResult JSON",
+            error_type="ClaudeTmuxNoBridgeJson",
+            evidence={
+                "prompt_file": str(prompt_path),
+                "assistant_text": assistant_text[-4000:],
+                "capture_tail": capture[-4000:],
+                "agent_models": agent_models,
+                "cmd_preview": _redact_cmd(cmd),
+                "executor": "tmux",
+            },
+        )
+        _attach_cli_debug_evidence(result, prompt_path, assistant_text, capture)
+        return result
+
+    normalized = _normalize_bridge_payload(payload, assistant_text, capture)
+    if normalized.get("error_or_null"):
+        _attach_cli_debug_evidence(normalized, prompt_path, assistant_text, capture, payload=payload)
+        normalized["evidence"]["prompt_file"] = str(prompt_path)
+        normalized["evidence"]["agent_models"] = agent_models
+        normalized["evidence"]["cmd_preview"] = _redact_cmd(cmd)
+        normalized["evidence"]["executor"] = "tmux"
+        return normalized
+
+    if "evidence" not in normalized or normalized["evidence"] is None:
+        normalized["evidence"] = {}
+    if isinstance(normalized["evidence"], dict):
+        normalized["evidence"].setdefault("bridge_window_id", execution_input["bridge_window_id"])
+        normalized["evidence"].setdefault("prompt_file", str(prompt_path))
+        normalized["evidence"].setdefault("agent_models", agent_models)
+        normalized["evidence"].setdefault("executor", "tmux")
 
     normalized.setdefault("artifact_refs", [])
     normalized.setdefault("error_or_null", None)
@@ -387,7 +552,7 @@ def _run_claude_streaming(
         "sdk_stream_started",
         {
             "cmd_preview": _redact_cmd(cmd),
-            "settings_diagnostics": _settings_diagnostics(cmd, env),
+            "settings_diagnostics": _settings_diagnostics(cmd, env, project_root=project_root),
         },
         sequence=next_sequence(),
     )
@@ -491,6 +656,105 @@ def _run_claude_streaming(
         sequence=next_sequence(),
     )
     return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+
+def _run_claude_tmux(
+    cmd: list[str],
+    project_root: Path,
+    *,
+    env: dict[str, str],
+    timeout: int,
+    execution_input: dict[str, Any],
+    prompt: str,
+) -> dict[str, str]:
+    session_name = _tmux_bridge_session_name(execution_input)
+    sequence = 0
+
+    def next_sequence() -> int:
+        nonlocal sequence
+        sequence += 1
+        return sequence
+
+    _emit_sdk_stream_event(
+        project_root,
+        execution_input,
+        "sdk_stream_started",
+        {
+            "adapter": "claude-tmux-bridge",
+            "tmux_session": session_name,
+            "cmd_preview": _redact_cmd(cmd),
+            "settings_diagnostics": _settings_diagnostics(cmd, env, project_root=project_root),
+        },
+        sequence=next_sequence(),
+    )
+
+    capture = ""
+    assistant_text = ""
+    try:
+        _tmux_run(
+            [
+                "tmux",
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-x",
+                "240",
+                "-y",
+                "60",
+                _tmux_launch_command(cmd, project_root, env),
+            ]
+        )
+        _wait_for_tmux_ready(session_name, timeout=45)
+        _tmux_paste_prompt(session_name, prompt)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            capture = _tmux_capture(session_name)
+            assistant_text = _tmux_assistant_text(capture, prompt)
+            payload = _parse_bridge_json_from_text(assistant_text)
+            if isinstance(payload, dict) and payload.get("status") in {"succeeded", "failed", "partial", "partial_or_failed"}:
+                _emit_sdk_stream_event(
+                    project_root,
+                    execution_input,
+                    "sdk_stream_assistant_text",
+                    {"type": "assistant", "text": assistant_text, "adapter": "claude-tmux-bridge"},
+                    sequence=next_sequence(),
+                )
+                _emit_sdk_stream_event(
+                    project_root,
+                    execution_input,
+                    "sdk_stream_final_result",
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": assistant_text,
+                        "adapter": "claude-tmux-bridge",
+                    },
+                    status="completed",
+                    sequence=next_sequence(),
+                )
+                _emit_sdk_stream_event(
+                    project_root,
+                    execution_input,
+                    "sdk_stream_final",
+                    {"returncode": 0, "adapter": "claude-tmux-bridge"},
+                    status="completed",
+                    sequence=next_sequence(),
+                )
+                return {"assistant_text": assistant_text, "capture": capture}
+            time.sleep(2)
+        _emit_sdk_stream_event(
+            project_root,
+            execution_input,
+            "sdk_stream_timeout",
+            {"timeout_seconds": timeout, "adapter": "claude-tmux-bridge"},
+            status="failed",
+            sequence=next_sequence(),
+        )
+        raise subprocess.TimeoutExpired(cmd, timeout, output=assistant_text or capture, stderr="")
+    finally:
+        _tmux_run(["tmux", "kill-session", "-t", session_name], check=False)
 
 
 def _emit_sdk_stream_event(
@@ -873,7 +1137,7 @@ def _settings_args(project_root: Path | None = None) -> list[str]:
     return []
 
 
-def _settings_diagnostics(cmd: list[str], env: dict[str, str]) -> dict[str, Any]:
+def _settings_diagnostics(cmd: list[str], env: dict[str, str], project_root: Path | None = None) -> dict[str, Any]:
     settings_path = _settings_path_from_cmd(cmd)
     settings_payload = _read_settings_payload(settings_path)
     settings_env = settings_payload.get("env") if isinstance(settings_payload, dict) else None
@@ -894,9 +1158,15 @@ def _settings_diagnostics(cmd: list[str], env: dict[str, str]) -> dict[str, Any]
         "settings_has_anthropic_auth_token": _has_nonempty(settings_env.get("ANTHROPIC_AUTH_TOKEN")),
         "settings_has_http_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTP_PROXY")),
         "settings_has_https_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTPS_PROXY")),
+        "effective_anthropic_base_url": _safe_url_preview(_effective_anthropic_base_url(project_root=project_root, settings_path=settings_path)),
+        "claude_print_bare_mode": "--bare" in cmd,
         "subprocess_env_has_anthropic_base_url": _has_nonempty(env.get("ANTHROPIC_BASE_URL")),
         "subprocess_anthropic_base_url": _safe_url_preview(env.get("ANTHROPIC_BASE_URL")),
         "subprocess_env_has_anthropic_auth_token": _has_nonempty(env.get("ANTHROPIC_AUTH_TOKEN")),
+        "subprocess_env_has_anthropic_api_key": _has_nonempty(env.get("ANTHROPIC_API_KEY")),
+        "subprocess_env_auth_token_aliased_to_api_key": _has_nonempty(env.get("ANTHROPIC_AUTH_TOKEN"))
+        and env.get("ANTHROPIC_API_KEY") == env.get("ANTHROPIC_AUTH_TOKEN"),
+        "subprocess_claude_code_simple": env.get("CLAUDE_CODE_SIMPLE"),
         "subprocess_env_has_http_proxy": _has_nonempty(_env_value_ci(env, "HTTP_PROXY")),
         "subprocess_env_has_https_proxy": _has_nonempty(_env_value_ci(env, "HTTPS_PROXY")),
     }
@@ -934,6 +1204,97 @@ def _merge_claude_command_env_into_subprocess_env(env: dict[str, str], project_r
     for key, value in command_env.items():
         env[key] = value
     return sorted(command_env.keys())
+
+
+def _ensure_claude_api_key_alias(env: dict[str, str]) -> bool:
+    """Claude CLI bare print mode requires ANTHROPIC_API_KEY."""
+    if _has_nonempty(env.get("ANTHROPIC_API_KEY")):
+        return False
+    auth_token = env.get("ANTHROPIC_AUTH_TOKEN")
+    if not _has_nonempty(auth_token):
+        return False
+    env["ANTHROPIC_API_KEY"] = str(auth_token)
+    return True
+
+
+def _should_use_bare_print_mode(project_root: Path | None = None) -> bool:
+    override = _env_bool_override("BRIDGE_CLAUDE_PRINT_BARE")
+    if override is not None:
+        return override
+    return False
+
+
+def _env_bool_override(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _effective_anthropic_base_url(
+    *,
+    project_root: Path | None = None,
+    settings_path: Path | None = None,
+) -> str | None:
+    for value in (
+        os.environ.get("ANTHROPIC_BASE_URL"),
+        os.environ.get("CLAUDE_CODE_API_BASE_URL"),
+    ):
+        if _has_nonempty(value):
+            return str(value)
+
+    candidate_paths: list[Path] = []
+    if settings_path is not None:
+        candidate_paths.append(settings_path)
+    explicit_settings = os.environ.get("BRIDGE_CLAUDE_SETTINGS")
+    if explicit_settings:
+        candidate_paths.append(Path(explicit_settings).expanduser().resolve())
+
+    parent_claude = _discover_parent_claude_dir(project_root)
+    candidate_paths.extend(
+        [
+            parent_claude / "settings.json",
+            parent_claude / "hooks" / "settings.json",
+        ]
+    )
+
+    seen: set[Path] = set()
+    for path in candidate_paths:
+        try:
+            resolved = path.expanduser().resolve()
+        except Exception:
+            resolved = path
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        payload = _read_settings_payload(resolved)
+        settings_env = payload.get("env") if isinstance(payload, dict) else None
+        if not isinstance(settings_env, dict):
+            continue
+        for key in ("ANTHROPIC_BASE_URL", "CLAUDE_CODE_API_BASE_URL"):
+            value = settings_env.get(key)
+            if _has_nonempty(value):
+                return str(value)
+    return None
+
+
+def _is_custom_anthropic_base_url(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return False
+    host = (parts.hostname or "").lower()
+    if not host:
+        return False
+    return host not in {"api.anthropic.com", "claude.ai", "console.anthropic.com"}
 
 
 def _settings_path_from_cmd(cmd: list[str]) -> Path | None:
@@ -1348,6 +1709,45 @@ def _claude_command_prefix(project_root: Path | None = None) -> list[str]:
     return _claude_prefix_for_resolved(resolved)
 
 
+def _claude_tty_command_prefix(project_root: Path | None = None) -> list[str]:
+    configured_cli = os.environ.get("BRIDGE_CLAUDE_CLI")
+    if configured_cli and configured_cli.strip():
+        return _claude_prefix_for_executable(configured_cli.strip())
+
+    _configured_env, configured_parts = _configured_claude_command(project_root)
+    if configured_parts:
+        stripped = _strip_claude_mcp_args(configured_parts)
+        return stripped or ["claude"]
+
+    resolved = shutil.which("claude")
+    return _claude_prefix_for_resolved(resolved) if resolved else ["claude"]
+
+
+def _strip_claude_mcp_args(parts: list[str]) -> list[str]:
+    stripped: list[str] = []
+    index = 0
+    while index < len(parts):
+        item = parts[index]
+        if item == "--mcp-config":
+            index += 2
+            continue
+        if item.startswith("--mcp-config=") or item == "--strict-mcp-config":
+            index += 1
+            continue
+        stripped.append(item)
+        index += 1
+    return stripped
+
+
+def should_use_tmux_bridge_executor(project_root: Path | None = None) -> bool:
+    override = _env_bool_override("BRIDGE_TMUX_EXECUTOR")
+    if override is not None:
+        return override
+    if os.name == "nt" or not shutil.which("tmux"):
+        return False
+    return _is_custom_anthropic_base_url(_effective_anthropic_base_url(project_root=project_root))
+
+
 def _claude_prefix_for_executable(value: str) -> list[str]:
     expanded = Path(value).expanduser()
     if expanded.is_absolute() or any(sep in value for sep in ("/", "\\")):
@@ -1429,6 +1829,111 @@ def _claude_print_stream_json_args() -> list[str]:
     # --include-partial-messages keeps content_block_delta records visible for
     # UI-safe SDK stream text/input deltas.
     return ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+
+
+def _tmux_bridge_session_name(execution_input: dict[str, Any]) -> str:
+    raw = "bridge_{run}_{sub}_{task}_{suffix}".format(
+        run=execution_input.get("run_id") or "run",
+        sub=execution_input.get("sub_session_id") or "sub",
+        task=execution_input.get("task_id") or "task",
+        suffix=uuid.uuid4().hex[:8],
+    )
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)[:120]
+
+
+def _tmux_launch_command(cmd: list[str], project_root: Path, env: dict[str, str]) -> str:
+    public_env = _tmux_public_env(env)
+    env_parts = [f"{key}={shlex.quote(str(value))}" for key, value in sorted(public_env.items()) if str(value)]
+    command_parts = [shlex.quote(str(part)) for part in cmd]
+    return " ".join(["cd", shlex.quote(str(project_root)), "&&", "env", *env_parts, *command_parts])
+
+
+def _tmux_public_env(env: dict[str, str]) -> dict[str, str]:
+    keys = [
+        "HOME",
+        "BRIDGE_PROJECT_ROOT",
+        "BRIDGE_CHILD_CLAUDE_SESSION",
+        "BRIDGE_RUN_ID",
+        "CLAUDE_CONTROL_RUN_ID",
+        "BRIDGE_MAIN_SESSION_ID",
+        "CLAUDE_CONTROL_MAIN_SESSION_ID",
+        "BRIDGE_SUB_SESSION_ID",
+        "BRIDGE_WINDOW_ID",
+        "BRIDGE_TEAM_ID",
+        "BRIDGE_TASK_ID",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "PYTHONIOENCODING",
+        "PYTHONNOUSERSITE",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONUTF8",
+        "LC_ALL",
+        "LANG",
+    ]
+    return {key: env[key] for key in keys if _has_nonempty(env.get(key))}
+
+
+def _wait_for_tmux_ready(session_name: str, *, timeout: int) -> None:
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        last = _tmux_capture(session_name)
+        if "Claude Code" in last and ("❯" in last or ">" in last or "? for shortcuts" in last):
+            return
+        time.sleep(0.5)
+    raise TimeoutError(f"Claude TTY did not become ready within {timeout}s: {last[-1000:]}")
+
+
+def _tmux_paste_prompt(session_name: str, prompt: str) -> None:
+    buffer_name = f"bridge_prompt_{uuid.uuid4().hex[:8]}"
+    _tmux_run(["tmux", "load-buffer", "-b", buffer_name, "-"], input_text=prompt)
+    _tmux_run(["tmux", "paste-buffer", "-b", buffer_name, "-t", session_name])
+    _tmux_run(["tmux", "delete-buffer", "-b", buffer_name], check=False)
+    _tmux_run(["tmux", "send-keys", "-t", session_name, "Enter"])
+
+
+def _tmux_capture(session_name: str) -> str:
+    return _tmux_run(["tmux", "capture-pane", "-p", "-J", "-t", session_name, "-S", "-2000"]).stdout
+
+
+def _tmux_run(
+    args: list[str],
+    *,
+    input_text: str | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        input=input_text,
+        text=True,
+        capture_output=True,
+        check=check,
+        timeout=30,
+    )
+
+
+def _tmux_assistant_text(capture: str, prompt: str) -> str:
+    try:
+        from outer_sdk.tmux_repl_adapter import extract_assistant_text
+
+        text = extract_assistant_text(capture, prompt)
+    except Exception:
+        text = ""
+    return text or _assistant_text_after_prompt(capture, prompt)
+
+
+def _assistant_text_after_prompt(capture: str, prompt: str) -> str:
+    prefix = prompt[: min(len(prompt), 200)]
+    index = capture.rfind(prefix)
+    if index >= 0:
+        tail = capture[index + len(prefix) :]
+        json_marker = tail.rfind("● {")
+        if json_marker >= 0:
+            return tail[json_marker + 1 :]
+        return tail
+    return capture
 
 
 def _command_too_long_for_windows(cmd: list[str]) -> int | None:
@@ -1696,6 +2201,29 @@ def _parse_json_object_text(text: str) -> dict[str, Any] | None:
             continue
         if isinstance(parsed, dict):
             return parsed
+    return None
+
+
+def _parse_bridge_json_from_text(text: str) -> dict[str, Any] | None:
+    parsed = _parse_json_object_text(text)
+    if _has_structured_bridge_payload(parsed):
+        return parsed
+
+    s = text.strip()
+    if not s:
+        return None
+    starts = [match.start() for match in re.finditer(r"\{", s)]
+    ends = [match.start() + 1 for match in re.finditer(r"\}", s)]
+    for start in reversed(starts):
+        for end in reversed(ends):
+            if end <= start:
+                continue
+            try:
+                candidate = json.loads(s[start:end])
+            except json.JSONDecodeError:
+                continue
+            if _has_structured_bridge_payload(candidate):
+                return candidate
     return None
 
 

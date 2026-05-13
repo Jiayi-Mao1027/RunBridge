@@ -327,6 +327,13 @@ curl -s http://127.0.0.1:8791/v1/status | python3 -m json.tool | grep -E '"adapt
 
 The expected custom-provider path reports `"adapter": "claude-tmux-repl"`.
 
+Bridge child execution defaults to `BRIDGE_EXECUTOR=auto`. For default
+first-party API paths, auto keeps the Claude CLI print-mode executor. For
+custom `ANTHROPIC_BASE_URL` setups on Linux with `tmux` available, auto uses the
+interactive TTY bridge executor so teammate `Agent(...)` calls follow the same
+Claude Code path as the working shell. The TTY bridge executor strips the
+outer-leader MCP config from the child command to avoid recursive bridge calls.
+
 ### Claude CLI Compatibility
 
 Claude Code must load both parent-level configuration files:

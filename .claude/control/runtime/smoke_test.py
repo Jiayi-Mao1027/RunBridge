@@ -11,11 +11,16 @@ from pathlib import Path
 import uuid
 
 from bridge_sdk import call_bridge_sdk
-from bridge.executors import BridgeExecutionRequest, CliBridgeExecutor, SdkBridgeExecutor, SimulateBridgeExecutor, bridge_executor_from_env
+from bridge.executors import AutoBridgeExecutor, BridgeExecutionRequest, CliBridgeExecutor, SdkBridgeExecutor, SimulateBridgeExecutor, TmuxBridgeExecutor, bridge_executor_from_env
 from claude_cli_executor import BRIDGE_RESULT_SCHEMA
 from claude_cli_executor import _allowed_tools
 from claude_cli_executor import _bridge_leader_prompt
+from claude_cli_executor import _claude_tty_command_prefix
+from claude_cli_executor import _effective_anthropic_base_url
+from claude_cli_executor import _ensure_claude_api_key_alias
 from claude_cli_executor import _ensure_project_agent_files
+from claude_cli_executor import _is_custom_anthropic_base_url
+from claude_cli_executor import _parse_bridge_json_from_text
 from claude_cli_executor import _parse_claude_payload
 from claude_cli_executor import _parse_claude_stdout_envelope
 from claude_cli_executor import _claude_print_stream_json_args
@@ -24,6 +29,10 @@ from claude_cli_executor import _required_agent_models
 from claude_cli_executor import _run_claude_streaming
 from claude_cli_executor import _sdk_stream_event_paths
 from claude_cli_executor import _settings_args
+from claude_cli_executor import _should_use_bare_print_mode
+from claude_cli_executor import _strip_claude_mcp_args
+from claude_cli_executor import _tmux_assistant_text
+from claude_cli_executor import should_use_tmux_bridge_executor
 from claude_cli_executor import simulated_team_executor
 from artifact_refs import normalize_artifact_refs, validate_artifact_refs
 from completion_validator import completion_succeeded, validate_bridge_completion
@@ -1493,6 +1502,93 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     if "--output-format" not in stream_json_args or "stream-json" not in stream_json_args or "--verbose" not in stream_json_args or "--include-partial-messages" not in stream_json_args:
         raise AssertionError(json.dumps(stream_json_args, ensure_ascii=False, indent=2))
 
+    alias_env = {"ANTHROPIC_AUTH_TOKEN": "test-token"}
+    if not _ensure_claude_api_key_alias(alias_env) or alias_env.get("ANTHROPIC_API_KEY") != "test-token":
+        raise AssertionError(json.dumps(alias_env, ensure_ascii=False, indent=2))
+    if _ensure_claude_api_key_alias(alias_env):
+        raise AssertionError(json.dumps(alias_env, ensure_ascii=False, indent=2))
+    if _is_custom_anthropic_base_url("https://api.anthropic.com") or not _is_custom_anthropic_base_url("http://mjydsb.top"):
+        raise AssertionError("custom provider base URL detection failed")
+
+    custom_provider_root = root / "custom_provider_parent"
+    custom_project = custom_provider_root / "repo"
+    custom_project.mkdir(parents=True, exist_ok=True)
+    custom_claude = custom_provider_root / ".claude"
+    custom_claude.mkdir(parents=True, exist_ok=True)
+    (custom_claude / "settings.json").write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://mjydsb.top", "ANTHROPIC_AUTH_TOKEN": "test-token"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    env_snapshot = {
+        key: os.environ.get(key)
+        for key in [
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_API_BASE_URL",
+            "BRIDGE_CLAUDE_SETTINGS",
+            "BRIDGE_CLAUDE_PRINT_BARE",
+            "BRIDGE_DISABLE_CLAUDE_PRINT_BARE",
+        ]
+    }
+    try:
+        for key in env_snapshot:
+            os.environ.pop(key, None)
+        if _effective_anthropic_base_url(project_root=custom_project) != "http://mjydsb.top":
+            raise AssertionError(_effective_anthropic_base_url(project_root=custom_project))
+        if _should_use_bare_print_mode(custom_project):
+            raise AssertionError("custom provider should not implicitly enable bare print mode")
+        os.environ["BRIDGE_CLAUDE_PRINT_BARE"] = "0"
+        if _should_use_bare_print_mode(custom_project):
+            raise AssertionError("BRIDGE_CLAUDE_PRINT_BARE=0 did not disable bare print mode")
+        os.environ["BRIDGE_CLAUDE_PRINT_BARE"] = "1"
+        if not _should_use_bare_print_mode(root / "default_provider_project"):
+            raise AssertionError("BRIDGE_CLAUDE_PRINT_BARE=1 did not enable bare print mode")
+    finally:
+        for key, value in env_snapshot.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    stripped_mcp = _strip_claude_mcp_args(["claude", "--mcp-config", "mcp.json", "--strict-mcp-config", "--settings", "settings.json"])
+    if stripped_mcp != ["claude", "--settings", "settings.json"]:
+        raise AssertionError(json.dumps(stripped_mcp, ensure_ascii=False, indent=2))
+    old_bridge_command = os.environ.get("BRIDGE_CLAUDE_COMMAND")
+    try:
+        os.environ["BRIDGE_CLAUDE_COMMAND"] = "HOME=/tmp/example claude --mcp-config /tmp/example/.claude/mcp.json --strict-mcp-config"
+        if _claude_tty_command_prefix(custom_project) != ["claude"]:
+            raise AssertionError(json.dumps(_claude_tty_command_prefix(custom_project), ensure_ascii=False, indent=2))
+    finally:
+        if old_bridge_command is None:
+            os.environ.pop("BRIDGE_CLAUDE_COMMAND", None)
+        else:
+            os.environ["BRIDGE_CLAUDE_COMMAND"] = old_bridge_command
+
+    tmux_capture = (
+        "❯ prompt with {\"status\":\"succeeded\",\"reports\":[]}\n"
+        "● preflight-initial(Agent smoke check)\n"
+        "● {\"status\":\"succeeded\",\"reports\":[{\"summary\":\"agent smoke ok\"}],\"artifact_refs\":[],\"evidence\":{\"agent\":\"agent smoke ok\"},\"error_or_null\":null,\"cleanup_required\":false}\n"
+        "❯ "
+    )
+    tmux_text = _tmux_assistant_text(tmux_capture, "prompt with")
+    if "agent smoke ok" not in tmux_text:
+        raise AssertionError(tmux_text)
+    parsed_tmux_json = _parse_bridge_json_from_text(tmux_text)
+    if not parsed_tmux_json or parsed_tmux_json.get("reports", [{}])[0].get("summary") != "agent smoke ok":
+        raise AssertionError(tmux_text)
+    old_tmux_override = os.environ.get("BRIDGE_TMUX_EXECUTOR")
+    try:
+        os.environ["BRIDGE_TMUX_EXECUTOR"] = "1"
+        if not should_use_tmux_bridge_executor(custom_project):
+            raise AssertionError("BRIDGE_TMUX_EXECUTOR=1 did not enable tmux bridge executor")
+        os.environ["BRIDGE_TMUX_EXECUTOR"] = "0"
+        if should_use_tmux_bridge_executor(custom_project):
+            raise AssertionError("BRIDGE_TMUX_EXECUTOR=0 did not disable tmux bridge executor")
+    finally:
+        if old_tmux_override is None:
+            os.environ.pop("BRIDGE_TMUX_EXECUTOR", None)
+        else:
+            os.environ["BRIDGE_TMUX_EXECUTOR"] = old_tmux_override
+
     cli_packet = packet("bw_cli_policy", "sub_cli_policy")
     cli_packet["allowed_tools"] = ["Agent", "Read", "Grep", "Glob", "LS"]
     cli_packet["team_spec"]["teammate_specs"] = [
@@ -2450,14 +2546,24 @@ def run_bridge_boundary_tests(control_root: Path, runs_root: Path) -> dict:
         raise AssertionError(json.dumps(sdk, ensure_ascii=False, indent=2))
     if CliBridgeExecutor().name != "cli":
         raise AssertionError("cli executor name mismatch")
+    if TmuxBridgeExecutor().name != "tmux":
+        raise AssertionError("tmux executor name mismatch")
+    if AutoBridgeExecutor().name != "auto":
+        raise AssertionError("auto executor name mismatch")
     previous = os.environ.get("BRIDGE_EXECUTOR")
     try:
+        os.environ.pop("BRIDGE_EXECUTOR", None)
+        if bridge_executor_from_env().name != "auto":
+            raise AssertionError("default BRIDGE_EXECUTOR did not select auto")
         os.environ["BRIDGE_EXECUTOR"] = "simulate"
         if bridge_executor_from_env().name != "simulate":
             raise AssertionError("BRIDGE_EXECUTOR=simulate did not select simulate")
         os.environ["BRIDGE_EXECUTOR"] = "sdk"
         if bridge_executor_from_env().name != "sdk":
             raise AssertionError("BRIDGE_EXECUTOR=sdk did not select sdk")
+        os.environ["BRIDGE_EXECUTOR"] = "tmux"
+        if bridge_executor_from_env().name != "tmux":
+            raise AssertionError("BRIDGE_EXECUTOR=tmux did not select tmux")
         os.environ["BRIDGE_EXECUTOR"] = "canary"
         if bridge_executor_from_env().name != "cli":
             raise AssertionError("BRIDGE_EXECUTOR=canary did not select cli fallback")

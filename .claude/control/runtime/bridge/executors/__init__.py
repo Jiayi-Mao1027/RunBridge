@@ -5,8 +5,10 @@ from .cli_executor import CliBridgeExecutor
 from .factory import bridge_executor_from_env
 from .sdk_executor import SdkBridgeExecutor
 from .simulate_executor import SimulateBridgeExecutor
+from .tmux_executor import AutoBridgeExecutor, TmuxBridgeExecutor
 
 __all__ = [
+    "AutoBridgeExecutor",
     "BridgeExecutionContext",
     "BridgeExecutionRequest",
     "BridgeExecutor",
@@ -14,6 +16,7 @@ __all__ = [
     "CliBridgeExecutor",
     "SimulateBridgeExecutor",
     "SdkBridgeExecutor",
+    "TmuxBridgeExecutor",
     "bridge_executor_from_env",
 ]
 
