@@ -42,6 +42,8 @@ from main_leader import decide_next_bridge_packet
 from outer_sdk import ClaudeAgentSdkOuterLeaderAdapter, OuterSdkHost, OuterSdkHostConfig, UnavailableOuterLeaderAdapter
 from outer_sdk.tmux_repl_adapter import _build_user_prompt as _build_tmux_user_prompt
 from outer_sdk.tmux_repl_adapter import extract_assistant_text as extract_tmux_assistant_text
+from outer_sdk.tmux_repl_adapter import _tmux_paste_visible_timeout_seconds as _outer_tmux_paste_visible_timeout_seconds
+from outer_sdk.tmux_repl_adapter import _tmux_submit_delay_seconds as _outer_tmux_submit_delay_seconds
 from output_guardrails import validate_bridge_result, validate_completion_report, validate_log_manifest, validate_teammate_report
 from policy_compiler import compile_policy
 from repo_runtime import ensure_repo_registered, get_repo_runtime_root, list_registered_repos, resolve_repo_key
@@ -2871,6 +2873,10 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     tmux_multiline_prompt = _build_tmux_user_prompt({"text": "first line\nsecond line", "run_id": run_id})
     if "\nsecond line" in tmux_multiline_prompt or "[outer_host_context]" in tmux_multiline_prompt:
         raise AssertionError(json.dumps({"tmux_multiline_prompt": tmux_multiline_prompt}, ensure_ascii=False, indent=2))
+    if _outer_tmux_submit_delay_seconds("short") < 0.2 or _outer_tmux_submit_delay_seconds("x" * 100000) > 3.0:
+        raise AssertionError("outer tmux submit delay bounds failed")
+    if _outer_tmux_paste_visible_timeout_seconds("short") < 0.5 or _outer_tmux_paste_visible_timeout_seconds("x" * 100000) > 8.0:
+        raise AssertionError("outer tmux paste-visible timeout bounds failed")
     tmux_capture = "\n\u276f \u4f60\u662f\u8c01\n\n\u25cf I am Claude Code\n  in this workflow.\n\n\u273b Cooked for 7s\n\u276f "
     tmux_text = extract_tmux_assistant_text(tmux_capture, "\u4f60\u662f\u8c01")
     if "I am Claude Code" not in tmux_text or "in this workflow" not in tmux_text:

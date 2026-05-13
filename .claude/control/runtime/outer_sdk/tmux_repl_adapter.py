@@ -186,7 +186,18 @@ class TmuxReplOuterLeaderAdapter:
         self._run(["tmux", "load-buffer", "-b", buffer_name, "-"], input_text=prompt)
         self._run(["tmux", "paste-buffer", "-b", buffer_name, "-t", session_name])
         self._run(["tmux", "delete-buffer", "-b", buffer_name], check=False)
+        self._wait_for_paste_visible(session_name, prompt)
+        time.sleep(_tmux_submit_delay_seconds(prompt))
         self._run(["tmux", "send-keys", "-t", session_name, "Enter"])
+
+    def _wait_for_paste_visible(self, session_name: str, prompt: str) -> None:
+        deadline = time.time() + _tmux_paste_visible_timeout_seconds(prompt)
+        needle = _prompt_capture_needle(prompt)
+        while time.time() < deadline:
+            capture = self._capture(session_name)
+            if (needle and needle in capture) or "[Pasted text #" in capture:
+                return
+            time.sleep(0.1)
 
     def _wait_for_completion(self, session_name: str, prompt: str, *, timeout: int | None) -> str:
         deadline = time.time() + timeout if timeout else None
@@ -320,6 +331,18 @@ def _clean_line(value: str) -> str:
 def _tail_capture(value: str, limit: int = 1800) -> str:
     text = _strip_ansi(value).strip()
     return text[-limit:]
+
+
+def _prompt_capture_needle(prompt: str) -> str:
+    return " ".join(prompt.split())[:120]
+
+
+def _tmux_paste_visible_timeout_seconds(prompt: str) -> float:
+    return min(8.0, max(0.5, len(prompt) / 8000.0))
+
+
+def _tmux_submit_delay_seconds(prompt: str) -> float:
+    return min(3.0, max(0.2, len(prompt) / 20000.0))
 
 
 def _limit_text(value: str, limit: int) -> str:
