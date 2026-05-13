@@ -208,6 +208,10 @@ Tool observer records are emitted for all Claude Code sessions, not only bridge 
 
 UI must not synthesize low-level actions from reports or artifact refs. It should show `Read` / `Edit` / `Write` / `MultiEdit` / `Bash` / `Grep` / `Glob` / `LS` only when those real hook records exist in `tool_events.jsonl`. The hooks bind teammate child sessions from `SubagentStart` payloads such as `agent_name` / `subagent_name` when present, write that binding to `session_bindings.jsonl`, and rebind later child-session tool events by `session_id` when a tool payload lacks direct run fields. This is what lets real subagent tool calls land in the run-scoped observer stream with run/window/team/task/teammate attribution.
 
+`agent_messages.jsonl` is the source for bridge-leader-to-teammate assignment and discussion cards. When an assignment record lacks explicit target fields but its summary/body starts with a teammate prefix such as `chiefmate-a:`, Companion may use that prefix as display attribution and show the remaining text as the assignment body.
+
+A completed run cannot be backfilled with exact child tool names if no run-scoped teammate `tool_events.jsonl` or `session_bindings.jsonl` records were captured. SDK transcript summaries such as `chiefmate-a (...) · 16 tool uses` may be projected only as aggregate teammate tool-use counts, with an explicit unknown that individual tool names were not captured. Exact future visibility requires hook/observer instrumentation to record child tool events; Companion must not infer `Read`, `Grep`, `Bash`, or other concrete tools from reports or transcript summaries.
+
 For executor Bash events, UI may surface `soft_reminders` as nonblocking evidence prompts. They are not failures and do not imply the process was stopped.
 
 For UI-style "what is happening now" display, hooks maintain `active_operations.json` beside the run observer files, and a global `.claude/runtime_state/session_observer/active_operations.json` for unbound sessions. This snapshot is derived from tool started/completed pairs and contains the active tool and last completed tool per session/teammate.

@@ -91,6 +91,8 @@ npm run debug -- --strict-live --events --event-limit 80
 
 The same gateway-side command runner is available in the UI under `Detail Inspector` -> `Terminal`. It posts to `/api/debug/terminal`, runs inside the 8787 gateway process environment, redacts known provider and bridge secrets, and is enabled by default only when the gateway binds to loopback. Set `BRIDGE_COMPANION_ENABLE_TERMINAL=0` to disable it or `BRIDGE_COMPANION_ENABLE_TERMINAL=1` to explicitly enable it for a non-loopback bind.
 
+Treat the Detail Inspector terminal as a live diagnostics entrypoint, not a safe test sandbox. It inherits the active gateway process environment, including `BRIDGE_OUTER_HOST_URL`, and commands can interact with the same runtime session the user is watching. Use it for short read-only checks such as `pwd`, `ps`, `curl /api/debug`, `sha256sum`, or file inspection. Run projection fixtures and gateway lifecycle tests from a normal development shell or a throwaway Companion process; if a remote fixture must be run through the terminal, clear live forwarding variables first.
+
 Then start Companion with a forwarding target:
 
 ```powershell

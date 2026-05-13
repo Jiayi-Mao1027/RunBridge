@@ -29,6 +29,14 @@ Hydration and audit sources:
 
 The UI must not synthesize low-level tool actions from reports. `Read`, `Edit`, `Write`, `MultiEdit`, `Bash`, `Grep`, `Glob`, and `LS` cards only come from hook `tool_events.jsonl`.
 
+Live Activity uses the strongest recorded fact available:
+
+- Teammate assignments and bridge-leader messages come from `agent_messages.jsonl`.
+- If an assignment has no explicit target field but starts with a teammate prefix such as `chiefmate-a:`, the prefix may be used for display attribution.
+- Exact per-role tool names require hook `tool_events.jsonl` records with teammate/session attribution.
+- SDK transcript lines such as `chiefmate-a (...) · 16 tool uses` may be shown only as aggregate count summaries.
+- When only aggregate counts exist, the UI must mark the concrete child tool names as unknown instead of inventing `Read`, `Grep`, `Bash`, or other cards.
+
 ## Gateway
 
 Start locally:
@@ -106,6 +114,8 @@ Projection fixture check:
 npm run test:projection
 npm run test:leader-input
 ```
+
+Run fixture checks from a normal development shell. The 8787 Detail Inspector terminal runs inside the live gateway process environment and is for lightweight live diagnostics; do not use it to run tests that import or exercise the gateway lifecycle against an active user session. If a remote fixture must be run through that terminal, clear live forwarding environment such as `BRIDGE_OUTER_HOST_URL` and prefer a throwaway Companion process.
 
 ## Read-Only API
 
