@@ -78,6 +78,18 @@ try {
     summary: "run fixture and report",
     sequence: 1
   });
+  await appendJsonl(path.join(runRoot, "agent_messages.jsonl"), {
+    timestamp: "2026-05-11T00:00:00.800Z",
+    event_type: "agent_messages",
+    run_id: runId,
+    bridge_window_id: "bw_projection",
+    team_id: "team_projection",
+    task_id: "task_projection",
+    from: "bridge-leader",
+    summary: "chiefmate-a: inspect ambiguity and report",
+    body_preview: "chiefmate-a: inspect ambiguity and report",
+    sequence: 2
+  });
   await appendJsonl(path.join(runRoot, "tool_events.jsonl"), {
     timestamp: "2026-05-11T00:00:01.000Z",
     event_type: "tool_events",
@@ -253,6 +265,15 @@ try {
     status: "succeeded",
     result: "SafeDPO and SafeOPD latest project status summary"
   });
+  await appendJsonl(path.join(runRoot, "sdk_stream_events.jsonl"), {
+    timestamp: "2026-05-11T00:00:05.250Z",
+    event_type: "sdk_stream_assistant_text",
+    session_id: "outer-main",
+    agent_id: "bridge-leader",
+    agent_type: "bridge-leader",
+    status: "streaming",
+    message_preview: "├ chiefmate-a (blueprint review A) · 16 tool uses · 0 tokens\n│ ⎿ Done"
+  });
   const longLeaderPrefix = "long duplicate leader report ".repeat(12).slice(0, 260);
   const longLeaderReport = `${longLeaderPrefix} full-tail-marker`;
   await appendJsonl(path.join(runRoot, "outer_host_events.jsonl"), {
@@ -319,8 +340,13 @@ try {
   assert.equal(tuiReadCards[0].status, "completed");
   assert.equal(tuiReadCards[0].rawRefs.length, 2);
   assert.ok(!("source" in tuiReadCards[0]));
+  assert.ok(projection.tuiView.activityItems.some(item => item.kind === "assignment" && item.to === "chiefmate-a" && item.body.includes("inspect ambiguity")));
+  assert.ok(projection.tuiView.activityItems.some(item => item.kind === "teammate_tool_summary" && item.actor === "chiefmate-a" && item.observedToolUseCount === 16));
   assert.ok(projection.tuiView.activityItems.some(item => item.kind === "waiting" && item.title === "Waiting for teammate evidence"));
   assert.equal(projection.tuiView.activityItems.filter(item => item.kind === "lifecycle" && item.status === "bridge_window_opened").length, 0);
+  const chiefmateCard = projection.tuiView.teamTree.find(item => item.teammateId === "chiefmate-a");
+  assert.equal(chiefmateCard.observedToolUseCount, 16);
+  assert.ok(chiefmateCard.unknowns.some(item => item.includes("individual tool names not captured")));
   const executorCard = projection.tuiView.teamTree.find(item => item.teammateId === "executor");
   assert.equal(executorCard.sourceQuality, "tool_activity");
   assert.equal(executorCard.lastCompletedTool.toolName, "Read");

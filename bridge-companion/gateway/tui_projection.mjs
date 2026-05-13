@@ -6,6 +6,7 @@ const SOURCE_QUALITY_RANK = {
   unknown: 0,
   unbound: 1,
   assigned_only: 2,
+  aggregate_summary: 3,
   report_only: 3,
   tool_activity: 4,
   live_text: 5
@@ -95,9 +96,33 @@ function sourceDedupe(events) {
 function reduceDisplayItems(events, context) {
   const items = new Map();
   for (const event of events) {
-    const item = renderItemFromEvent(event);
-    if (!item) continue;
-    mergeDisplayItem(items, item, event, context.inspectorIndex);
+    for (const item of renderItemsFromEvent(event)) {
+      mergeDisplayItem(items, item, event, context.inspectorIndex);
+    }
+  }
+  return items;
+}
+
+function renderItemsFromEvent(event) {
+  const item = renderItemFromEvent(event);
+  const items = item ? [item] : [];
+  for (const summary of teammateToolUseSummaries(event)) {
+    const displayKey = `teammate_tool_summary:${event.teamId || "team"}:${summary.teammateId}:${event.eventId}`;
+    items.push({
+      id: displayId("teammate_tool_summary", displayKey),
+      displayKey,
+      kind: "teammate_tool_summary",
+      lane: "tools",
+      title: `${summary.teammateId} tool-use summary`,
+      body: `${summary.count} tool ${summary.count === 1 ? "use" : "uses"} observed in Claude transcript; individual tool names were not emitted to tool_events.jsonl.`,
+      actor: summary.teammateId,
+      status: "observed",
+      observedToolUseCount: summary.count,
+      importance: 72,
+      lastTs: event.ts || null,
+      rawRefs: rawRefs(event),
+      evidenceRefs: evidenceRefs(event)
+    });
   }
   return items;
 }
@@ -147,16 +172,19 @@ function renderItemFromEvent(event) {
   }
   if (event.source === "agent_message") {
     const to = teammateTargetFromAssignment(event);
+    const message = assignmentMessageBody(event, to);
     return {
       id: displayId("assignment", assignmentDisplayKey(event, to)),
       displayKey: assignmentDisplayKey(event, to),
       kind: "assignment",
       lane: "discussion",
-      title: `${to || "teammate"} assigned`,
-      body: compact(event.raw?.summary || event.raw?.body_preview || event.messagePreview || "assignment dispatched", 260),
+      title: `${actorLabel(event)} -> ${to || "teammate"}`,
+      body: compact(message || "assignment dispatched", 360),
       actor: to || actorLabel(event),
+      from: event.raw?.from || event.raw?.agent_id || event.actor?.displayName || "bridge-leader",
+      to: to || null,
       status: "assigned",
-      importance: 60,
+      importance: 75,
       lastTs: event.ts || null,
       rawRefs: rawRefs(event),
       evidenceRefs: evidenceRefs(event)
@@ -468,10 +496,23 @@ function buildTeamTree(events, activeOperations, context) {
       const target = teammateTargetFromAssignment(event);
       const member = ensure(target || actorKey(event), { teammateId: target || actorKey(event), role: target || "teammate" });
       updateMemberState(member, "assigned");
-      member.currentAction = "assigned";
+      member.currentAction = compact(assignmentMessageBody(event, target) || "assigned", 130);
       pushQuality(member, "assigned_only");
       pushRaw(member, event);
       continue;
+    }
+    for (const summary of teammateToolUseSummaries(event)) {
+      const member = ensure(summary.teammateId, { teammateId: summary.teammateId, role: summary.role || summary.teammateId });
+      if (member.state === "unknown") updateMemberState(member, "idle");
+      member.observedToolUseCount = summary.count;
+      member.lastCompletedTool = {
+        toolName: "tool uses",
+        target: `${summary.count} observed`,
+        status: "observed"
+      };
+      member.toolDetailAvailability = "aggregate_only";
+      pushQuality(member, "aggregate_summary");
+      pushRaw(member, event);
     }
     if (event.source === "hook_tool_event") {
       const key = actorKey(event);
@@ -536,6 +577,9 @@ function buildTeamTree(events, activeOperations, context) {
     }
     if (member.sourceQuality === "assigned_only") {
       member.unknowns.push("no tool, text, or report evidence yet");
+    }
+    if (member.toolDetailAvailability === "aggregate_only") {
+      member.unknowns.push("individual tool names not captured; only aggregate tool-use count observed");
     }
     member.rawRefs = mergeArrayByKey(member.rawRefs, member.inspector.rawRefs, rawRefKey);
     member.unknowns = mergePrimitiveArrays(member.unknowns, []);
@@ -701,6 +745,7 @@ function unknownsForSources(events, snapshot, activeOperations, context) {
   const hasRunBinding = Array.isArray(context.sessionBindings) && context.sessionBindings.some(item => item?.teammate_id || item?.agent_type);
   const hasHookTool = events.some(event => event.source === "hook_tool_event");
   const hasTeammateTool = events.some(event => event.source === "hook_tool_event" && hasTeammateAttribution(event));
+  const hasAggregateToolSummary = events.some(event => teammateToolUseSummaries(event).length > 0);
   const hasReport = events.some(event => event.source === "teammate_report");
   const hasCompletion = events.some(event => event.source === "completion_check");
   const hasSdkText = events.some(event => event.source === "sdk_stream" && (event.textDelta || event.kind === "text_delta"));
@@ -710,6 +755,9 @@ function unknownsForSources(events, snapshot, activeOperations, context) {
   if (!snapshot) unknowns.push("runtime_snapshot missing.");
   if (!hasRunBinding) unknowns.push("No run-scoped teammate session binding captured.");
   if (!hasHookTool && !hasActiveOps) unknowns.push("No hook tool event captured; real tool cards are unavailable.");
+  if (hasAggregateToolSummary && !hasTeammateTool) {
+    unknowns.push("Claude transcript exposed only aggregate teammate tool-use counts; individual child tool names were not captured.");
+  }
   if (hasTeammateTool && !hasTeammateSdkText) {
     unknowns.push("teammate tool activity captured; teammate live text not captured.");
   } else if (hasSdkText && !hasTeammateSdkText) {
@@ -950,7 +998,53 @@ function processStatus(event) {
 }
 
 function teammateTargetFromAssignment(event) {
-  return event.raw?.to || event.raw?.teammate_id || event.raw?.agent_type || event.actor?.teammateId || null;
+  return (
+    event.raw?.to ||
+    event.raw?.target_teammate_id ||
+    event.raw?.teammate_id ||
+    assignmentPrefix(event) ||
+    event.actor?.teammateId ||
+    null
+  );
+}
+
+function assignmentPrefix(event) {
+  const text = String(event.raw?.summary || event.raw?.body_preview || event.messagePreview || "");
+  const match = text.match(/^\s*([A-Za-z0-9_.-]{2,80})\s*:/);
+  return match ? match[1] : null;
+}
+
+function assignmentMessageBody(event, target = teammateTargetFromAssignment(event)) {
+  const text = String(event.raw?.body_preview || event.raw?.summary || event.messagePreview || "").trim();
+  if (!text) return "";
+  if (target && text.startsWith(`${target}:`)) {
+    return text.slice(String(target).length + 1).trim();
+  }
+  return text;
+}
+
+function teammateToolUseSummaries(event) {
+  if (event.source !== "sdk_stream") return [];
+  const text = String(event.textDelta || event.messagePreview || event.raw?.result || "");
+  if (!text) return [];
+  const summaries = [];
+  const pattern = /(?:^|\n)\s*(?:[├└│]\s*)?([A-Za-z0-9_.-]{2,80})(?:\s+\(([^)\n]{1,120})\))?\s*·\s*(\d+)\s+tool uses?/g;
+  let match;
+  while ((match = pattern.exec(text))) {
+    summaries.push({
+      teammateId: match[1],
+      role: match[2] || match[1],
+      count: Number.parseInt(match[3], 10)
+    });
+  }
+  const seen = new Set();
+  return summaries.filter(item => {
+    if (!Number.isFinite(item.count) || item.count < 0) return false;
+    const key = `${item.teammateId}:${item.count}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function isFailureLike(event) {
