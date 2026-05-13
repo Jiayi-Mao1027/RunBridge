@@ -2259,6 +2259,15 @@ def _normalize_bridge_payload(payload: dict[str, Any], stdout: str, stderr: str)
             },
         )
 
+    reports = payload.get("reports")
+    if isinstance(reports, dict):
+        payload["reports"] = [reports]
+        missing_report_evidence = not reports.get("evidence") and not reports.get("evidence_refs")
+        if status in {"succeeded", "partial", "partial_or_failed"} and missing_report_evidence:
+            bridge_evidence = payload.get("evidence")
+            if isinstance(bridge_evidence, dict) and bridge_evidence:
+                reports["evidence"] = {"bridge_result": bridge_evidence}
+
     if not isinstance(payload.get("reports"), list):
         return _failure(
             message="claude cli bridge executor returned missing or invalid reports",

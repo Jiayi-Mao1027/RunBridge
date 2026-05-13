@@ -24,6 +24,7 @@ from claude_cli_executor import _parse_bridge_json_from_text
 from claude_cli_executor import _parse_claude_payload
 from claude_cli_executor import _parse_claude_stdout_envelope
 from claude_cli_executor import _claude_print_stream_json_args
+from claude_cli_executor import _normalize_bridge_payload
 from claude_cli_executor import _redact_cmd
 from claude_cli_executor import _required_agent_models
 from claude_cli_executor import _run_claude_streaming
@@ -1584,6 +1585,27 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     parsed_wrapped_tmux_json = _parse_bridge_json_from_text(wrapped_tmux_json)
     if not parsed_wrapped_tmux_json or parsed_wrapped_tmux_json.get("reports", [{}])[0].get("summary") != "wrapped visual   line ok":
         raise AssertionError(wrapped_tmux_json)
+    normalized_single_report = _normalize_bridge_payload(
+        {
+            "status": "succeeded",
+            "reports": {
+                "summary": "single report object ok",
+                "instruction_coverage": {"smoke checklist": "completed"},
+            },
+            "artifact_refs": [],
+            "evidence": {"runtime_ids": {"run_id": "run_single_report"}},
+            "error_or_null": None,
+            "cleanup_required": False,
+        },
+        "",
+        "",
+    )
+    if (
+        normalized_single_report.get("status") != "succeeded"
+        or normalized_single_report.get("reports", [{}])[0].get("summary") != "single report object ok"
+        or not normalized_single_report.get("reports", [{}])[0].get("evidence")
+    ):
+        raise AssertionError(json.dumps(normalized_single_report, ensure_ascii=False, indent=2))
     if _tmux_submit_delay_seconds("short") < 0.2 or _tmux_submit_delay_seconds("x" * 100000) > 2.0:
         raise AssertionError("tmux submit delay bounds failed")
     old_tmux_override = os.environ.get("BRIDGE_TMUX_EXECUTOR")
