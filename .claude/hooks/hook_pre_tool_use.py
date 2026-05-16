@@ -214,21 +214,17 @@ def _bridge_agent_contract_denial(payload: dict, tool_input: dict) -> tuple[str,
         canonical_hint = ""
         if guard.get("canonical_subagent_type"):
             canonical_hint = (
-                f" canonical_subagent_type={guard['canonical_subagent_type']!r}; "
-                "use that exact machine identifier without translation, suffixes, or localized verbs."
+                f" Canonical subagent_type: {guard['canonical_subagent_type']!r}."
             )
         return (
             "Bridge teammate Agent call violates system-owned dispatch_contract: "
             + ", ".join(reasons)
-            + "."
+            + ". "
             + canonical_hint
-            + ". dispatch_contract_guard="
-            + json.dumps(guard, ensure_ascii=True, sort_keys=True)
-            + ". Use only the Agent tool input fields named by "
-            "task_team_mapping.teammate_assignments[*].agent_dispatch.allowed_input_keys; "
-            "do not choose model aliases or add tool_name, allowed_input_keys, routing hints, "
-            "or other mechanical fields. Claude Code's default Agent schema carrier is runtime-normalized. "
-            "Known Claude wrapper fields isolation/run_in_background are tolerated only when added by the wrapper.",
+            + " Use only the exact agent_dispatch object already present in the packet; do not reconstruct "
+            "subagent_type, description, prompt, model, or wrapper fields. If all required teammate reports "
+            "are already available, stop dispatching Agents and return the BridgeResult from existing reports. "
+            "Full guard details were recorded in observer streams.",
             str(tool_input.get("model") or ""),
             guard,
         )

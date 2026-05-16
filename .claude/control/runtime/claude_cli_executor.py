@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from urllib.parse import urlsplit
 from output_guardrails import validate_bridge_result
 from persist import append_jsonl, sanitize_json_value
 from runtime_event_envelope import normalize_stream_record
+from dispatch_contract import agent_tool_inputs
 
 
 BRIDGE_RESULT_SCHEMA = {
@@ -570,6 +572,7 @@ def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any
         for k in ["run_id", "main_session_id", "sub_session_id", "bridge_window_id", "team_id", "task_id"]
         if k in execution_input
     }
+    agent_inputs = _agent_tool_inputs_for_prompt(packet)
     return (
         "Execute this one bridge-window task inside Claude Code. "
         "Stay inside the packet boundary. Return only JSON matching the requested schema.\n\n"
@@ -580,12 +583,13 @@ def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any
         "When dispatching teammates, include this same project-root boundary in each Agent message.\n\n"
         "Tool compatibility guard: when using Read, omit optional parameters you do not need. "
         "Never pass an empty string for pages; either omit pages entirely or use a concrete range like 1-5.\n\n"
-        "Teammate dispatch guard: do not compose Agent payloads yourself. For every teammate, use only the Agent "
-        "tool input fields named by task_team_mapping.teammate_assignments[*].agent_dispatch.allowed_input_keys, "
-        "with values copied from that system-generated agent_dispatch. Do not pass audit metadata fields such as "
-        "tool_name or allowed_input_keys to the Agent tool. Never choose a model value yourself; the selected "
-        ".claude/agents/<subagent_type>.md frontmatter owns model routing, and hooks normalize Claude Code's "
-        "default Agent schema carrier. Do not set isolation or run_in_background yourself. "
+        "Runtime-owned Agent dispatch inputs: these are the only legal Agent tool payloads. "
+        "Copy one object exactly when dispatching that teammate; do not reconstruct, splice, translate, suffix, "
+        "or add mechanical fields.\n"
+        f"{json.dumps(agent_inputs, ensure_ascii=False, indent=2)}\n\n"
+        "Teammate dispatch guard: do not compose Agent payloads yourself. Use only the runtime-owned Agent "
+        "dispatch inputs above. Do not pass audit metadata, routing hints, model, isolation, "
+        "run_in_background, or any other wrapper/mechanical field to the Agent tool. "
         "Do not ask teammates to read .claude/runtime_state/bridge_prompts; "
         "that prompt artifact is for audit only.\n\n"
         f"{_subagent_model_guard(packet)}\n\n"
@@ -612,7 +616,7 @@ def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any
         "partial_or_failed, or succeeded while an owned process is still running; record progress and continue "
         "waiting or polling inside this bridge window.\n\n"
         f"Runtime binding:\n{json.dumps(binding, ensure_ascii=False, indent=2)}\n\n"
-        f"BridgePacket:\n{json.dumps(packet, ensure_ascii=False, indent=2)}"
+        f"BridgePacket:\n{json.dumps(_packet_for_bridge_prompt(packet, agent_inputs), ensure_ascii=False, indent=2)}"
     )
 
 
@@ -625,7 +629,7 @@ def _bridge_append_system_prompt(packet: dict[str, Any], *, compact: bool = Fals
     return f"{return_format}\n\n{_subagent_model_guard(packet)}"
 
 
-def _subagent_model_guard(packet: dict[str, Any]) -> str:
+def _subagent_model_guard_legacy(packet: dict[str, Any]) -> str:
     return (
         "Subagent dispatch guard: use only the Agent tool input fields named by "
         "task_team_mapping.teammate_assignments[*].agent_dispatch.allowed_input_keys, with values copied from "
@@ -639,6 +643,36 @@ def _subagent_model_guard(packet: dict[str, Any]) -> str:
         "tolerate known Claude wrapper auto-fields but deny agent-authored payloads that differ from the "
         "dispatch contract."
     )
+
+
+def _subagent_model_guard(packet: dict[str, Any]) -> str:
+    return (
+        "Subagent dispatch guard: use only the runtime-owned Agent dispatch input objects printed above. "
+        "The subagent_type value is a machine identifier: copy it exactly, never translate it, add suffixes, "
+        "or combine it with localized action words. Do not add model, isolation, run_in_background, tool_name, "
+        "routing hints, or any other mechanical override. If all expected teammate reports "
+        "are already available, stop dispatching Agents and return the BridgeResult from existing reports."
+    )
+
+
+def _agent_tool_inputs_for_prompt(packet: dict[str, Any]) -> dict[str, dict[str, str]]:
+    contract = packet.get("dispatch_contract") if isinstance(packet, dict) else None
+    if not isinstance(contract, dict):
+        return {}
+    return agent_tool_inputs(contract)
+
+
+def _packet_for_bridge_prompt(packet: dict[str, Any], agent_inputs: dict[str, dict[str, str]]) -> dict[str, Any]:
+    prompt_packet = deepcopy(packet)
+    prompt_packet.pop("dispatch_contract", None)
+    mapping = prompt_packet.get("task_team_mapping")
+    assignments = mapping.get("teammate_assignments") if isinstance(mapping, dict) else None
+    if isinstance(assignments, list):
+        for assignment in assignments:
+            if isinstance(assignment, dict):
+                assignment.pop("agent_dispatch", None)
+    prompt_packet["runtime_owned_agent_dispatch_inputs"] = deepcopy(agent_inputs)
+    return prompt_packet
 
 
 def _write_bridge_prompt_file(project_root: Path, prompt: str, execution_input: dict[str, Any]) -> Path:

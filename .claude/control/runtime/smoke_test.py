@@ -48,7 +48,7 @@ from claude_cli_executor import should_use_tmux_bridge_executor
 from claude_cli_executor import simulated_team_executor
 from artifact_refs import normalize_artifact_refs, validate_artifact_refs
 from completion_validator import completion_succeeded, validate_bridge_completion
-from dispatch_contract import build_dispatch_contract
+from dispatch_contract import agent_tool_inputs, build_dispatch_contract
 from main_leader import build_bridge_instruction_packet_for_this_invoke, decide_next_bridge_packet
 from outer_sdk import ClaudeAgentSdkOuterLeaderAdapter, OuterSdkHost, OuterSdkHostConfig, UnavailableOuterLeaderAdapter
 from outer_sdk.claude_agent_adapter import _sdk_result as _outer_sdk_result
@@ -2004,7 +2004,14 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         raise AssertionError(json.dumps({"original": original_text, "mojibake": mojibake_text, "prompt": prompt}, ensure_ascii=False, indent=2))
     if "Missing teammate retry guard" not in prompt or "BridgePacket.retry_policies.teammate_report_missing" not in prompt:
         raise AssertionError(prompt)
-    if "Subagent dispatch guard" not in prompt or "allowed_input_keys" not in prompt:
+    if (
+        "Runtime-owned Agent dispatch inputs" not in prompt
+        or "Subagent dispatch guard" not in prompt
+        or '"worker"' not in prompt
+        or '"subagent_type": "worker"' not in prompt
+        or "allowed_input_keys" in prompt
+        or "default Agent schema carrier" in prompt
+    ):
         raise AssertionError(prompt)
     model_guard_packet = packet("bw_model_guard", "sub_model_guard")
     model_guard_packet["team_spec"]["teammate_specs"] = [
@@ -2025,9 +2032,11 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     )
     if (
         "Subagent dispatch guard" not in model_guard_prompt
-        or "allowed_input_keys" not in model_guard_prompt
-        or "frontmatter owns model routing" not in model_guard_prompt
-        or "default Agent schema carrier" not in model_guard_prompt
+        or "Runtime-owned Agent dispatch inputs" not in model_guard_prompt
+        or '"subagent_type": "implementor"' not in model_guard_prompt
+        or '"subagent_type": "rungater"' not in model_guard_prompt
+        or "allowed_input_keys" in model_guard_prompt
+        or "default Agent schema carrier" in model_guard_prompt
         or "Required teammate model map" in model_guard_prompt
     ):
         raise AssertionError(model_guard_prompt)
@@ -2036,9 +2045,9 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     for append_prompt in [stream_append_prompt, tmux_append_prompt]:
         if (
             "Subagent dispatch guard" not in append_prompt
-            or "allowed_input_keys" not in append_prompt
-            or "frontmatter owns model routing" not in append_prompt
-            or "default Agent schema carrier" not in append_prompt
+            or "runtime-owned Agent dispatch input objects" not in append_prompt
+            or "allowed_input_keys" in append_prompt
+            or "default Agent schema carrier" in append_prompt
             or "Required teammate model map" in append_prompt
         ):
             raise AssertionError(append_prompt)
@@ -2648,15 +2657,25 @@ def run_hook_pretool_packet_derivation_tests(runtime_dir: Path) -> dict:
     }
     contract_packet["dispatch_contract"] = build_dispatch_contract(contract_packet)
     preflight_dispatch = contract_packet["dispatch_contract"]["teammates"]["preflight-initial"]["agent_dispatch"]
+    preflight_tool_input = agent_tool_inputs(contract_packet["dispatch_contract"])["preflight-initial"]
     preflight_model_binding = contract_packet["dispatch_contract"]["teammates"]["preflight-initial"].get("model_binding", {})
     if "model" in preflight_dispatch or set(preflight_dispatch.get("allowed_input_keys", [])) != {"description", "prompt", "subagent_type"}:
         raise AssertionError(json.dumps(preflight_dispatch, ensure_ascii=False, indent=2))
+    if preflight_tool_input != {
+        "description": preflight_dispatch["description"],
+        "prompt": preflight_dispatch["prompt"],
+        "subagent_type": "preflight-initial",
+    }:
+        raise AssertionError(json.dumps(preflight_tool_input, ensure_ascii=False, indent=2))
     if (
         preflight_model_binding.get("model") != "gpt-main"
         or preflight_model_binding.get("agent_tool_model_field") != "system_payload_must_be_absent"
-        or preflight_model_binding.get("tolerated_schema_carrier") != "sonnet"
+        or "tolerated_schema_carrier" in preflight_model_binding
     ):
         raise AssertionError(json.dumps(preflight_model_binding, ensure_ascii=False, indent=2))
+    policy = contract_packet["dispatch_contract"].get("agent_call_policy", {})
+    if "generic_model_aliases_forbidden" in policy or "agent_tool_model_schema_carrier" in policy:
+        raise AssertionError(json.dumps(policy, ensure_ascii=False, indent=2))
     last_packet.write_text(json.dumps(contract_packet, ensure_ascii=False), encoding="utf-8")
     payload = {
         "tool_name": "mcp__bridge__call_bridge_sdk",

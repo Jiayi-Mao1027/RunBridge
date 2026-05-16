@@ -70,7 +70,6 @@ def build_dispatch_contract(packet: dict[str, Any]) -> dict[str, Any]:
                 "source": ".claude/agents/<subagent_type>.md frontmatter",
                 "model": _agent_frontmatter_model(name),
                 "agent_tool_model_field": "system_payload_must_be_absent",
-                "tolerated_schema_carrier": AGENT_TOOL_MODEL_SCHEMA_CARRIER,
             },
             "agent_dispatch": dispatch,
         }
@@ -94,8 +93,6 @@ def build_dispatch_contract(packet: dict[str, Any]) -> dict[str, Any]:
             "model_source": ".claude/agents/<subagent_type>.md frontmatter",
             "allowed_input_keys": list(AGENT_INPUT_KEYS),
             "wrapper_auto_keys_tolerated": sorted(AGENT_WRAPPER_AUTO_KEYS),
-            "generic_model_aliases_forbidden": sorted(GENERIC_MODEL_ALIASES),
-            "agent_tool_model_schema_carrier": AGENT_TOOL_MODEL_SCHEMA_CARRIER,
         },
         "teammates": teammates,
     }
@@ -185,6 +182,16 @@ def agent_dispatches(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
         for name, item in teammates.items()
         if isinstance(item, dict) and isinstance(item.get("agent_dispatch"), dict)
     }
+
+
+def agent_tool_inputs(contract: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Return only the fields the Agent tool is allowed to receive."""
+    payloads: dict[str, dict[str, str]] = {}
+    for name, dispatch in agent_dispatches(contract).items():
+        payload = {key: str(dispatch.get(key) or "").strip() for key in AGENT_INPUT_KEYS}
+        if all(payload.values()):
+            payloads[name] = payload
+    return payloads
 
 
 def _first_text(*values: Any) -> str | None:
