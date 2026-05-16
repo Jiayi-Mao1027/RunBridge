@@ -11,6 +11,7 @@ import uuid
 from artifact_refs import normalize_artifact_refs
 from bridge.executors import BridgeExecutionRequest, bridge_executor_from_env
 from completion_validator import completion_succeeded, validate_bridge_completion
+from dispatch_contract import validate_dispatch_contract
 from workflow_runtime import dispatch_workflow_event
 
 
@@ -66,8 +67,8 @@ class BridgeLeaderRuntime:
         self.main_session_id = str(self.binding.get("main_session_id") or self.run_id)
         self.sub_session_id = str(self.binding.get("sub_session_id") or "")
         self.bridge_window_id = str(self.binding.get("bridge_window_id") or "")
-        self.team_id = str(self.packet.get("team_spec", {}).get("team_id_or_null") or f"team_{uuid.uuid4().hex[:12]}")
-        self.task_id = str(self.packet.get("task_spec", {}).get("task_id_or_null") or f"task_{uuid.uuid4().hex[:12]}")
+        self.team_id = str(self.binding.get("team_id_or_null") or self.packet.get("team_spec", {}).get("team_id_or_null") or "")
+        self.task_id = str(self.binding.get("task_id_or_null") or self.packet.get("task_spec", {}).get("task_id_or_null") or "")
         self.event_ids: list[str] = []
 
     def run(self) -> dict[str, Any]:
@@ -159,9 +160,16 @@ class BridgeLeaderRuntime:
     def _accept_packet(self) -> None:
         if not self.run_id or not self.main_session_id or not self.sub_session_id or not self.bridge_window_id:
             raise BridgeExecutionError("packet_accept", "packet binding is incomplete")
+        if not self.team_id or not self.task_id:
+            self._event("bridge_packet_rejected", payload={"packet": self.packet, "reasons": ["packet_missing_concrete_team_or_task_id"]})
+            raise BridgeExecutionError("packet_accept", "packet rejected", payload={"reasons": ["packet_missing_concrete_team_or_task_id"]})
         if not isinstance(self.packet.get("team_spec"), dict) or not isinstance(self.packet.get("task_spec"), dict):
             self._event("bridge_packet_rejected", payload={"packet": self.packet, "reasons": ["packet_spec_missing"]})
             raise BridgeExecutionError("packet_accept", "packet rejected", payload={"reasons": ["packet_spec_missing"]})
+        contract_reasons = validate_dispatch_contract(self.packet, self.packet.get("dispatch_contract"))
+        if contract_reasons:
+            self._event("bridge_packet_rejected", payload={"packet": self.packet, "reasons": contract_reasons})
+            raise BridgeExecutionError("packet_accept", "packet rejected", payload={"reasons": contract_reasons})
         self._event("bridge_window_opened", payload={"packet": self.packet})
         self._event("bridge_packet_accepted", payload={"packet": self.packet})
 

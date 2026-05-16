@@ -86,11 +86,58 @@ def main() -> int:
     content = chinese_response.get("result", {}).get("content", [])
     text = content[0].get("text", "") if content and isinstance(content[0], dict) else ""
     packet_result = json.loads(text)
-    description = packet_result["packet"]["task_spec"]["task_description"]
+    packet_ref = packet_result.get("packet_ref")
+    if packet_result.get("packet_saved") is True and packet_ref:
+        packet = json.loads(Path(packet_ref).read_text(encoding="utf-8"))
+    else:
+        packet = packet_result["packet"]
+    description = packet["task_spec"]["task_description"]
     if "系统测试目标冻结为" not in description or "当前仓库" not in description:
         print(f"chinese roundtrip failed: {description}", file=sys.stderr)
         return 1
-    print(json.dumps({"ok": True, "tools": sorted(tools), "tested_tool_call": "read_runtime_snapshot", "chinese_roundtrip": "passed"}, ensure_ascii=False, indent=2))
+    dispatch_contract = packet.get("dispatch_contract")
+    if not isinstance(dispatch_contract, dict):
+        print("build_bridge_packet missing dispatch_contract", file=sys.stderr)
+        return 1
+    teammate_names = set(dispatch_contract.get("allowed_agent_subagent_types") or [])
+    if not {"implementor", "rungater"}.issubset(teammate_names):
+        print(f"dispatch_contract teammate mismatch: {sorted(teammate_names)}", file=sys.stderr)
+        return 1
+    for teammate_name in ["implementor", "rungater"]:
+        teammate = (dispatch_contract.get("teammates") or {}).get(teammate_name)
+        agent_dispatch = teammate.get("agent_dispatch") if isinstance(teammate, dict) else None
+        if not isinstance(agent_dispatch, dict):
+            print(f"dispatch_contract missing agent_dispatch for {teammate_name}", file=sys.stderr)
+            return 1
+        if "model" in agent_dispatch:
+            print(f"dispatch_contract agent_dispatch must not include model for {teammate_name}: {agent_dispatch}", file=sys.stderr)
+            return 1
+        allowed_input_keys = set(agent_dispatch.get("allowed_input_keys") or [])
+        if allowed_input_keys != {"description", "prompt", "subagent_type"}:
+            print(f"dispatch_contract allowed_input_keys mismatch for {teammate_name}: {agent_dispatch}", file=sys.stderr)
+            return 1
+        model_binding = teammate.get("model_binding") if isinstance(teammate, dict) else None
+        if (
+            not isinstance(model_binding, dict)
+            or model_binding.get("model") != "gpt-main"
+            or model_binding.get("agent_tool_model_field") != "system_payload_must_be_absent"
+            or model_binding.get("tolerated_schema_carrier") != "sonnet"
+        ):
+            print(f"dispatch_contract model_binding mismatch for {teammate_name}: {teammate}", file=sys.stderr)
+            return 1
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "tools": sorted(tools),
+                "tested_tool_call": "read_runtime_snapshot",
+                "chinese_roundtrip": "passed",
+                "dispatch_contract": "passed",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

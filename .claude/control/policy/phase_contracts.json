@@ -104,7 +104,12 @@
         "PacketBindingMismatch",
         "TargetRepoBoundaryViolation",
         "PendingApproval",
-        "FrozenSemanticsMismatch"
+        "FrozenSemanticsMismatch",
+        "ClaudeTmuxTerminalError",
+        "ClaudeTmuxTerminalApiError",
+        "ClaudeTmuxSoftTimeoutNoProgress",
+        "ClaudeTmuxTimeout",
+        "TransientClaudeTmuxTransportApiError"
       ]
     },
     "teammate_report_missing": {
@@ -294,6 +299,7 @@
         "heartbeat_interval_seconds": 120,
         "soft_timeout_seconds": 21600,
         "hard_timeout_seconds": 86400,
+        "executor_hard_timeout_disabled": true,
         "timeout_action": "ask_main_leader",
         "wait_until_process_complete": true,
         "partial_return_allowed_only_after_process_terminal": true

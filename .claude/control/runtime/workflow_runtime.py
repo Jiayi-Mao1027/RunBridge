@@ -12,6 +12,7 @@ from persist import append_jsonl, atomic_write_json, sanitize_json_value
 from companion_observer import observe_workflow_event
 from checkpoint_store import write_event_checkpoint
 from completion_validator import completion_succeeded, validate_bridge_completion
+from dispatch_contract import validate_dispatch_contract
 from output_guardrails import validate_bridge_packet as guardrail_validate_bridge_packet
 from output_guardrails import validate_bridge_result, validate_completion_report
 from repo_runtime import ensure_repo_registered, get_repo_runtime_root, infer_repo_key_from_runs_root, repo_key_for_paths, update_active_run_registry
@@ -38,6 +39,29 @@ ORCHESTRATION_ANOMALY_STUCK_STATUSES = {
 }
 EXECUTE_WATCHDOG_HEARTBEAT_GRACE_MULTIPLIER = 3
 EXECUTE_WATCHDOG_MIN_STALE_SECONDS = 300
+BRIDGE_TRANSPORT_ERROR_TYPES = {
+    "ClaudeTmuxTerminalError",
+    "ClaudeTmuxTerminalApiError",
+    "ClaudeTmuxSoftTimeoutNoProgress",
+    "ClaudeTmuxTimeout",
+    "TransientClaudeTmuxTransportApiError",
+}
+TRANSIENT_TRANSPORT_TEXT_MARKERS = (
+    "econnreset",
+    "unable to connect to api",
+    "connection reset",
+    "socket hang up",
+    "transport error",
+)
+TEAMMATE_REPORT_LOSS_TEXT_MARKERS = (
+    "teammate_report_missing",
+    "missing_teammates",
+    "missing teammate",
+    "missing implementor report",
+    "no usable implementor report",
+    "no usable teammate report",
+    "no implementation evidence",
+)
 
 AGENT_TYPES = {"main-leader", "bridge-leader", "teammate", "hook", "runtime"}
 AGENT_TYPE_ALIASES = {
@@ -504,13 +528,28 @@ def _build_auto_recovery_plan(
         bridge_window_id=event.bridge_window_id,
         packet_hash=packet_hash,
     )
+    terminal_bridge_result = _is_terminal_bridge_result_event(event)
+    requires_same_packet = bool(
+        decision.policy.get("requires_same_packet_boundary", False)
+        or retry_scope in {"bridge_sdk_call", "completion_rejected"}
+        or (retry_scope == "teammate_report_missing" and terminal_bridge_result)
+    )
     retry_payload.update(
         {
             "source_event_id": event.event_id,
             "source_event_kind": event.event_kind,
-            "same_packet_boundary_required": bool(decision.policy.get("requires_same_packet_boundary", False)),
+            "same_packet_boundary_required": requires_same_packet,
         }
     )
+    if retry_scope == "teammate_report_missing" and terminal_bridge_result:
+        retry_payload.update(
+            {
+                "retry_after_terminal_bridge_result": True,
+                "source_bridge_window_id": event.bridge_window_id,
+                "target_bridge_window_id_or_null": None,
+                "bridge_window_reuse_allowed": False,
+            }
+        )
     process_poll_guard = _process_poll_retry_guard(event, retry_scope, decision.policy)
     if retry_scope == "l4_execute_process_poll" and not process_poll_guard.get("allowed", True):
         anomaly_payload = {
@@ -620,7 +659,13 @@ def _retry_scope_for_failure(event: WorkflowEvent, check_result: CheckResult, sn
         return "teammate_report_missing"
     if event.event_kind in {"call_bridge_sdk_error", "team_create_failed", "task_create_failed", "message_dispatch_failed"}:
         return "bridge_sdk_call"
+    if event.event_kind == "bridge_result_returned_with_failure":
+        bridge_error_type = _bridge_result_error_type(event.payload)
+        if bridge_error_type in BRIDGE_TRANSPORT_ERROR_TYPES:
+            return "bridge_sdk_call"
     if event.event_kind in {"bridge_result_returned", "bridge_result_returned_with_partial", "bridge_result_returned_with_cleanup_required"}:
+        if _bridge_result_reports_teammate_transport_loss(event.payload):
+            return "teammate_report_missing"
         if "bridge_result_guardrail_failed" in check_result.reasons:
             return "completion_rejected"
     if event.event_kind == "completion_contract_satisfied" and not check_result.ok:
@@ -645,21 +690,37 @@ def _retry_action_contract(
         "completion_rejected": "repair_bridge_output",
         "l4_execute_process_poll": "poll_process",
     }
+    terminal_bridge_result = _is_terminal_bridge_result_event(event)
     if event.event_kind == "message_dispatch_failed":
         action_kind = "retry_message_dispatch"
+    elif retry_scope == "teammate_report_missing" and terminal_bridge_result:
+        action_kind = "retry_bridge_sdk_call"
     else:
         action_kind = kind_by_scope.get(retry_scope, "retry_bridge_sdk_call")
-    requires_same_packet = bool(decision.policy.get("requires_same_packet_boundary", False) or retry_scope in {"bridge_sdk_call", "completion_rejected"})
+    requires_same_packet = bool(
+        decision.policy.get("requires_same_packet_boundary", False)
+        or retry_scope in {"bridge_sdk_call", "completion_rejected"}
+        or (retry_scope == "teammate_report_missing" and terminal_bridge_result)
+    )
     action = {
         "kind": action_kind,
         "allowed": bool(decision.retryable),
-        "requires_new_bridge_window": False,
+        "requires_new_bridge_window": bool(retry_scope == "teammate_report_missing" and terminal_bridge_result),
         "requires_same_packet": requires_same_packet,
         "requires_user": False,
     }
     if retry_scope == "l4_execute_process_poll":
         action["process_poll_constraints"] = process_poll_guard or {}
     return action
+
+
+def _is_terminal_bridge_result_event(event: WorkflowEvent) -> bool:
+    return event.event_kind in {
+        "bridge_result_returned",
+        "bridge_result_returned_with_partial",
+        "bridge_result_returned_with_cleanup_required",
+        "bridge_result_returned_with_failure",
+    }
 
 
 def _process_poll_retry_guard(event: WorkflowEvent, retry_scope: str, policy: dict[str, Any]) -> dict[str, Any]:
@@ -673,10 +734,11 @@ def _process_poll_retry_guard(event: WorkflowEvent, retry_scope: str, policy: di
         return {"allowed": False, "reason": "process_refs_terminal", "terminal_states": ref_states}
     timeout_policy = event.payload.get("timeout_policy") if isinstance(event.payload.get("timeout_policy"), dict) else {}
     hard_timeout_seconds = _positive_int_or_none(timeout_policy.get("hard_timeout_seconds"))
+    hard_timeout_disabled = timeout_policy.get("executor_hard_timeout_disabled") is True
     started_at = _parse_iso(event.payload.get("process_started_at") or event.payload.get("started_at"))
     now = _parse_iso(event.timestamp) or datetime.now(timezone.utc)
     elapsed_seconds = _elapsed_seconds(started_at, now) if started_at else None
-    if hard_timeout_seconds is not None and elapsed_seconds is not None and elapsed_seconds >= hard_timeout_seconds:
+    if not hard_timeout_disabled and hard_timeout_seconds is not None and elapsed_seconds is not None and elapsed_seconds >= hard_timeout_seconds:
         return {"allowed": False, "reason": "hard_timeout_elapsed", "elapsed_seconds": elapsed_seconds, "hard_timeout_seconds": hard_timeout_seconds}
     heartbeat_timeout_ms = _positive_int_or_none(policy.get("heartbeat_timeout_ms"))
     last_heartbeat_at = _parse_iso(event.payload.get("last_heartbeat_at"))
@@ -688,6 +750,7 @@ def _process_poll_retry_guard(event: WorkflowEvent, retry_scope: str, policy: di
         "heartbeat_timeout_ms": heartbeat_timeout_ms,
         "heartbeat_age_seconds": heartbeat_age_seconds,
         "hard_timeout_seconds": hard_timeout_seconds,
+        "hard_timeout_disabled": hard_timeout_disabled,
         "observed_process_states": ref_states or sorted(running_states)[:1],
     }
 
@@ -696,16 +759,90 @@ def _retry_error_type(event: WorkflowEvent, check_result: CheckResult) -> str:
     guardrail = check_result.derived_facts.get("guardrail_validation")
     if isinstance(guardrail, dict) and guardrail.get("error_type"):
         return str(guardrail.get("error_type"))
+    bridge_error_type = _bridge_result_error_type(event.payload)
+    if bridge_error_type:
+        return bridge_error_type
     error = event.payload.get("error_or_null")
     if isinstance(error, dict):
         for key in ("error_type", "type", "code"):
             if error.get(key):
                 return str(error.get(key))
+    if _payload_has_transient_transport_marker(event.payload):
+        return "TransientClaudeTmuxTransportApiError"
+    if isinstance(error, dict):
         if error.get("message"):
             return str(error.get("message")).split(":", 1)[0][:80] or "RuntimeError"
     if check_result.reasons:
         return str(check_result.reasons[0])
     return event.event_kind or "RuntimeError"
+
+
+def _bridge_result_error_type(payload: dict[str, Any]) -> str | None:
+    bridge_result = payload.get("bridge_result") if isinstance(payload, dict) else None
+    if not isinstance(bridge_result, dict):
+        return None
+    error = bridge_result.get("error_or_null")
+    if not isinstance(error, dict):
+        return None
+    for key in ("error_type", "type", "code"):
+        value = error.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _bridge_result_reports_teammate_transport_loss(payload: dict[str, Any]) -> bool:
+    bridge_result = payload.get("bridge_result") if isinstance(payload, dict) else None
+    if not isinstance(bridge_result, dict):
+        return False
+    evidence = bridge_result.get("evidence") if isinstance(bridge_result.get("evidence"), dict) else {}
+    error = bridge_result.get("error_or_null") if isinstance(bridge_result.get("error_or_null"), dict) else {}
+    observer_reconciliation = evidence.get("observer_reconciliation") if isinstance(evidence.get("observer_reconciliation"), dict) else {}
+    if (
+        evidence.get("diagnostic_classification") == "teammate_report_collection_gap"
+        or error.get("diagnostic_classification") == "teammate_report_collection_gap"
+        or error.get("type") == "TeammateReportCollectionGap"
+    ) and observer_reconciliation.get("teammates"):
+        return False
+    text = _compact_text_facts(bridge_result)
+    if not _contains_any_marker(text, TRANSIENT_TRANSPORT_TEXT_MARKERS):
+        return False
+    return _contains_any_marker(text, TEAMMATE_REPORT_LOSS_TEXT_MARKERS)
+
+
+def _payload_has_transient_transport_marker(payload: Any) -> bool:
+    return _contains_any_marker(_compact_text_facts(payload), TRANSIENT_TRANSPORT_TEXT_MARKERS)
+
+
+def _compact_text_facts(value: Any, *, _depth: int = 0) -> str:
+    if _depth > 5:
+        return ""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.lower()
+    if isinstance(value, (int, float, bool)):
+        return str(value).lower()
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, item in value.items():
+            parts.append(str(key).lower())
+            parts.append(_compact_text_facts(item, _depth=_depth + 1))
+            if sum(len(part) for part in parts) > 20000:
+                break
+        return " ".join(part for part in parts if part)
+    if isinstance(value, list):
+        parts = []
+        for item in value[:80]:
+            parts.append(_compact_text_facts(item, _depth=_depth + 1))
+            if sum(len(part) for part in parts) > 20000:
+                break
+        return " ".join(part for part in parts if part)
+    return str(value).lower()
+
+
+def _contains_any_marker(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
 
 
 def _packet_hash_for_retry(event: WorkflowEvent, run_ledger: dict[str, Any]) -> str | None:
@@ -2346,6 +2483,7 @@ def _validate_bridge_packet(packet: Any, event: WorkflowEvent, snapshot: dict[st
         reasons.append("bridge_packet_missing_completion_contract")
     if not isinstance(packet.get("report_contract"), dict) or not packet.get("report_contract"):
         reasons.append("bridge_packet_missing_report_contract")
+    reasons.extend(validate_dispatch_contract(packet, packet.get("dispatch_contract")))
     reasons.extend(_validate_packet_policy_fields(packet, snapshot))
     if str(target_phase) == "l4_implement" and not _packet_has_write_authority(packet):
         reasons.append("bridge_packet_implement_requires_write_authority")

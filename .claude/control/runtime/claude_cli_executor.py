@@ -59,6 +59,40 @@ _SDK_STREAM_MONOTONIC_INDEX = 0
 _SDK_STREAM_PREVIEW_LIMIT = 1000
 
 
+class ClaudeTmuxTerminalError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str = "ClaudeTmuxTerminalError",
+        capture: str = "",
+        assistant_text: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.capture = capture
+        self.assistant_text = assistant_text
+
+
+class ClaudeTmuxNoProgressTimeout(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        soft_timeout_seconds: int,
+        progress_grace_seconds: int,
+        latest_progress: dict[str, Any] | None = None,
+        capture: str = "",
+        assistant_text: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.soft_timeout_seconds = soft_timeout_seconds
+        self.progress_grace_seconds = progress_grace_seconds
+        self.latest_progress = latest_progress or {}
+        self.capture = capture
+        self.assistant_text = assistant_text
+
+
 def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     project_root = Path(os.environ.get("BRIDGE_PROJECT_ROOT") or Path.cwd()).resolve()
     packet = _repair_mojibake_value(execution_input["packet"])
@@ -110,7 +144,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
             "--json-schema",
             json.dumps(BRIDGE_RESULT_SCHEMA, separators=(",", ":")),
             "--append-system-prompt",
-            "Return structured JSON only.",
+            _bridge_append_system_prompt(packet),
             "--add-dir",
             str(project_root),
         ]
@@ -150,11 +184,12 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     _bind_bridge_child_session_env(env, execution_input)
 
     try:
+        timeout_seconds = _executor_timeout_seconds(packet)
         proc = _run_claude_streaming(
             cmd,
             project_root,
             env=env,
-            timeout=_timeout_seconds(packet),
+            timeout=timeout_seconds,
             execution_input=execution_input,
         )
     except subprocess.TimeoutExpired as exc:
@@ -163,7 +198,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
             error_type="ClaudeCliTimeout",
             evidence={
                 "prompt_file": str(prompt_path),
-                "timeout_seconds": _timeout_seconds(packet),
+                "timeout_seconds": _executor_timeout_seconds(packet),
                 "stdout": (exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else "",
                 "stderr": (exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else "",
                 "agent_models": agent_models,
@@ -195,7 +230,9 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
                 "cmd_preview": _redact_cmd(cmd),
                 "subagent_model_env": env.get("CLAUDE_CODE_SUBAGENT_MODEL"),
                 "anthropic_model_env": env.get("ANTHROPIC_MODEL"),
+                "default_opus_env": env.get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
                 "default_sonnet_env": env.get("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+                "default_haiku_env": env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
             },
         )
 
@@ -209,6 +246,7 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
 
     payload = payload_or_error["payload"]
     normalized = _normalize_bridge_payload(payload, proc.stdout, proc.stderr)
+    normalized = _reconcile_observed_teammate_activity(normalized, project_root, execution_input)
     if normalized.get("error_or_null"):
         _attach_cli_debug_evidence(normalized, prompt_path, proc.stdout, proc.stderr, payload=payload)
         normalized["evidence"]["prompt_file"] = str(prompt_path)
@@ -288,7 +326,7 @@ def claude_tmux_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]
             "--model",
             bridge_model,
             "--append-system-prompt",
-            "Return one compact JSON object only. Do not wrap it in Markdown.",
+            _bridge_append_system_prompt(packet, compact=True),
             "--add-dir",
             str(project_root),
         ]
@@ -310,13 +348,48 @@ def claude_tmux_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]
     _bind_bridge_child_session_env(env, execution_input)
 
     try:
+        timeout_seconds = _executor_timeout_seconds(packet)
         tmux_result = _run_claude_tmux(
             cmd,
             project_root,
             env=env,
-            timeout=_timeout_seconds(packet),
+            timeout=timeout_seconds,
             execution_input=execution_input,
             prompt=prompt,
+        )
+    except ClaudeTmuxNoProgressTimeout as exc:
+        return _failure(
+            message="claude tmux bridge executor hit soft timeout without observer progress",
+            error_type="ClaudeTmuxSoftTimeoutNoProgress",
+            evidence={
+                "prompt_file": str(prompt_path),
+                "soft_timeout_seconds": exc.soft_timeout_seconds,
+                "progress_grace_seconds": exc.progress_grace_seconds,
+                "latest_observer_progress": exc.latest_progress,
+                "assistant_text": exc.assistant_text[-4000:],
+                "capture_tail": exc.capture[-4000:],
+                "agent_models": agent_models,
+                "cmd_preview": _redact_cmd(cmd),
+                "executor": "tmux",
+                "failure_classification": "bridge_transport_or_observer_progress_failure",
+                "same_provider_assumption": "outer leader and bridge team use the same API provider; a bridge-only API failure should be treated as a system transport/config/runtime fault unless the outer leader is also failing",
+            },
+        )
+    except ClaudeTmuxTerminalError as exc:
+        return _failure(
+            message="claude tmux bridge executor hit a terminal Claude API error",
+            error_type=exc.error_type,
+            evidence={
+                "prompt_file": str(prompt_path),
+                "terminal_error": str(exc),
+                "assistant_text": exc.assistant_text[-4000:],
+                "capture_tail": exc.capture[-4000:],
+                "agent_models": agent_models,
+                "cmd_preview": _redact_cmd(cmd),
+                "executor": "tmux",
+                "failure_classification": "bridge_transport_api_failure",
+                "same_provider_assumption": "outer leader and bridge team use the same API provider; a bridge-only API failure should be treated as a system transport/config/runtime fault unless the outer leader is also failing",
+            },
         )
     except subprocess.TimeoutExpired as exc:
         return _failure(
@@ -324,7 +397,7 @@ def claude_tmux_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]
             error_type="ClaudeTmuxTimeout",
             evidence={
                 "prompt_file": str(prompt_path),
-                "timeout_seconds": _timeout_seconds(packet),
+                "timeout_seconds": _executor_timeout_seconds(packet),
                 "stdout": (exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else "",
                 "stderr": (exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else "",
                 "agent_models": agent_models,
@@ -365,6 +438,7 @@ def claude_tmux_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]
         return result
 
     normalized = _normalize_bridge_payload(payload, assistant_text, capture)
+    normalized = _reconcile_observed_teammate_activity(normalized, project_root, execution_input)
     if normalized.get("error_or_null"):
         _attach_cli_debug_evidence(normalized, prompt_path, assistant_text, capture, payload=payload)
         normalized["evidence"]["prompt_file"] = str(prompt_path)
@@ -506,9 +580,32 @@ def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any
         "When dispatching teammates, include this same project-root boundary in each Agent message.\n\n"
         "Tool compatibility guard: when using Read, omit optional parameters you do not need. "
         "Never pass an empty string for pages; either omit pages entirely or use a concrete range like 1-5.\n\n"
-        "Teammate dispatch guard: include packet-derived task, scope, tool, completion, and report instructions "
-        "directly in each Agent message. Do not ask teammates to read .claude/runtime_state/bridge_prompts; "
+        "Teammate dispatch guard: do not compose Agent payloads yourself. For every teammate, use only the Agent "
+        "tool input fields named by task_team_mapping.teammate_assignments[*].agent_dispatch.allowed_input_keys, "
+        "with values copied from that system-generated agent_dispatch. Do not pass audit metadata fields such as "
+        "tool_name or allowed_input_keys to the Agent tool. Never choose a model value yourself; the selected "
+        ".claude/agents/<subagent_type>.md frontmatter owns model routing, and hooks normalize Claude Code's "
+        "default Agent schema carrier. Do not set isolation or run_in_background yourself. "
+        "Do not ask teammates to read .claude/runtime_state/bridge_prompts; "
         "that prompt artifact is for audit only.\n\n"
+        f"{_subagent_model_guard(packet)}\n\n"
+        "Missing teammate retry guard: before returning partial or partial_or_failed for a missing teammate report "
+        "caused by transient API/transport/no-output failure, you may make only bounded packet-bound collection "
+        "or re-dispatch attempts while this bridge window is live and the packet boundary, allowed tools, and "
+        "timeout still permit it. Do not consume BridgePacket.retry_policies.teammate_report_missing as a "
+        "same-window retry loop; that retry policy is runtime-owned after a terminal BridgeResult. Record any "
+        "same-window attempt and outcome in evidence, then return the structured result without broadening scope.\n\n"
+        "Observer reconciliation guard: if an Agent call appears to complete but no usable teammate report is visible, "
+        "inspect same-window observer evidence when available (tool_events.jsonl, session_events.jsonl, session_bindings.jsonl). "
+        "If those records show teammate tool activity, include observer refs as diagnostic evidence only; do not treat "
+        "observer streams as proof of task completion or as authority to override BridgeResult status/error classification.\n\n"
+        "BridgeResult report guard: every reports[i].instruction_coverage must be a JSON object that maps each "
+        "coverage checklist item, or a clearly named subitem, to one disposition string: completed, deferred, "
+        "blocked, or escalated. Never use bucket keys such as completed: [..] or blocked: [..]. "
+        "If a teammate failed or output is missing, map the affected coverage items to blocked or escalated with "
+        "the reason in summary/evidence. If any item is completed, include a non-empty evidence_refs list or "
+        "non-empty evidence object in that same report; prefer concrete file, runtime event, tool observation, "
+        "or teammate report refs.\n\n"
         "L4 execute wait guard: if packet.target_phase is l4_execute and executor launches an owned long-running "
         "process, keep the bridge window alive until that process reaches a terminal state and postrun has audited "
         "the terminal logs/artifacts. TeamIdle is only waiting/progress evidence. Do not return status partial, "
@@ -516,6 +613,31 @@ def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any
         "waiting or polling inside this bridge window.\n\n"
         f"Runtime binding:\n{json.dumps(binding, ensure_ascii=False, indent=2)}\n\n"
         f"BridgePacket:\n{json.dumps(packet, ensure_ascii=False, indent=2)}"
+    )
+
+
+def _bridge_append_system_prompt(packet: dict[str, Any], *, compact: bool = False) -> str:
+    return_format = (
+        "Return one compact JSON object only. Do not wrap it in Markdown."
+        if compact
+        else "Return structured JSON only."
+    )
+    return f"{return_format}\n\n{_subagent_model_guard(packet)}"
+
+
+def _subagent_model_guard(packet: dict[str, Any]) -> str:
+    return (
+        "Subagent dispatch guard: use only the Agent tool input fields named by "
+        "task_team_mapping.teammate_assignments[*].agent_dispatch.allowed_input_keys, with values copied from "
+        "that system-generated agent_dispatch. The selected .claude/agents/<subagent_type>.md frontmatter owns "
+        "model routing outside the Agent tool input; do not choose a model alias yourself. Hooks normalize "
+        "Claude Code's default Agent schema carrier and deny non-default aliases or other model overrides. "
+        "The subagent_type value is a machine identifier: copy it exactly as ASCII from agent_dispatch, never "
+        "translate it, add suffixes, or combine it with localized action words such as curator办理 or refresher办理. "
+        "Do not set isolation, "
+        "run_in_background, tool_name, allowed_input_keys, or any other mechanical override yourself; hooks "
+        "tolerate known Claude wrapper auto-fields but deny agent-authored payloads that differ from the "
+        "dispatch contract."
     )
 
 
@@ -532,7 +654,7 @@ def _run_claude_streaming(
     project_root: Path,
     *,
     env: dict[str, str],
-    timeout: int,
+    timeout: int | None,
     execution_input: dict[str, Any],
 ) -> subprocess.CompletedProcess[str]:
     stdout_parts: list[str] = []
@@ -663,7 +785,7 @@ def _run_claude_tmux(
     project_root: Path,
     *,
     env: dict[str, str],
-    timeout: int,
+    timeout: int | None,
     execution_input: dict[str, Any],
     prompt: str,
 ) -> dict[str, str]:
@@ -707,10 +829,22 @@ def _run_claude_tmux(
         )
         _wait_for_tmux_ready(session_name, timeout=45)
         _tmux_paste_prompt(session_name, prompt)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        started_at = time.time()
+        packet = execution_input.get("packet", {})
+        watchdog_enabled = _tmux_no_progress_watchdog_enabled(packet)
+        soft_timeout = _soft_timeout_seconds(packet, hard_timeout_seconds=timeout) if watchdog_enabled else None
+        progress_grace_seconds = _tmux_no_progress_grace_seconds()
+        latest_progress = _latest_observer_progress(project_root, execution_input)
+        latest_progress_epoch = max(started_at, _observer_progress_epoch(latest_progress) or started_at)
+        deadline = (time.time() + timeout) if timeout is not None else None
+        while deadline is None or time.time() < deadline:
             capture = _tmux_capture(session_name)
             assistant_text = _tmux_assistant_text(capture, prompt)
+            observed_progress = _latest_observer_progress(project_root, execution_input)
+            observed_progress_epoch = _observer_progress_epoch(observed_progress)
+            if observed_progress_epoch is not None and observed_progress_epoch > latest_progress_epoch:
+                latest_progress = observed_progress
+                latest_progress_epoch = observed_progress_epoch
             payload = _parse_bridge_json_from_text(assistant_text)
             if isinstance(payload, dict) and payload.get("status") in {"succeeded", "failed", "partial", "partial_or_failed"}:
                 _emit_sdk_stream_event(
@@ -743,6 +877,69 @@ def _run_claude_tmux(
                     sequence=next_sequence(),
                 )
                 return {"assistant_text": assistant_text, "capture": capture}
+            terminal_error = _tmux_terminal_error(capture)
+            if terminal_error:
+                _emit_sdk_stream_event(
+                    project_root,
+                    execution_input,
+                    "sdk_stream_error",
+                    {
+                        "message": terminal_error["message"],
+                        "error_type": terminal_error["type"],
+                        "adapter": "claude-tmux-bridge",
+                    },
+                    status="failed",
+                    sequence=next_sequence(),
+                )
+                _emit_sdk_stream_event(
+                    project_root,
+                    execution_input,
+                    "sdk_stream_final",
+                    {"returncode": 1, "adapter": "claude-tmux-bridge"},
+                    status="failed",
+                    sequence=next_sequence(),
+                )
+                raise ClaudeTmuxTerminalError(
+                    terminal_error["message"],
+                    error_type=terminal_error["type"],
+                    capture=capture,
+                    assistant_text=assistant_text,
+                )
+            now = time.time()
+            if soft_timeout is not None and now >= started_at + soft_timeout and now >= latest_progress_epoch + progress_grace_seconds:
+                progress_age_seconds = max(0, int(now - latest_progress_epoch))
+                progress_payload = {
+                    "timeout_seconds": timeout,
+                    "soft_timeout_seconds": soft_timeout,
+                    "progress_grace_seconds": progress_grace_seconds,
+                    "latest_progress_age_seconds": progress_age_seconds,
+                    "latest_observer_progress": latest_progress,
+                    "adapter": "claude-tmux-bridge",
+                }
+                _emit_sdk_stream_event(
+                    project_root,
+                    execution_input,
+                    "sdk_stream_timeout",
+                    progress_payload,
+                    status="failed",
+                    sequence=next_sequence(),
+                )
+                _emit_sdk_stream_event(
+                    project_root,
+                    execution_input,
+                    "sdk_stream_final",
+                    {"returncode": 1, "adapter": "claude-tmux-bridge"},
+                    status="failed",
+                    sequence=next_sequence(),
+                )
+                raise ClaudeTmuxNoProgressTimeout(
+                    "soft timeout elapsed without new run-scoped observer progress",
+                    soft_timeout_seconds=soft_timeout,
+                    progress_grace_seconds=progress_grace_seconds,
+                    latest_progress=latest_progress,
+                    capture=capture,
+                    assistant_text=assistant_text,
+                )
             time.sleep(2)
         _emit_sdk_stream_event(
             project_root,
@@ -802,6 +999,14 @@ def _emit_sdk_stream_event(
         record["returncode"] = payload.get("returncode")
     if "timeout_seconds" in payload:
         record["timeout_seconds"] = payload.get("timeout_seconds")
+    if "soft_timeout_seconds" in payload:
+        record["soft_timeout_seconds"] = payload.get("soft_timeout_seconds")
+    if "progress_grace_seconds" in payload:
+        record["progress_grace_seconds"] = payload.get("progress_grace_seconds")
+    if "latest_progress_age_seconds" in payload:
+        record["latest_progress_age_seconds"] = payload.get("latest_progress_age_seconds")
+    if "latest_observer_progress" in payload:
+        record["latest_observer_progress"] = sanitize_json_value(payload.get("latest_observer_progress"))
 
     with _SDK_STREAM_LOCK:
         _SDK_STREAM_MONOTONIC_INDEX += 1
@@ -832,6 +1037,294 @@ def _sdk_stream_event_paths(project_root: Path, execution_input: dict[str, Any])
         / "sdk_stream_events.jsonl",
         _control_claude_dir() / "runtime_state" / "session_observer" / "sdk_stream_events.jsonl",
     ]
+
+
+def _runtime_run_root(project_root: Path, execution_input: dict[str, Any]) -> Path:
+    run_id = _safe_path_component(str(execution_input.get("run_id") or "run"))
+    return (
+        _control_claude_dir()
+        / "runtime_state"
+        / "projects"
+        / _project_state_key(project_root)
+        / "runs"
+        / run_id
+    )
+
+
+def _observer_progress_paths(project_root: Path, execution_input: dict[str, Any]) -> list[tuple[str, Path]]:
+    run_root = _runtime_run_root(project_root, execution_input)
+    return [
+        ("event_log", run_root / "event_log.jsonl"),
+        ("run_ledger", run_root / "run_ledger.json"),
+        ("tool_events", run_root / "tool_events.jsonl"),
+        ("agent_messages", run_root / "agent_messages.jsonl"),
+        ("teammate_reports", run_root / "teammate_reports.jsonl"),
+        ("completion_checks", run_root / "completion_checks.jsonl"),
+        ("error_events", run_root / "error_events.jsonl"),
+        ("session_events", run_root / "session_events.jsonl"),
+        ("session_bindings", run_root / "session_bindings.jsonl"),
+        ("bridge_packets", run_root / "bridge_packets.jsonl"),
+        ("process_events", run_root / "process_events.jsonl"),
+    ]
+
+
+def _latest_observer_progress(project_root: Path, execution_input: dict[str, Any]) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    for stream_name, path in _observer_progress_paths(project_root, execution_input):
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+        if stat.st_size <= 0:
+            continue
+        if latest is None or float(stat.st_mtime) > float(latest.get("mtime_epoch") or 0.0):
+            latest = {
+                "stream_name": stream_name,
+                "path": str(path),
+                "mtime_epoch": float(stat.st_mtime),
+                "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "size_bytes": int(stat.st_size),
+            }
+    return latest
+
+
+def _observer_progress_epoch(progress: dict[str, Any] | None) -> float | None:
+    if not isinstance(progress, dict):
+        return None
+    try:
+        return float(progress.get("mtime_epoch"))
+    except Exception:
+        return None
+
+
+def _reconcile_observed_teammate_activity(result: dict[str, Any], project_root: Path, execution_input: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(result, dict) or not _claims_missing_teammate_transport(result):
+        return result
+    observed = _observed_teammate_activity(project_root, execution_input)
+    if not observed.get("teammates"):
+        return result
+
+    reconciled = dict(result)
+    evidence = reconciled.get("evidence") if isinstance(reconciled.get("evidence"), dict) else {}
+    evidence = dict(evidence)
+    evidence["observer_reconciliation"] = observed
+    evidence["observer_reconciliation_note"] = (
+        "Diagnostic only: observer streams prove child activity was observed, not that the "
+        "BridgeResult status, error classification, or task completion contract should change."
+    )
+    reconciled["evidence"] = evidence
+
+    reports = reconciled.get("reports")
+    if isinstance(reports, list):
+        reconciled["reports"] = [_annotate_missing_teammate_report(report, observed) for report in reports]
+    return reconciled
+
+
+def _claims_missing_teammate_transport(result: dict[str, Any]) -> bool:
+    if result.get("status") not in {"failed", "partial", "partial_or_failed"}:
+        return False
+    text = _compact_lower_text(result)
+    missing_markers = (
+        "missingteammatereport",
+        "missing teammate",
+        "missing implementor report",
+        "no usable implementor report",
+        "no usable teammate report",
+        "no implementation evidence",
+        "teammate_report_missing",
+    )
+    transport_markers = (
+        "econnreset",
+        "api error",
+        "unable to connect to api",
+        "connection reset",
+        "socket hang up",
+        "transport",
+        "no report",
+    )
+    return any(marker in text for marker in missing_markers) and any(marker in text for marker in transport_markers)
+
+
+def _observed_teammate_activity(project_root: Path, execution_input: dict[str, Any]) -> dict[str, Any]:
+    run_root = _runtime_run_root(project_root, execution_input)
+    filters = {
+        "bridge_window_id": str(execution_input.get("bridge_window_id") or ""),
+        "team_id": str(execution_input.get("team_id") or ""),
+        "task_id": str(execution_input.get("task_id") or ""),
+    }
+    teammates: dict[str, dict[str, Any]] = {}
+    latest_timestamp: str | None = None
+
+    def teammate_bucket(name: str) -> dict[str, Any]:
+        bucket = teammates.setdefault(
+            name,
+            {
+                "teammate_id": name,
+                "completed_agent_calls": 0,
+                "completed_tool_calls": 0,
+                "failed_tool_calls": 0,
+                "session_started": 0,
+                "tool_names": [],
+                "agent_ids": [],
+                "session_ids": [],
+                "refs": [],
+            },
+        )
+        return bucket
+
+    for line_number, record in _read_jsonl_records(run_root / "tool_events.jsonl"):
+        if not _record_matches_bridge_scope(record, filters):
+            continue
+        teammate = _teammate_name_from_record(record)
+        if not teammate:
+            continue
+        bucket = teammate_bucket(teammate)
+        status = str(record.get("status") or "").lower()
+        tool_name = str(record.get("tool_name") or "")
+        if status == "completed" and tool_name == "Agent":
+            bucket["completed_agent_calls"] += 1
+        elif status == "completed":
+            bucket["completed_tool_calls"] += 1
+        elif status == "failed":
+            bucket["failed_tool_calls"] += 1
+        if tool_name and tool_name not in bucket["tool_names"]:
+            bucket["tool_names"].append(tool_name)
+        _append_unique(bucket["refs"], f"tool_events.jsonl:{line_number}", limit=12)
+        _append_unique(bucket["session_ids"], record.get("session_id"), limit=6)
+        _append_unique(bucket["agent_ids"], record.get("agent_id"), limit=8)
+        latest_timestamp = _max_timestamp(latest_timestamp, record.get("timestamp"))
+
+    for line_number, record in _read_jsonl_records(run_root / "session_events.jsonl"):
+        if not _record_matches_bridge_scope(record, filters):
+            continue
+        teammate = _teammate_name_from_record(record)
+        if not teammate:
+            continue
+        event_type = str(record.get("event_type") or "")
+        if event_type not in {"session_started", "tool_call_completed", "tool_call_failed"}:
+            continue
+        bucket = teammate_bucket(teammate)
+        if event_type == "session_started":
+            bucket["session_started"] += 1
+        elif event_type == "tool_call_completed":
+            bucket["completed_tool_calls"] += 1
+        elif event_type == "tool_call_failed":
+            bucket["failed_tool_calls"] += 1
+        _append_unique(bucket["refs"], f"session_events.jsonl:{line_number}", limit=12)
+        _append_unique(bucket["session_ids"], record.get("session_id"), limit=6)
+        _append_unique(bucket["agent_ids"], record.get("agent_id"), limit=8)
+        latest_timestamp = _max_timestamp(latest_timestamp, record.get("timestamp"))
+
+    filtered = []
+    for bucket in teammates.values():
+        if bucket["completed_agent_calls"] or bucket["completed_tool_calls"] or bucket["session_started"]:
+            bucket["tool_names"] = sorted(bucket["tool_names"])
+            filtered.append(bucket)
+    return {
+        "classification": "teammate_report_collection_gap",
+        "run_id": execution_input.get("run_id"),
+        "bridge_window_id": execution_input.get("bridge_window_id"),
+        "team_id": execution_input.get("team_id"),
+        "task_id": execution_input.get("task_id"),
+        "latest_observer_timestamp": latest_timestamp,
+        "teammates": filtered,
+        "note": (
+            "Observer evidence is diagnostic only: it proves child activity happened, "
+            "not that the teammate completed the task contract or that BridgeResult "
+            "status/error classification should change."
+        ),
+    }
+
+
+def _annotate_missing_teammate_report(report: Any, observed: dict[str, Any]) -> Any:
+    if not isinstance(report, dict):
+        return report
+    annotated = dict(report)
+    text = _compact_lower_text(report)
+    if "no usable" not in text and "missing" not in text and "econnreset" not in text:
+        return annotated
+    note = (
+        "Runtime observer saw completed teammate Agent/tool activity for this window; "
+        "the remaining failure is report collection/parsing, not proven provider outage."
+    )
+    annotated["observer_reconciliation"] = observed
+    annotated["diagnostic_note"] = note
+    return annotated
+
+
+def _read_jsonl_records(path: Path) -> list[tuple[int, dict[str, Any]]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError, UnicodeError):
+        return []
+    records: list[tuple[int, dict[str, Any]]] = []
+    for line_number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append((line_number, record))
+    return records
+
+
+def _record_matches_bridge_scope(record: dict[str, Any], filters: dict[str, str]) -> bool:
+    for key, expected in filters.items():
+        if expected and str(record.get(key) or "") != expected:
+            return False
+    return True
+
+
+def _teammate_name_from_record(record: dict[str, Any]) -> str | None:
+    for key in ("teammate_id", "agent_type", "agent_id", "display_name"):
+        value = str(record.get(key) or "").strip()
+        if value in TEAMMATE_AGENT_NAMES:
+            return value
+    return None
+
+
+def _append_unique(values: list[Any], value: Any, *, limit: int) -> None:
+    if value is None:
+        return
+    text = str(value)
+    if not text or text in values:
+        return
+    if len(values) < limit:
+        values.append(text)
+
+
+def _max_timestamp(current: str | None, candidate: Any) -> str | None:
+    if not isinstance(candidate, str) or not candidate:
+        return current
+    if current is None or candidate > current:
+        return candidate
+    return current
+
+
+def _compact_lower_text(value: Any, *, _depth: int = 0) -> str:
+    if _depth > 5:
+        return ""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.lower()
+    if isinstance(value, (int, float, bool)):
+        return str(value).lower()
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, item in value.items():
+            parts.append(str(key).lower())
+            parts.append(_compact_lower_text(item, _depth=_depth + 1))
+            if sum(len(part) for part in parts) > 30000:
+                break
+        return " ".join(part for part in parts if part)
+    if isinstance(value, list):
+        return " ".join(_compact_lower_text(item, _depth=_depth + 1) for item in value[:50])
+    return str(value).lower()
 
 
 def _now_iso() -> str:
@@ -1126,19 +1619,85 @@ def _settings_args(project_root: Path | None = None) -> list[str]:
     if explicit:
         return ["--settings", str(Path(explicit).expanduser().resolve())]
 
-    if _default_claude_command_parts(project_root):
-        return []
-
     parent_claude = _discover_parent_claude_dir(project_root)
     default_settings = parent_claude / "settings.json"
-    if default_settings.exists():
-        return ["--settings", str(_materialize_bridge_settings(default_settings))]
-
     hook_settings = parent_claude / "hooks" / "settings.json"
-    if hook_settings.exists():
-        return ["--settings", str(_materialize_bridge_settings(hook_settings))]
+    if default_settings.exists() or hook_settings.exists():
+        source = default_settings if default_settings.exists() else hook_settings
+        return ["--settings", str(_materialize_bridge_settings(source, hook_settings=hook_settings, claude_root=parent_claude))]
 
     return []
+
+
+def _read_settings_payload_strict(source: Path) -> dict[str, Any]:
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid Claude settings payload: {source}")
+    return payload
+
+
+_CLAUDE_CLI_HOOK_EVENTS = {
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PostToolBatch",
+    "Notification",
+    "UserPromptSubmit",
+    "UserPromptExpansion",
+    "SessionStart",
+    "SessionEnd",
+    "Stop",
+    "StopFailure",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+    "PermissionRequest",
+    "PermissionDenied",
+    "Setup",
+    "TeammateIdle",
+    "TaskCreated",
+    "TaskCompleted",
+    "Elicitation",
+    "ElicitationResult",
+    "ConfigChange",
+    "WorktreeCreate",
+    "WorktreeRemove",
+    "InstructionsLoaded",
+    "CwdChanged",
+    "FileChanged",
+}
+
+
+def _filter_claude_cli_hooks(hooks: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in hooks.items() if key in _CLAUDE_CLI_HOOK_EVENTS}
+
+
+def _merge_authoritative_hooks(base: dict[str, Any], hook_settings: Path | None) -> dict[str, Any]:
+    if not hook_settings or not hook_settings.exists():
+        return dict(base)
+    hook_payload = _read_settings_payload_strict(hook_settings)
+    hooks = hook_payload.get("hooks")
+    if not isinstance(hooks, dict):
+        return dict(base)
+    merged = dict(base)
+    merged["hooks"] = _filter_claude_cli_hooks(hooks)
+    return merged
+
+
+def _settings_source_for_diagnostics(settings_path: Path | None) -> str | None:
+    if not settings_path:
+        return None
+    claude_root = settings_path.parent.parent.parent if settings_path.name == "bridge_hooks_settings.json" and settings_path.parent.name == "generated" else settings_path.parent
+    default_settings = claude_root / "settings.json"
+    hook_settings = claude_root / "hooks" / "settings.json"
+    if default_settings.exists() and hook_settings.exists():
+        return f"{default_settings.resolve()} + {hook_settings.resolve()}"
+    if hook_settings.exists():
+        return str(hook_settings.resolve())
+    if default_settings.exists():
+        return str(default_settings.resolve())
+    return str(settings_path)
 
 
 def _settings_diagnostics(cmd: list[str], env: dict[str, str], project_root: Path | None = None) -> dict[str, Any]:
@@ -1327,14 +1886,7 @@ def _infer_settings_source(settings_path: Path | None) -> str | None:
         return None
     if settings_path.name != "bridge_hooks_settings.json" or settings_path.parent.name != "generated":
         return str(settings_path)
-    claude_root = settings_path.parent.parent.parent
-    default_settings = claude_root / "settings.json"
-    if default_settings.exists():
-        return str(default_settings.resolve())
-    hook_settings = claude_root / "hooks" / "settings.json"
-    if hook_settings.exists():
-        return str(hook_settings.resolve())
-    return str(settings_path)
+    return _settings_source_for_diagnostics(settings_path)
 
 
 def _redacted_env_path(value: str | None) -> str | None:
@@ -1379,12 +1931,12 @@ def _safe_url_preview(value: Any) -> str | None:
     return f"{parts.scheme}://{host}{port}{path}"
 
 
-def _materialize_bridge_settings(source: Path) -> Path:
-    payload = json.loads(source.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"invalid Claude settings payload: {source}")
-    normalized = _normalize_hook_commands(payload, source.parent)
-    target = source.parent / "runtime_state" / "generated" / "bridge_hooks_settings.json"
+def _materialize_bridge_settings(source: Path, *, hook_settings: Path | None = None, claude_root: Path | None = None) -> Path:
+    source = source.expanduser().resolve()
+    claude_root = (claude_root.expanduser().resolve() if claude_root else (source.parent.parent if source.parent.name == "hooks" else source.parent))
+    payload = _merge_authoritative_hooks(_read_settings_payload_strict(source), hook_settings)
+    normalized = _normalize_hook_commands(payload, claude_root)
+    target = claude_root / "runtime_state" / "generated" / "bridge_hooks_settings.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
     return target
@@ -1647,6 +2199,7 @@ def _subprocess_env(
 def _force_bridge_model_env(env: dict[str, str], bridge_model: str) -> None:
     # Settings own provider connection details; agent frontmatter owns model routing.
     env["ANTHROPIC_MODEL"] = bridge_model
+    env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = bridge_model
     env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = bridge_model
     env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = bridge_model
 
@@ -1683,6 +2236,51 @@ def _timeout_seconds(packet: dict[str, Any]) -> int:
         return max(30, int(hard_timeout))
     except Exception:
         return 3600
+
+
+def _executor_timeout_seconds(packet: dict[str, Any]) -> int | None:
+    if _executor_hard_timeout_disabled(packet):
+        return None
+    return _timeout_seconds(packet)
+
+
+def _executor_hard_timeout_disabled(packet: dict[str, Any]) -> bool:
+    if not isinstance(packet, dict):
+        return False
+    timeout_policy = packet.get("completion_contract", {}).get("timeout_policy") or {}
+    if not isinstance(timeout_policy, dict):
+        timeout_policy = {}
+    if timeout_policy.get("executor_hard_timeout_disabled") is True:
+        return True
+    if str(packet.get("target_phase") or "") == "l4_execute" and timeout_policy.get("wait_until_process_complete") is True:
+        return True
+    return False
+
+
+def _tmux_no_progress_watchdog_enabled(packet: dict[str, Any]) -> bool:
+    return not _executor_hard_timeout_disabled(packet)
+
+
+def _soft_timeout_seconds(packet: dict[str, Any], *, hard_timeout_seconds: int | None) -> int | None:
+    if hard_timeout_seconds is None:
+        return None
+    timeout_policy = packet.get("completion_contract", {}).get("timeout_policy") if isinstance(packet, dict) else {}
+    if not isinstance(timeout_policy, dict):
+        return int(hard_timeout_seconds)
+    soft_timeout = timeout_policy.get("soft_timeout_seconds")
+    try:
+        parsed = max(30, int(soft_timeout))
+    except Exception:
+        return int(hard_timeout_seconds)
+    return min(parsed, int(hard_timeout_seconds))
+
+
+def _tmux_no_progress_grace_seconds() -> int:
+    raw = os.environ.get("BRIDGE_TMUX_NO_PROGRESS_GRACE_SECONDS")
+    try:
+        return max(30, int(raw)) if raw is not None else 300
+    except Exception:
+        return 300
 
 
 def _claude_command_prefix(project_root: Path | None = None) -> list[str]:
@@ -1867,6 +2465,7 @@ def _tmux_public_env(env: dict[str, str]) -> dict[str, str]:
         "BRIDGE_TASK_ID",
         "CLAUDE_CODE_SUBAGENT_MODEL",
         "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
         "PYTHONIOENCODING",
@@ -1905,6 +2504,40 @@ def _tmux_submit_delay_seconds(prompt: str) -> float:
 
 def _tmux_capture(session_name: str) -> str:
     return _tmux_run(["tmux", "capture-pane", "-p", "-J", "-t", session_name, "-S", "-2000"]).stdout
+
+
+def _tmux_terminal_error(capture: str) -> dict[str, str] | None:
+    tail = capture[-8000:]
+    lines = tail.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        message = _tmux_terminal_api_error_line(lines[index])
+        if not message:
+            continue
+        after_error = "\n".join(lines[index + 1 :])
+        if not _tmux_prompt_visible(after_error):
+            continue
+        return {"type": "ClaudeTmuxTerminalApiError", "message": message}
+    return None
+
+
+def _tmux_terminal_api_error_line(line: str) -> str | None:
+    candidate = re.sub(r"\s+", " ", str(line or "")).strip()
+    if not candidate:
+        return None
+    if candidate.startswith("⎿"):
+        candidate = candidate.lstrip("⎿").strip()
+    for prefix in ("API Error:", "Unable to connect to API"):
+        if candidate.startswith(prefix):
+            return candidate
+    if candidate.startswith("Error:") and "500 Internal Server Error" in candidate:
+        return candidate
+    if candidate.startswith("500 Internal Server Error"):
+        return candidate
+    return None
+
+
+def _tmux_prompt_visible(text: str) -> bool:
+    return "? for shortcuts" in text and ("❯" in text or ">" in text)
 
 
 def _tmux_run(
@@ -2262,11 +2895,6 @@ def _normalize_bridge_payload(payload: dict[str, Any], stdout: str, stderr: str)
     reports = payload.get("reports")
     if isinstance(reports, dict):
         payload["reports"] = [reports]
-        missing_report_evidence = not reports.get("evidence") and not reports.get("evidence_refs")
-        if status in {"succeeded", "partial", "partial_or_failed"} and missing_report_evidence:
-            bridge_evidence = payload.get("evidence")
-            if isinstance(bridge_evidence, dict) and bridge_evidence:
-                reports["evidence"] = {"bridge_result": bridge_evidence}
 
     if not isinstance(payload.get("reports"), list):
         return _failure(
@@ -2408,13 +3036,6 @@ def _load_teammate_agents(packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "description": frontmatter.get("description") or f"{name} teammate for this bridge packet",
             "prompt": prompt,
         }
-
-        if frontmatter.get("model"):
-            agent_config["model"] = frontmatter["model"]
-
-        tools = [str(item) for item in teammate.get("allowed_tools", []) if str(item).strip()]
-        if tools:
-            agent_config["tools"] = tools
 
         loaded[name] = agent_config
 

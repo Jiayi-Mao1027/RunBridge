@@ -176,13 +176,33 @@ def _infer_ref_type(value: Any) -> str:
 def _resolve_path(path_text: str | None, base_dir: str | Path | None) -> Path | None:
     if not path_text:
         return None
+    path = _path_candidate(path_text, base_dir)
+    if path.exists():
+        return _safe_resolve(path)
+    repaired_text = _repair_tui_wrapped_path(path_text)
+    if repaired_text != path_text:
+        repaired_path = _path_candidate(repaired_text, base_dir)
+        if repaired_path.exists():
+            return _safe_resolve(repaired_path)
+    return _safe_resolve(path)
+
+
+def _path_candidate(path_text: str, base_dir: str | Path | None) -> Path:
     path = Path(path_text).expanduser()
     if not path.is_absolute() and base_dir is not None:
         path = Path(base_dir).expanduser().resolve() / path
+    return path
+
+
+def _safe_resolve(path: Path) -> Path:
     try:
         return path.resolve()
     except Exception:
         return path
+
+
+def _repair_tui_wrapped_path(path_text: str) -> str:
+    return re.sub(r"\s{2,}", "", path_text)
 
 
 def _sha256_file(path: Path) -> str:

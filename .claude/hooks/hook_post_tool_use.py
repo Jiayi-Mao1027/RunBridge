@@ -16,12 +16,17 @@ from common import (
     observer_tool_start_record,
     output_summary,
     read_hook_input,
+    redact_observer_text,
     safe_input_preview,
     simple_block,
     tool_detail_fields,
     tool_file_refs,
     duration_ms,
 )
+from hook_subagent_stop import _find_report as find_agent_report
+from hook_subagent_stop import _find_text as find_agent_text
+from hook_subagent_stop import _list_field as report_list_field
+from hook_subagent_stop import _summary as report_summary
 
 
 BRIDGE_TOOL_NAMES = {"call_bridge_sdk", "mcp__bridge__call_bridge_sdk"}
@@ -70,7 +75,9 @@ def main() -> int:
     if not packet and isinstance(tool_arguments.get("packet"), dict):
         packet = tool_arguments["packet"]
     if not packet and tool_name in BRIDGE_TOOL_NAMES:
-        packet = load_last_bridge_packet()
+        packet = load_last_bridge_packet(run_id)
+        if not packet:
+            return 0
     binding = packet.get("binding", {}) if isinstance(packet, dict) else {}
     event_base = {
         "run_id": run_id,
@@ -184,6 +191,69 @@ def _emit_tool_event(payload: dict, tool_input: dict, tool_response: dict, tool_
                 "parent_message_id": payload.get("parent_message_id"),
             },
         )
+    _emit_agent_teammate_report(payload, tool_input, tool_response, tool_name, binding, failed=failed, completed_at=completed_at)
+
+
+def _emit_agent_teammate_report(
+    payload: dict,
+    tool_input: dict,
+    tool_response: dict,
+    tool_name: str,
+    binding: dict,
+    *,
+    failed: bool,
+    completed_at: str,
+) -> None:
+    if tool_name != "Agent" or failed:
+        return
+    if not binding.get("run_id") or not binding.get("teammate_id"):
+        return
+    final_text = find_agent_text({"payload": payload, "tool_input": tool_input, "tool_response": tool_response})
+    report = find_agent_report({"payload": payload, "tool_input": tool_input, "tool_response": tool_response}, final_text)
+    preview = _agent_preview_text(final_text, tool_response)
+    if report:
+        emit_observer_record(
+            "teammate_reports",
+            {
+                "timestamp": completed_at,
+                **binding,
+                "tool_name": tool_name,
+                "tool_use_id": payload.get("tool_use_id") or tool_input.get("tool_use_id"),
+                "report_type": "agent_tool_final",
+                "progress_state": "completed",
+                "summary": report_summary(report, preview),
+                "report": report,
+                "completed_items": report_list_field(report, "completed_items"),
+                "open_items": report_list_field(report, "open_items"),
+                "blocked_items": report_list_field(report, "blocked_items"),
+                "evidence_refs": report_list_field(report, "evidence_refs"),
+                "file_refs": report_list_field(report, "file_refs"),
+                "artifacts": report_list_field(report, "artifact_refs"),
+            },
+        )
+        return
+    if not final_text:
+        return
+    emit_observer_record(
+        "teammate_reports",
+        {
+            "timestamp": completed_at,
+            **binding,
+            "tool_name": tool_name,
+            "tool_use_id": payload.get("tool_use_id") or tool_input.get("tool_use_id"),
+            "report_type": "agent_tool_final_unstructured",
+            "progress_state": "completed_observed",
+            "summary": preview,
+            "report": {"summary": preview},
+            "completed_items": [],
+            "open_items": [],
+            "blocked_items": [],
+            "evidence_refs": [],
+            "file_refs": [],
+            "artifacts": [],
+            "diagnostic_note": "Agent tool returned final text, but no structured teammate report JSON was found; do not treat this alone as task completion.",
+        },
+    )
 
 
 def _action_for_tool(tool_name: str) -> str:
@@ -197,6 +267,20 @@ def _action_for_tool(tool_name: str) -> str:
         "MultiEdit": "edit_file",
         "Bash": "run_command",
     }.get(tool_name, "tool_call")
+
+
+def _agent_preview_text(final_text: str | None, tool_response: dict) -> str:
+    if isinstance(final_text, str) and final_text.strip():
+        text = final_text.strip()
+    else:
+        summary = output_summary(tool_response, failed=False)
+        if isinstance(summary, dict):
+            text = str(summary.get("notable") or "Agent completed")
+        elif isinstance(summary, str):
+            text = summary
+        else:
+            text = "Agent completed"
+    return redact_observer_text(text)[:1200]
 
 
 def _tail(value: object, limit: int = 1200) -> str | None:

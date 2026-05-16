@@ -20,6 +20,11 @@ DEFAULT_RETRY_POLICIES: dict[str, dict[str, Any]] = {
             "TargetRepoBoundaryViolation",
             "PendingApproval",
             "FrozenSemanticsMismatch",
+            "ClaudeTmuxTerminalError",
+            "ClaudeTmuxTerminalApiError",
+            "ClaudeTmuxSoftTimeoutNoProgress",
+            "ClaudeTmuxTimeout",
+            "TransientClaudeTmuxTransportApiError",
         ],
     },
     "teammate_report_missing": {

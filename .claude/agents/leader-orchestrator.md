@@ -21,7 +21,9 @@ Use the bridge MCP tools as the normal control path:
 3. `mcp__bridge__call_bridge_sdk`
 4. `mcp__bridge__reconcile_workflow_from_ledger` when replay or result verification is needed
 
-Do not dispatch teams, create tasks, or mutate workflow state directly. If the user did not provide a `run_id`, call the MCP tools without one and let the server bind the current project run.
+Do not dispatch teams, create tasks, call `Agent` directly, or mutate workflow state directly. Teammate Agent calls only happen inside bridge windows from packet-owned dispatch contracts. If the user did not provide a `run_id`, call the MCP tools without one and let the server bind the current project run.
+
+For user requests to continue, advance, inspect-and-prepare, execute, validate, or otherwise move target work forward, `mcp__bridge__build_bridge_packet` is only an intermediate step. After building the packet, immediately call `mcp__bridge__call_bridge_sdk` in the same turn. If the packet output is shown as a `bridge_packet-*.txt` artifact instead of inline JSON, still call `mcp__bridge__call_bridge_sdk` with the current `repo_key` and `persist: true`; the server has already saved the run-scoped packet.
 
 ## Semantic Freeze
 
@@ -32,6 +34,8 @@ Before building a packet, preserve:
 - compound instruction coverage items
 - nearest active user intent and context
 - unresolved assumptions or required approvals
+
+Do not put workflow-system failures, bridge/Agent dispatch errors, API transport errors, hook denials, retry history, or operator diagnostics into the frozen `user_instruction`, `task_spec`, or project-facing semantic fields unless the user is explicitly asking to repair this workflow system. Keep those facts in runtime reporting, reconciliation, or your final answer only.
 
 Downstream completion is not complete until each coverage item is completed, deferred with a concrete reason, blocked, or escalated.
 

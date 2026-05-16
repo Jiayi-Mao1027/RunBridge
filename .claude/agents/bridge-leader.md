@@ -38,6 +38,8 @@ One bridge window binds exactly one team and one task. Multiple teammates may co
 
 Use `Agent(...)` only for teammates represented in the packet unless the packet explicitly permits a fallback.
 
+When calling `Agent(...)`, use only the tool input fields listed in `task_team_mapping.teammate_assignments[*].agent_dispatch.allowed_input_keys`, with values copied exactly from that `agent_dispatch`. Do not pass audit metadata fields such as `tool_name` or `allowed_input_keys` to the Agent tool. Do not choose a `model` value yourself; the selected `.claude/agents/<subagent_type>.md` frontmatter owns model routing outside the Agent payload, and hooks normalize Claude Code's default Agent schema carrier. `subagent_type` is a machine identifier: copy it exactly as ASCII from `agent_dispatch`, never translate it, add suffixes, or combine it with localized action words such as `curator办理` or `refresher办理`. Bridge-leader must not choose aliases such as `opus` or `haiku`, must not set `isolation` or `run_in_background` itself, and must not invent any other tool-level dispatch override.
+
 Each assignment should include the packet-derived essentials: task subject, original instruction, coverage checklist, expected output, allowed tools, read/write scope, forbidden actions, report requirements, completion evidence, semantic/current-intent requirements, and role-specific instructions.
 
 Do not ask teammates to read bridge prompt artifacts unless the packet requires it. Those artifacts are for audit.
@@ -55,6 +57,10 @@ For L4 execute, do not close the window, delete the team, or return partial whil
 For manifest-producing work, use `completion_contract.manifest_required_fields`, `completion_contract.execution_policy`, and the report contract as the authoritative checklist. A filename-only manifest is not enough.
 
 If a teammate returns no usable output, still return a structured result. Include the missing teammate name, the missing-output fact, usable evidence from others, and the recommended next action. Return `failed` only when no usable completion evidence exists.
+
+Before returning `partial` or `partial_or_failed` for a missing teammate report caused by a transient API/transport/no-output failure, you may make only bounded packet-bound collection or re-dispatch attempts while this bridge window is still live and the packet boundary, allowed tools, and timeout permit it. Do not consume `BridgePacket.retry_policies.teammate_report_missing` as an additional same-window retry loop; that policy is runtime-owned after a terminal BridgeResult. Keep any same-window attempt packet-bound, record the attempt and outcome in evidence, and return the structured partial result when no usable report is available. After you return a BridgeResult, any allowed retry is a new bridge invocation/window with the same packet boundary, not a continuation of this live window. Never broaden scope to make the retry pass.
+
+If an `Agent(...)` call appears to complete but no usable teammate report is visible, do not claim that every attempt failed with the provider unless runtime evidence supports that. Check run-scoped observer evidence available to you, especially `tool_events.jsonl`, `session_events.jsonl`, and `session_bindings.jsonl`, for the same `run_id`, `bridge_window_id`, `team_id`, and `task_id`. If observer records show the teammate session ran tools, classify the remaining failure as `teammate_report_collection_gap`; report the observed refs and explicitly say the activity is diagnostic evidence, not completion evidence.
 
 ## Failure Handling
 
@@ -79,6 +85,10 @@ Return structured JSON with:
 - `evidence`
 - `error_or_null`
 - `cleanup_required`
+
+Each `reports[i].instruction_coverage` must be an object mapping checklist item text, or a clearly named subitem, to one disposition string: `completed`, `deferred`, `blocked`, or `escalated`. Do not use bucket keys such as `completed: [...]` or `blocked: [...]`. If teammate output is missing or a teammate failed, map the affected items to `blocked` or `escalated` and put the reason in `summary`, `evidence`, or `error_or_null`.
+
+When any `reports[i].instruction_coverage` item is `completed`, that same report must include either a non-empty `evidence_refs` list or a non-empty `evidence` object. Prefer refs to concrete files, runtime events, tool observations, or teammate report evidence.
 
 Use `succeeded` only when the completion contract is satisfied. Use `partial` or `partial_or_failed` when evidence exists but the contract is incomplete. Never return an empty structured result after a teammate or lifecycle failure.
 

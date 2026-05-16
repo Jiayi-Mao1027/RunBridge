@@ -99,6 +99,8 @@ L4 implement inherits that hygiene requirement. Implementors should modify exist
 
 L4 execute is intentionally different from short implementation or review windows. It may own long-running training or evaluation jobs. For L4 execute, `TeamIdle` means the team is waiting or polling; it is not completion and is not a reason to delete the team. If executor launches an owned long-running process, the bridge window should remain open until the process reaches a terminal state and postrun has audited terminal logs/artifacts.
 
+L4 execute must not be governed by a fixed local tmux/CLI hard timeout when the packet sets `wait_until_process_complete` or `executor_hard_timeout_disabled`. Long execute windows are monitored through owned process refs, heartbeats, logs, artifact probes, and postrun checks. Stale or no-progress diagnostics should trigger inspection or anomaly routing; they should not kill an otherwise-owned training or evaluation job just because a wall-clock timeout elapsed.
+
 L4 execute also treats smoke parameters as evidence, not as the final run shape. Executor should run bounded smoke checks to choose formal per-device batch size, microbatch, gradient accumulation, precision, sequence length, and effective batch size, and postrun should audit that formal settings follow that evidence.
 
 Every generated formal log folder must contain an internal manifest, analogous to checkpoint manifests. The manifest is the durable identity record and should include run/window/task IDs, command, cwd, environment, semantic basis, smoke evidence refs, formal parameters/effective batch size, process refs, log files, expected outputs/checkpoints, timestamps, terminal status, and reuse/dependency notes. File names alone are not sufficient.
@@ -208,6 +210,8 @@ Tool observer records are emitted for all Claude Code sessions, not only bridge 
 
 UI must not synthesize low-level actions from reports or artifact refs. It should show `Read` / `Edit` / `Write` / `MultiEdit` / `Bash` / `Grep` / `Glob` / `LS` only when those real hook records exist in `tool_events.jsonl`. The hooks bind teammate child sessions from `SubagentStart` payloads such as `agent_name` / `subagent_name` when present, write that binding to `session_bindings.jsonl`, and rebind later child-session tool events by `session_id` when a tool payload lacks direct run fields. This is what lets real subagent tool calls land in the run-scoped observer stream with run/window/team/task/teammate attribution.
 
+Bridge-window Claude settings are generated from both durable parent settings files. Runtime environment and base Claude configuration come from `.claude/settings.json`; observer hook definitions come from `.claude/hooks/settings.json`. The bridge executor merges those sources, normalizes hook commands for the current bridge runtime, and filters the generated settings to Claude CLI-supported hook events only. System-only lifecycle events such as `BridgeWindowOpened`, `BridgePacketAccepted`, or `TeamIdle` remain runtime events, not Claude CLI hook entries. If `assigned` cards are visible but teammate tool cards or teammate discussion cards are missing, first check that run-scoped `session_bindings.jsonl`, `tool_events.jsonl`, and `agent_messages.jsonl` are being written before assuming Companion has a projection bug.
+
 `agent_messages.jsonl` is the source for bridge-leader-to-teammate assignment and discussion cards. When an assignment record lacks explicit target fields but its summary/body starts with a teammate prefix such as `chiefmate-a:`, Companion may use that prefix as display attribution and show the remaining text as the assignment body.
 
 A completed run cannot be backfilled with exact child tool names if no run-scoped teammate `tool_events.jsonl` or `session_bindings.jsonl` records were captured. SDK transcript summaries such as `chiefmate-a (...) · 16 tool uses` may be projected only as aggregate teammate tool-use counts, with an explicit unknown that individual tool names were not captured. Exact future visibility requires hook/observer instrumentation to record child tool events; Companion must not infer `Read`, `Grep`, `Bash`, or other concrete tools from reports or transcript summaries.
@@ -254,6 +258,14 @@ System-level problems include:
 
 Those are not supposed to be silently bypassed. They should be recorded and surfaced.
 
+### Transport And API Failures
+
+The tmux-backed outer host and bridge executor classify terminal provider/API failures as structured runtime failures instead of waiting for an arbitrary timeout. If a pane returns to the Claude prompt with messages such as `API Error`, `Unable to connect to API`, `ECONNRESET`, or `500 Internal Server Error`, the adapter should return a terminal error such as `OuterLeaderTmuxTerminalApiError` or `ClaudeTmuxTerminalApiError` with a bounded capture tail.
+
+For non-execute bridge phases, a no-progress tmux watchdog may return `ClaudeTmuxSoftTimeoutNoProgress` when observer streams and pane output stay stale. For L4 execute, that watchdog must defer to owned process refs and the execute no-hard-timeout rule above.
+
+Retry policy treats tmux transport failures, terminal API failures, and no-progress tmux failures as `bridge_sdk_call` failures that are non-retryable by default. The system should not open repeated bridge windows against the same provider failure. If the outer leader and bridge team use the same API supplier and both sides fail with the same API error class, classify it as provider/API outage evidence. If one side works while the other side fails under the same provider path, treat it as a system transport, hook, configuration, or runtime bug and inspect ledgers plus tmux captures before retrying.
+
 ## Target Repo Boundary
 
 The target repo should not contain workflow system files.
@@ -273,6 +285,27 @@ All workflow files live in the parent `.claude`. The target repo only contains t
 
 The migration target is a long-lived outer SDK host plus a separate read-only Companion gateway. The host is the process that may accept user input and write runtime facts; Companion can forward input to it but does not become the scheduler or truth source.
 
+### Live SSH Operating Contract
+
+For the live SSH-forwarded workflow, the local checkout is the only source-of-truth system version. The SSH side is the real execution/test surface. Do not treat remote files as a second canonical copy of the system, and do not synchronize whole repositories between the two sides.
+
+Use the forwarded endpoints as the first operational entrypoints:
+
+- `http://127.0.0.1:8787/api/health` and `http://127.0.0.1:8787/api/debug` check the Companion/debug gateway.
+- `http://127.0.0.1:8791/v1/status` checks the authoritative outer host, active/default run, adapter, startup diagnostics, runtime snapshot, bridge-window lifecycle, and allowed routes.
+
+The operator role is system stewardship, not direct project execution. Keep the RunBridge system healthy, push instructions to `leader-orchestrator` through the outer host, and let the system advance the target project through its phase graph, `BridgePacket`, bridge leader, teams, tasks, ledgers, and completion contracts. Direct SSH shell, tmux, or project-file operations are reserved for debugging, verification, repair, and controlled system updates.
+
+When a system-side file must change:
+
+1. Patch the local source-of-truth file first.
+2. Run the relevant local verification.
+3. Transfer only the changed file or files to the SSH side, or fetch back only the specific file needed for comparison.
+4. Verify on the SSH side.
+5. Restart `runbridge`, the outer host, or Companion only if the changed live process must reload the file.
+
+Do not use whole-repo `git pull`, `git fetch`, `rsync`, archive copy, or broad directory copy as the local-to-SSH update mechanism. The allowed live-update unit is a specific changed file, with hashes or another direct comparison when practical.
+
 Start the outer host from inside the target repo:
 
 ```powershell
@@ -289,6 +322,12 @@ python3 ../.claude/control/runtime/outer_sdk_host.py \
   --repo-root . \
   --main-session-id outer-main \
   --adapter auto
+```
+
+Current remote tmux layout uses the same host command inside a long-lived session such as `runbridge`. To restart after a system-side update, stop the old pane/process, start this command from `/data03/liang/mjy/safe_opd`, then verify the forwarded status endpoint before sending input:
+
+```bash
+curl -s http://127.0.0.1:8791/v1/status | python3 -m json.tool
 ```
 
 At startup, `outer_sdk_host.py` derives the interactive Claude wrapper from the target repo structure: it first looks for `../.claude` relative to `--repo-root`, sets the Claude subprocess `HOME` to that parent directory, and uses `../.claude/mcp.json` as the MCP config. This is the system-owned equivalent of a shell alias such as `HOME=<repo-parent> claude --mcp-config <repo-parent>/.claude/mcp.json`; callers should not need to export that alias manually.
@@ -330,6 +369,8 @@ curl -s http://127.0.0.1:8791/v1/status | python3 -m json.tool | grep -E '"adapt
 ```
 
 The expected custom-provider path reports `"adapter": "claude-tmux-repl"`.
+
+Companion/debug is normally forwarded on `http://127.0.0.1:8787`. The outer host status endpoint is the authoritative first check for run ID, adapter, lifecycle state, bridge window counts, and startup diagnostics; Companion is a projection/debug surface, not the scheduler.
 
 Bridge child execution defaults to `BRIDGE_EXECUTOR=auto`. For default
 first-party API paths, auto keeps the Claude CLI print-mode executor. For
@@ -441,11 +482,13 @@ $env:BRIDGE_EXECUTOR='simulate'
 
 Bridge execution now goes through the `BridgeExecutor` interface:
 
-- `BRIDGE_EXECUTOR=cli` (default): existing Claude CLI `stream-json` subprocess path, retained as fallback/debug/canary.
+- `BRIDGE_EXECUTOR=auto` (default): chooses the provider-compatible bridge executor. On custom `ANTHROPIC_BASE_URL` setups with Linux `tmux`, this uses the interactive Claude TTY bridge path.
+- `BRIDGE_EXECUTOR=tmux`: forces the tmux-backed Claude TTY bridge executor.
+- `BRIDGE_EXECUTOR=cli`: existing Claude CLI `stream-json` subprocess path, retained as fallback/debug/canary.
 - `BRIDGE_EXECUTOR=simulate`: deterministic smoke executor using the same interface.
 - `BRIDGE_EXECUTOR=sdk`: SDK-in-SDK migration skeleton. It reports `SdkExecutorNotImplemented` until the inner SDK session is wired.
 
-Without `BRIDGE_EXECUTOR=simulate` or `BRIDGE_EXECUTOR=sdk`, the bridge executor uses the existing nested non-interactive Claude Code call through `claude -p`.
+For custom-provider tmux runs, terminal API errors and no-progress failures must be returned as structured bridge failures with bounded evidence, not converted into silent waits or repeated retry loops.
 
 ## Notes
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from loader import load_json_file
-from persist import append_jsonl
+from persist import append_jsonl, atomic_write_json
 from repo_runtime import ensure_repo_registered, get_repo_runtime_root, resolve_repo_key, update_active_run_registry
 from runtime_event_envelope import attach_runtime_event_envelope, normalize_runtime_event
 from workflow_runtime import dispatch_workflow_event
@@ -74,6 +74,7 @@ class OuterSdkHost:
         request["runtime_event_id"] = runtime_result.event_id
         self._write_sdk_stream_event("outer_user_input", request, runtime_result=runtime_result)
         if runtime_result.ok:
+            self._write_outer_host_context(request)
             leader_result = self.adapter.handle_user_input(
                 dict(request),
                 event_sink=lambda event_type, payload, status="streaming", sequence=None: self.emit_sdk_observed_event(
@@ -162,6 +163,8 @@ class OuterSdkHost:
         ).strip()
         input_kind = str(payload.get("input_kind") or payload.get("kind") or "user_prompt").strip()
         event_kind = "user_answer_received" if input_kind in {"user_answer", "clarification_answer"} else "user_prompt_submitted"
+        target_phase = payload.get("target_phase") or payload.get("targetPhase")
+        dispatch_intent = _dispatch_intent(payload, text=text, input_kind=input_kind, target_phase=target_phase)
         now = _now_iso()
         return {
             "schema_version": "outer_user_input.v1",
@@ -173,8 +176,9 @@ class OuterSdkHost:
             "event_kind": event_kind,
             "text": text,
             "safe_preview": _safe_preview(text),
-            "target_phase": payload.get("target_phase") or payload.get("targetPhase"),
-            "task_spec": payload.get("task_spec") if isinstance(payload.get("task_spec"), dict) else {},
+            "target_phase": target_phase,
+            "dispatch_intent": dispatch_intent,
+            "task_spec": _payload_dict(payload, "task_spec", "taskSpec"),
             "created_at": now,
             "source": str(payload.get("source") or "outer_sdk_host_api"),
         }
@@ -206,6 +210,7 @@ class OuterSdkHost:
                     "input_id": request["input_id"],
                     "input_kind": request["input_kind"],
                     "target_phase": request.get("target_phase"),
+                    "dispatch_intent": request.get("dispatch_intent"),
                     "task_spec": request.get("task_spec") or {},
                     "source": request["source"],
                 },
@@ -350,6 +355,31 @@ class OuterSdkHost:
     def _run_root(self, run_id: str) -> Path:
         return get_repo_runtime_root(self.config.control_root, self._repo_key()) / run_id
 
+    def _write_outer_host_context(self, request: dict[str, Any]) -> None:
+        repo_key = str(request.get("repo_key") or self._repo_key())
+        project_root = get_repo_runtime_root(self.config.control_root, repo_key).parent
+        atomic_write_json(
+            project_root / ".outer_host_context.json",
+            {
+                "schema_version": "outer_host_context.v1",
+                "written_at": _now_iso(),
+                "host_instance_id": self.host_instance_id,
+                "repo_key": repo_key,
+                "repo_root": str(self.config.repo_root) if self.config.repo_root else "",
+                "run_id": request.get("run_id"),
+                "main_session_id": request.get("main_session_id"),
+                "input_id": request.get("input_id"),
+                "input_kind": request.get("input_kind"),
+                "event_kind": request.get("event_kind"),
+                "user_instruction": request.get("text"),
+                "target_phase": request.get("target_phase"),
+                "dispatch_intent": request.get("dispatch_intent"),
+                "task_spec": request.get("task_spec") if isinstance(request.get("task_spec"), dict) else {},
+                "runtime_event_id": request.get("runtime_event_id"),
+                "source": "outer_sdk_host",
+            },
+        )
+
     def _sdk_stream_event_paths(self, repo_key: str, run_id: str) -> list[Path]:
         return [
             get_repo_runtime_root(self.config.control_root, repo_key) / run_id / "sdk_stream_events.jsonl",
@@ -425,6 +455,41 @@ def _truthy(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "new"}
+
+
+def _dispatch_intent(payload: dict[str, Any], *, text: str, input_kind: str, target_phase: Any) -> str:
+    explicit = str(payload.get("dispatch_intent") or payload.get("dispatchIntent") or "").strip()
+    if explicit in {"advance_or_continue", "inspect_only"}:
+        return explicit
+    if input_kind not in {"user_prompt", "advance", "continue"}:
+        return "inspect_only"
+    if str(target_phase or "").strip() in {"l2_advisory", "l3_bridge", "l4_execute"}:
+        return "advance_or_continue"
+    lowered = str(text or "").strip().lower()
+    advance_markers = (
+        "推进",
+        "继续",
+        "开始",
+        "重新开始",
+        "跑项目",
+        "执行项目",
+        "advance",
+        "continue",
+        "proceed",
+        "run the project",
+        "execute the project",
+    )
+    if any(marker in lowered for marker in advance_markers):
+        return "advance_or_continue"
+    return "inspect_only"
+
+
+def _payload_dict(payload: dict[str, Any], *keys: str) -> dict[str, Any]:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:

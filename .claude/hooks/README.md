@@ -13,6 +13,7 @@ The hooks do not write authoritative state directly. They call:
 Included hooks:
 
 - `SessionStart`: creates a fresh run_id for the new Claude Code session and records it as the project's active run.
+- `SubagentStop`: records teammate finalization and emits a bounded teammate report when Claude exposes structured final output.
 - `UserPromptSubmit`: marks frozen semantics as requiring refresh.
 - `PreToolUse`: records bridge call intent/precheck/start for `call_bridge_sdk`, start events for bridge-leader lifecycle tools, and safe observer tool-start cards for every Claude Code session.
 - `PostToolUse`: records bridge SDK failure/return, bridge-leader tool success/failure, and safe observer tool-completion cards for every Claude Code session.

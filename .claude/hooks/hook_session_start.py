@@ -25,6 +25,24 @@ def main() -> int:
         emit_observer_record("session_bindings", {"timestamp": timestamp, **binding})
         return 0
 
+    outer_bound_run_id = _outer_bound_run_id()
+    if outer_bound_run_id:
+        main_session_id = _outer_bound_main_session_id() or _session_id(payload) or outer_bound_run_id
+        binding = observer_binding({**payload, "run_id": outer_bound_run_id, "main_session_id": main_session_id, "session_id": _session_id(payload)})
+        emit_observer_record(
+            "session_events",
+            {
+                "timestamp": timestamp,
+                **binding,
+                "event_type": "session_started",
+                "message_preview": "outer-bound main session started",
+                "cwd": payload.get("cwd"),
+                "project_root": payload.get("project_root"),
+            },
+        )
+        emit_observer_record("session_bindings", {"timestamp": timestamp, **binding})
+        return 0
+
     session_id = _session_id(payload)
     run_id = _new_run_id(timestamp, session_id)
     main_session_id = session_id or run_id
@@ -90,6 +108,26 @@ def _session_id(payload: dict) -> str:
             found = _session_id(nested)
             if found:
                 return found
+    return ""
+
+
+def _outer_bound_run_id() -> str:
+    import os
+
+    for key in ("BRIDGE_RUN_ID", "CLAUDE_CONTROL_RUN_ID"):
+        value = os.environ.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _outer_bound_main_session_id() -> str:
+    import os
+
+    for key in ("BRIDGE_MAIN_SESSION_ID", "CLAUDE_CONTROL_MAIN_SESSION_ID"):
+        value = os.environ.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return ""
 
 

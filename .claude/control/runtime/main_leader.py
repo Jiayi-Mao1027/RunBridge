@@ -12,6 +12,7 @@ from policy_compiler import compile_policy
 from repo_runtime import get_repo_runtime_root
 from team_planner import RiskBasedTeamSelector
 from workflow_runtime import SCHEMA_VERSION, build_runtime_snapshot
+from dispatch_contract import build_agent_dispatch, build_dispatch_contract
 
 
 PACKET_SCHEMA_VERSION = "0.1"
@@ -74,6 +75,7 @@ PHASE_TIMEOUT_POLICY = {
         "heartbeat_interval_seconds": 120,
         "soft_timeout_seconds": 21600,
         "hard_timeout_seconds": 86400,
+        "executor_hard_timeout_disabled": True,
         "timeout_action": "ask_main_leader",
         "wait_until_process_complete": True,
         "partial_return_allowed_only_after_process_terminal": True,
@@ -202,7 +204,13 @@ def build_bridge_instruction_packet_for_this_invoke(
     )
     team_planning = _plan_team_for_task(resolved_target_phase, resolved_task, resolved_team, contracts)
     resolved_team = team_planning["team_spec"]
+    team_id = str(resolved_team.get("team_id_or_null") or f"team_{uuid.uuid4().hex[:12]}")
+    task_id = str(resolved_task.get("task_id_or_null") or f"task_{uuid.uuid4().hex[:12]}")
+    resolved_team["team_id_or_null"] = team_id
+    resolved_task["task_id_or_null"] = task_id
     mapping = _build_task_team_mapping(resolved_task, resolved_team, phase_contracts=contracts)
+    mapping["team_id_or_null"] = team_id
+    mapping["task_id_or_null"] = task_id
 
     binding = {
         "repo_key": snapshot.get("repo_key"),
@@ -214,8 +222,8 @@ def build_bridge_instruction_packet_for_this_invoke(
         "opened_by_agent_id": "main-leader",
         "opened_by_agent_type": "main-leader",
         "bridge_leader_id_or_null": None,
-        "team_id_or_null": resolved_team.get("team_id_or_null"),
-        "task_id_or_null": resolved_task.get("task_id_or_null"),
+        "team_id_or_null": team_id,
+        "task_id_or_null": task_id,
         "lifecycle_status": "bridge_call_intended",
         "created_at": now,
         "updated_at": now,
@@ -237,12 +245,14 @@ def build_bridge_instruction_packet_for_this_invoke(
         "task_team_mapping": mapping,
         "completion_contract": resolved_completion,
         "report_contract": resolved_report,
+        "retry_policies": deepcopy(contracts.get("retry_policies") or {}) if isinstance(contracts.get("retry_policies"), dict) else {},
         "allowed_actions": _contracts_list(contracts, "default_bridge_actions") or list(DEFAULT_BRIDGE_ACTIONS),
         "allowed_tools": list(bridge_allowed_tools),
         "approval_requirements": [],
         "created_at": now,
         "expires_at": None,
     }
+    packet["dispatch_contract"] = build_dispatch_contract(packet)
     return packet
 
 
@@ -422,37 +432,41 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
     for teammate in team_spec.get("teammate_specs", []):
         name = str(teammate.get("teammate_name") or "bridge-worker")
         responsibilities = teammate.get("responsibilities") if isinstance(teammate.get("responsibilities"), list) else []
+        assignment_body = "\n".join(
+            [
+                f"{name}: {task_spec['task_description']}",
+                f"Original user instruction: {task_spec.get('original_user_instruction') or task_spec['task_description']}",
+                f"Instruction coverage checklist: {_json_list(task_spec.get('instruction_coverage_checklist'))}",
+                f"Semantic resolution contract: {_json_dict(task_spec.get('semantic_resolution_contract'))}",
+                f"Current user intent context: {_json_dict(task_spec.get('current_user_intent_context'))}",
+                f"Preserved task context: {_json_dict(task_spec.get('preserved_task_context'))}",
+                "Coverage rule: do not mark the task complete until every checklist item is completed, explicitly deferred with a concrete reason, or escalated to main-leader/user.",
+                "Semantic identity rule: resolve or explicitly carry model/method identity, checkpoint identity, dataset identity, prompt identity, code/config basis, and inherited defaults before downstream implementation or execution. Do not silently change them.",
+                "Current intent rule: treat current_user_intent_context as the nearest active user intent for this bridge window. Confirm it, refine it, or supersede it from evidence; do not silently drop or rewrite it when recommending the next phase.",
+                "Report rule: include an instruction coverage section that lists completed, deferred, blocked, and escalated checklist items.",
+                "Report rule: include a semantic identity resolution section with resolved, inherited, unknown, blocked, or escalated disposition for each required identity field.",
+                "Report rule: include a current user intent context section that states confirmed, refined, superseded, blocked, or escalated disposition and the evidence for any change.",
+                f"Role: {teammate.get('role') or 'bridge teammate'}",
+                f"Responsibilities: {_json_list(responsibilities)}",
+                f"Allowed tools: {_json_list(teammate.get('allowed_tools'))}",
+                f"Readable scopes: {_json_list(ownership.get('readable_scopes'))}",
+                f"Writable scopes: {_json_list(ownership.get('writable_scopes'))}",
+                f"Forbidden actions: {_json_list(ownership.get('forbidden_actions'))}",
+                f"Active surface policy: {_json_list(ownership.get('active_surface_policy'))}",
+                f"Completion contract: {_json_dict(task_spec.get('completion_contract'))}",
+                f"Report contract: {_json_dict(task_spec.get('report_contract'))}",
+                *_phase_assignment_instructions(str(task_spec.get("target_phase") or ""), name, phase_contracts),
+                "Do not read .claude/runtime_state/bridge_prompts for task context; that bridge prompt artifact is for audit only.",
+                "When using Read, omit optional parameters you do not need. Never pass pages as an empty string.",
+            ]
+        )
+        dispatch_description = f"{name}: {teammate.get('role') or 'bridge teammate'}"
         assignments.append(
             {
                 "teammate_id_or_null": teammate.get("teammate_id_or_null"),
-                "assignment": "\n".join(
-                    [
-                        f"{name}: {task_spec['task_description']}",
-                        f"Original user instruction: {task_spec.get('original_user_instruction') or task_spec['task_description']}",
-                        f"Instruction coverage checklist: {_json_list(task_spec.get('instruction_coverage_checklist'))}",
-                        f"Semantic resolution contract: {_json_dict(task_spec.get('semantic_resolution_contract'))}",
-                        f"Current user intent context: {_json_dict(task_spec.get('current_user_intent_context'))}",
-                        f"Preserved task context: {_json_dict(task_spec.get('preserved_task_context'))}",
-                        "Coverage rule: do not mark the task complete until every checklist item is completed, explicitly deferred with a concrete reason, or escalated to main-leader/user.",
-                        "Semantic identity rule: resolve or explicitly carry model/method identity, checkpoint identity, dataset identity, prompt identity, code/config basis, and inherited defaults before downstream implementation or execution. Do not silently change them.",
-                        "Current intent rule: treat current_user_intent_context as the nearest active user intent for this bridge window. Confirm it, refine it, or supersede it from evidence; do not silently drop or rewrite it when recommending the next phase.",
-                        "Report rule: include an instruction coverage section that lists completed, deferred, blocked, and escalated checklist items.",
-                        "Report rule: include a semantic identity resolution section with resolved, inherited, unknown, blocked, or escalated disposition for each required identity field.",
-                        "Report rule: include a current user intent context section that states confirmed, refined, superseded, blocked, or escalated disposition and the evidence for any change.",
-                        f"Role: {teammate.get('role') or 'bridge teammate'}",
-                        f"Responsibilities: {_json_list(responsibilities)}",
-                        f"Allowed tools: {_json_list(teammate.get('allowed_tools'))}",
-                        f"Readable scopes: {_json_list(ownership.get('readable_scopes'))}",
-                        f"Writable scopes: {_json_list(ownership.get('writable_scopes'))}",
-                        f"Forbidden actions: {_json_list(ownership.get('forbidden_actions'))}",
-                        f"Active surface policy: {_json_list(ownership.get('active_surface_policy'))}",
-                        f"Completion contract: {_json_dict(task_spec.get('completion_contract'))}",
-                        f"Report contract: {_json_dict(task_spec.get('report_contract'))}",
-                        *_phase_assignment_instructions(str(task_spec.get("target_phase") or ""), name, phase_contracts),
-                        "Do not read .claude/runtime_state/bridge_prompts for task context; that bridge prompt artifact is for audit only.",
-                        "When using Read, omit optional parameters you do not need. Never pass pages as an empty string.",
-                    ]
-                ),
+                "teammate_name": name,
+                "assignment": assignment_body,
+                "agent_dispatch": build_agent_dispatch(name, dispatch_description, assignment_body),
                 "expected_output": "completion report and declared artifact refs",
             }
         )

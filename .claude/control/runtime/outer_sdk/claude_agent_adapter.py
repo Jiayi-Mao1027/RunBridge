@@ -30,7 +30,8 @@ DEFAULT_ALLOWED_TOOLS = [
     "Glob",
     "LS",
 ]
-DEFAULT_DISALLOWED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]
+OUTER_LEADER_FORBIDDEN_TOOLS = {"Agent"}
+DEFAULT_DISALLOWED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "Agent"]
 DEFAULT_PERMISSION_MODE = "dontAsk"
 PREVIEW_LIMIT = 700
 REPORT_TEXT_LIMIT = 20000
@@ -179,20 +180,24 @@ class ClaudeAgentSdkOuterLeaderAdapter:
         repo_root = Path(self.config.repo_root) if self.config.repo_root else Path.cwd()
         leader_prompt = _leader_prompt(control_root)
         leader_model = _leader_model(control_root)
-        tools = _env_list("OUTER_LEADER_TOOLS", _env_list("OUTER_LEADER_ALLOWED_TOOLS", DEFAULT_ALLOWED_TOOLS))
-        allowed_tools = _env_list("OUTER_LEADER_ALLOWED_TOOLS", tools)
+        tools = _outer_leader_tools()
+        allowed_tools = _outer_leader_allowed_tools(tools)
         cli_info = _outer_leader_cli_info(control_root, repo_root)
         settings_path = _outer_leader_settings_path(control_root, cli_info, repo_root)
         env = {
             "CLAUDE_CONTROL_ROOT": str(control_root),
             "BRIDGE_RUNTIME_REPO_KEY": str(request.get("repo_key") or ""),
             "BRIDGE_RUN_ID": str(request.get("run_id") or ""),
+            "BRIDGE_MAIN_SESSION_ID": str(request.get("main_session_id") or ""),
             "CLAUDE_CONTROL_RUN_ID": str(request.get("run_id") or ""),
+            "CLAUDE_CONTROL_MAIN_SESSION_ID": str(request.get("main_session_id") or ""),
             "PYTHONNOUSERSITE": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
         }
         env.update(_bridge_process_env_overrides(control_root, cli_info, repo_root))
+        env.update(_settings_env(settings_path))
         env.update(cli_info.get("env") or {})
+        _ensure_env_api_key_alias(env)
         env["ANTHROPIC_MODEL"] = leader_model
         env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = leader_model
         env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = leader_model
@@ -209,7 +214,7 @@ class ClaudeAgentSdkOuterLeaderAdapter:
             "mcp_servers": cli_info.get("mcp_config") or _bridge_mcp_servers(control_root),
             "strict_mcp_config": cli_info.get("strict_mcp_config", True),
             "allowed_tools": allowed_tools,
-            "disallowed_tools": _env_list("OUTER_LEADER_DISALLOWED_TOOLS", DEFAULT_DISALLOWED_TOOLS),
+            "disallowed_tools": _outer_leader_disallowed_tools(),
             "permission_mode": _outer_leader_permission_mode(),
             "model": leader_model,
             "cli_path": cli_info.get("cli_path"),
@@ -312,25 +317,96 @@ def _outer_leader_settings_path(control_root: Path, cli_info: dict[str, Any] | N
 
     claude_root = _discover_parent_claude_root(control_root, repo_root)
     default_settings = claude_root / "settings.json"
-    if default_settings.exists():
-        return _materialize_outer_leader_settings(control_root, default_settings)
-
     hook_settings = claude_root / "hooks" / "settings.json"
-    if hook_settings.exists():
-        return _materialize_outer_leader_settings(control_root, hook_settings)
+    if default_settings.exists() or hook_settings.exists():
+        source = default_settings if default_settings.exists() else hook_settings
+        return _materialize_outer_leader_settings(control_root, source, hook_settings=hook_settings, claude_root=claude_root)
 
     return None
 
 
-def _materialize_outer_leader_settings(control_root: Path, source: Path) -> Path:
+def _materialize_outer_leader_settings(
+    control_root: Path,
+    source: Path,
+    *,
+    hook_settings: Path | None = None,
+    claude_root: Path | None = None,
+) -> Path:
+    source = source.expanduser().resolve()
+    claude_root = (claude_root.expanduser().resolve() if claude_root else (source.parent.parent if source.parent.name == "hooks" else source.parent))
     payload = json.loads(source.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"invalid Claude settings payload: {source}")
-    normalized = _normalize_hook_commands(payload, source.parent / "hooks")
-    target = source.parent / "runtime_state" / "generated" / "outer_leader_settings.json"
+    if hook_settings and hook_settings.exists():
+        hook_payload = json.loads(hook_settings.read_text(encoding="utf-8"))
+        if isinstance(hook_payload, dict) and isinstance(hook_payload.get("hooks"), dict):
+            payload = {**payload, "hooks": _filter_claude_cli_hooks(hook_payload["hooks"])}
+    normalized = _normalize_hook_commands(payload, claude_root / "hooks")
+    _ensure_settings_api_key_alias(normalized)
+    target = claude_root / "runtime_state" / "generated" / "outer_leader_settings.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
     return target.resolve()
+
+
+def _ensure_settings_api_key_alias(settings_payload: dict[str, Any]) -> bool:
+    env = settings_payload.get("env")
+    if not isinstance(env, dict):
+        return False
+    if _has_nonempty(env.get("ANTHROPIC_API_KEY")):
+        return False
+    auth_token = env.get("ANTHROPIC_AUTH_TOKEN")
+    if not _has_nonempty(auth_token):
+        return False
+    env["ANTHROPIC_API_KEY"] = str(auth_token)
+    return True
+
+
+def _ensure_env_api_key_alias(env: dict[str, str]) -> bool:
+    if _has_nonempty(env.get("ANTHROPIC_API_KEY")):
+        return False
+    auth_token = env.get("ANTHROPIC_AUTH_TOKEN")
+    if not _has_nonempty(auth_token):
+        return False
+    env["ANTHROPIC_API_KEY"] = str(auth_token)
+    return True
+
+
+_CLAUDE_CLI_HOOK_EVENTS = {
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PostToolBatch",
+    "Notification",
+    "UserPromptSubmit",
+    "UserPromptExpansion",
+    "SessionStart",
+    "SessionEnd",
+    "Stop",
+    "StopFailure",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+    "PermissionRequest",
+    "PermissionDenied",
+    "Setup",
+    "TeammateIdle",
+    "TaskCreated",
+    "TaskCompleted",
+    "Elicitation",
+    "ElicitationResult",
+    "ConfigChange",
+    "WorktreeCreate",
+    "WorktreeRemove",
+    "InstructionsLoaded",
+    "CwdChanged",
+    "FileChanged",
+}
+
+
+def _filter_claude_cli_hooks(hooks: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in hooks.items() if key in _CLAUDE_CLI_HOOK_EVENTS}
 
 
 def _normalize_hook_commands(value: Any, hooks_root: Path) -> Any:
@@ -389,11 +465,13 @@ def _infer_outer_settings_source(settings_path: Path | None) -> str | None:
         return str(settings_path)
     claude_root = settings_path.parent.parent.parent
     default_settings = claude_root / "settings.json"
-    if default_settings.exists():
-        return str(default_settings.resolve())
     hook_settings = claude_root / "hooks" / "settings.json"
+    if default_settings.exists() and hook_settings.exists():
+        return f"{default_settings.resolve()} + {hook_settings.resolve()}"
     if hook_settings.exists():
         return str(hook_settings.resolve())
+    if default_settings.exists():
+        return str(default_settings.resolve())
     return str(settings_path)
 
 
@@ -678,11 +756,17 @@ def _options_diagnostics(values: dict[str, Any], settings_path: Path | None, cli
             "settings_has_anthropic_base_url": _has_nonempty(settings_env.get("ANTHROPIC_BASE_URL")),
             "settings_anthropic_base_url": _safe_url_preview(settings_env.get("ANTHROPIC_BASE_URL")),
             "settings_has_anthropic_auth_token": _has_nonempty(settings_env.get("ANTHROPIC_AUTH_TOKEN")),
+            "settings_has_anthropic_api_key": _has_nonempty(settings_env.get("ANTHROPIC_API_KEY")),
+            "settings_auth_token_aliased_to_api_key": _has_nonempty(settings_env.get("ANTHROPIC_AUTH_TOKEN"))
+            and settings_env.get("ANTHROPIC_API_KEY") == settings_env.get("ANTHROPIC_AUTH_TOKEN"),
             "settings_has_http_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTP_PROXY")),
             "settings_has_https_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTPS_PROXY")),
             "subprocess_env_has_anthropic_base_url": _has_nonempty(env.get("ANTHROPIC_BASE_URL")),
             "subprocess_anthropic_base_url": _safe_url_preview(env.get("ANTHROPIC_BASE_URL")),
             "subprocess_env_has_anthropic_auth_token": _has_nonempty(env.get("ANTHROPIC_AUTH_TOKEN")),
+            "subprocess_env_has_anthropic_api_key": _has_nonempty(env.get("ANTHROPIC_API_KEY")),
+            "subprocess_env_auth_token_aliased_to_api_key": _has_nonempty(env.get("ANTHROPIC_AUTH_TOKEN"))
+            and env.get("ANTHROPIC_API_KEY") == env.get("ANTHROPIC_AUTH_TOKEN"),
             "subprocess_anthropic_model": env.get("ANTHROPIC_MODEL"),
             "subprocess_default_sonnet_model": env.get("ANTHROPIC_DEFAULT_SONNET_MODEL"),
             "subprocess_default_haiku_model": env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
@@ -703,20 +787,24 @@ def outer_leader_startup_diagnostics(
     repo = Path(repo_root).expanduser().resolve() if repo_root else Path.cwd().resolve()
     request = dict(request or {})
     leader_model = _leader_model(control)
-    tools = _env_list("OUTER_LEADER_TOOLS", _env_list("OUTER_LEADER_ALLOWED_TOOLS", DEFAULT_ALLOWED_TOOLS))
-    allowed_tools = _env_list("OUTER_LEADER_ALLOWED_TOOLS", tools)
+    tools = _outer_leader_tools()
+    allowed_tools = _outer_leader_allowed_tools(tools)
     cli_info = _outer_leader_cli_info(control, repo)
     settings_path = _outer_leader_settings_path(control, cli_info, repo)
     env = {
         "CLAUDE_CONTROL_ROOT": str(control),
         "BRIDGE_RUNTIME_REPO_KEY": str(request.get("repo_key") or ""),
         "BRIDGE_RUN_ID": str(request.get("run_id") or ""),
+        "BRIDGE_MAIN_SESSION_ID": str(request.get("main_session_id") or ""),
         "CLAUDE_CONTROL_RUN_ID": str(request.get("run_id") or ""),
+        "CLAUDE_CONTROL_MAIN_SESSION_ID": str(request.get("main_session_id") or ""),
         "PYTHONNOUSERSITE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     env.update(_bridge_process_env_overrides(control, cli_info, repo))
+    env.update(_settings_env(settings_path))
     env.update(cli_info.get("env") or {})
+    _ensure_env_api_key_alias(env)
     env["ANTHROPIC_MODEL"] = leader_model
     env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = leader_model
     env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = leader_model
@@ -726,7 +814,7 @@ def outer_leader_startup_diagnostics(
         "mcp_servers": cli_info.get("mcp_config") or _bridge_mcp_servers(control),
         "strict_mcp_config": cli_info.get("strict_mcp_config", True),
         "allowed_tools": allowed_tools,
-        "disallowed_tools": _env_list("OUTER_LEADER_DISALLOWED_TOOLS", DEFAULT_DISALLOWED_TOOLS),
+        "disallowed_tools": _outer_leader_disallowed_tools(),
         "permission_mode": _outer_leader_permission_mode(),
         "model": leader_model,
         "cli_path": cli_info.get("cli_path"),
@@ -754,6 +842,16 @@ def outer_leader_startup_diagnostics(
             settings_diag.get("settings_has_anthropic_base_url")
             or settings_diag.get("settings_has_anthropic_auth_token")
         ),
+        "settings_provider_env_propagated": (
+            not (
+                settings_diag.get("settings_has_anthropic_base_url")
+                or settings_diag.get("settings_has_anthropic_auth_token")
+            )
+            or (
+                settings_diag.get("subprocess_env_has_anthropic_base_url")
+                and settings_diag.get("subprocess_env_has_anthropic_auth_token")
+            )
+        ),
     }
     return {
         "schema_version": "outer_leader_startup_diagnostics.v1",
@@ -769,8 +867,8 @@ def outer_leader_startup_diagnostics(
 def _startup_diagnostic_verdict(checks: dict[str, Any]) -> dict[str, Any]:
     problems: list[str] = []
     warnings: list[str] = []
-    if checks.get("process_env_provider_overrides"):
-        problems.append("ANTHROPIC_BASE_URL/AUTH_TOKEN is being injected into the actual SDK subprocess environment")
+    if checks.get("settings_file_provider_env_present") and not checks.get("settings_provider_env_propagated"):
+        problems.append("settings provider env is not present in the actual outer leader subprocess environment")
     if not checks.get("home_env_present"):
         warnings.append("HOME is not set by the Claude startup wrapper")
     if not checks.get("mcp_config_present"):
@@ -847,20 +945,7 @@ def _strip_frontmatter(text: str) -> str:
 
 
 def _build_user_prompt(request: dict[str, Any]) -> str:
-    metadata = {
-        "repo_key": request.get("repo_key"),
-        "run_id": request.get("run_id"),
-        "main_session_id": request.get("main_session_id"),
-        "input_kind": request.get("input_kind"),
-        "target_phase": request.get("target_phase"),
-        "input_id": request.get("input_id"),
-    }
-    return (
-        "RunBridge outer host user input.\n"
-        "Use runtime truth and bridge MCP tools; do not treat this wrapper metadata as project evidence.\n\n"
-        f"Metadata:\n{json.dumps(metadata, ensure_ascii=False, indent=2)}\n\n"
-        f"User message:\n{request.get('text') or ''}"
-    )
+    return str(request.get("text") or "")
 
 
 def _message_record(message: Any, request: dict[str, Any]) -> dict[str, Any]:
@@ -981,7 +1066,7 @@ def _sdk_result(
 ) -> dict[str, Any]:
     subtype = result_message.get("subtype") if result_message else None
     summary = _result_text(result_message) or _last_result_text(messages) or _last_preview(messages) or "outer leader SDK response completed"
-    contract_violation = _outer_leader_contract_violation(summary, result_message)
+    contract_violation = _outer_leader_contract_violation(summary, result_message) or _outer_leader_message_contract_violation(messages, summary)
     system_failure = _outer_leader_system_failure(summary, result_message)
     status = (
         "blocked"
@@ -1059,6 +1144,28 @@ def _outer_leader_contract_violation(summary: str, result_message: dict[str, Any
     if "\u4f60\u9700\u8981\u624b\u52a8\u6267\u884c" in text or "\u6211\u5f53\u524d\u7684\u5de5\u5177\u6743\u9650\u65e0\u6cd5\u76f4\u63a5\u7f16\u8f91" in text:
         return "Outer leader asked the user to perform manual implementation instead of routing to L4 bridge."
     return None
+
+
+def _outer_leader_message_contract_violation(messages: list[dict[str, Any]], summary: str) -> str | None:
+    if _is_tool_artifact_filename(summary):
+        return "Outer leader returned only a tool artifact filename instead of a runtime-backed report."
+    build_seen = False
+    call_seen = False
+    for item in messages:
+        tool_name = str(item.get("tool_name") or "")
+        if tool_name == "mcp__bridge__build_bridge_packet":
+            build_seen = True
+        if tool_name == "mcp__bridge__call_bridge_sdk":
+            call_seen = True
+    if build_seen and not call_seen:
+        return "Outer leader built a BridgePacket but stopped before mcp__bridge__call_bridge_sdk."
+    return None
+
+
+def _is_tool_artifact_filename(text: Any) -> bool:
+    normalized = str(text or "").strip()
+    normalized = re.sub(r"^[^\w./-]+", "", normalized)
+    return bool(re.fullmatch(r"(?:br)?idge_packet-\d+\.txt", normalized))
 
 
 def _outer_leader_system_failure(summary: str, result_message: dict[str, Any] | None = None) -> dict[str, str] | None:
@@ -1177,6 +1284,37 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     if not raw:
         return list(default)
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _outer_leader_tools() -> list[str]:
+    return _without_outer_forbidden_tools(
+        _env_list("OUTER_LEADER_TOOLS", _env_list("OUTER_LEADER_ALLOWED_TOOLS", DEFAULT_ALLOWED_TOOLS))
+    )
+
+
+def _outer_leader_allowed_tools(tools: list[str] | None = None) -> list[str]:
+    baseline = tools if tools is not None else _outer_leader_tools()
+    return _without_outer_forbidden_tools(_env_list("OUTER_LEADER_ALLOWED_TOOLS", baseline))
+
+
+def _outer_leader_disallowed_tools() -> list[str]:
+    configured = _env_list("OUTER_LEADER_DISALLOWED_TOOLS", DEFAULT_DISALLOWED_TOOLS)
+    result: list[str] = []
+    for item in [*configured, *sorted(OUTER_LEADER_FORBIDDEN_TOOLS)]:
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def _without_outer_forbidden_tools(tools: list[str]) -> list[str]:
+    return [item for item in tools if not _outer_tool_forbidden(item)]
+
+
+def _outer_tool_forbidden(tool_name: Any) -> bool:
+    text = str(tool_name or "").strip()
+    if text in OUTER_LEADER_FORBIDDEN_TOOLS:
+        return True
+    return any(text.startswith(f"{item}(") for item in OUTER_LEADER_FORBIDDEN_TOOLS)
 
 
 def _has_nonempty(value: Any) -> bool:

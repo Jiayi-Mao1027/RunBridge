@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -205,12 +206,19 @@ def _coverage_disposition(value: Any) -> str:
 
 
 def _fuzzy_coverage_disposition(item: str, coverage: dict[str, Any]) -> str:
-    target = item.casefold()
+    target = _coverage_match_key(item)
     for key, value in coverage.items():
-        key_text = str(key).casefold()
+        key_text = _coverage_match_key(key)
         if target and (target in key_text or key_text in target):
             return _coverage_disposition(value)
     return ""
+
+
+def _coverage_match_key(value: Any) -> str:
+    text = " ".join(str(value or "").split()).casefold()
+    text = re.sub(r"\s+([,.;:!?/)\]\}])", r"\1", text)
+    text = re.sub(r"([(/])\s+", r"\1", text)
+    return text.strip()
 
 
 def _process_ref_looks_running(ref: Any) -> bool:
