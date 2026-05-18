@@ -1,5 +1,9 @@
+# Local runtime/cache artifacts
 .claude/runtime_state/
-AGENTS.md
-# Bridge Companion local secrets
+.runtime_smoke_tmp/
+__pycache__/
+*.py[cod]
+
+# Local secrets
 bridge-companion/key.json
 bridge-companion/*secret*.json
