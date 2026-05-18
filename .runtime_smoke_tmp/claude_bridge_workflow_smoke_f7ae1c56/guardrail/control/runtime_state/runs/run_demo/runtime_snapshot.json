@@ -1,0 +1,130 @@
+{
+  "schema_version": "0.4.0",
+  "snapshot_detail_level": "compact",
+  "snapshot_policy": {
+    "purpose": "control_state_only",
+    "large_payloads_live_in_refs": true,
+    "text_preview_limit": 700,
+    "list_preview_limit": 8
+  },
+  "snapshot_refs": {
+    "run_ledger": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\run_ledger.json",
+    "event_log": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\event_log.jsonl",
+    "canonical_event_log": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\event_log.jsonl",
+    "transitions": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\transitions.jsonl",
+    "main_leader_inbox": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\main_leader_inbox.jsonl",
+    "teammate_reports": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\teammate_reports.jsonl",
+    "tool_events": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\tool_events.jsonl",
+    "artifacts": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\artifacts.jsonl",
+    "process_events": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\process_events.jsonl",
+    "completion_checks": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\completion_checks.jsonl",
+    "active_operations": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo\\active_operations.json",
+    "bridge_prompts_dir": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\bridge_prompts\\run_demo",
+    "run_root": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\guardrail\\control\\runtime_state\\runs\\run_demo"
+  },
+  "repo_key": "unscoped_repo",
+  "run_id": "run_demo",
+  "main_session_id": "main_demo",
+  "current_phase": "l3_bridge",
+  "semantic": {
+    "frozen": {
+      "goal": "smoke"
+    },
+    "frozen_at": "2026-05-17T09:14:39.272022+00:00",
+    "requires_refresh": false
+  },
+  "scope": {
+    "frozen": {
+      "writable_scopes": [
+        "tmp"
+      ]
+    },
+    "frozen_at": "2026-05-17T09:14:39.272022+00:00",
+    "requires_refresh": false
+  },
+  "route": {
+    "current_route": [
+      "l3_bridge",
+      "l4_execute"
+    ],
+    "target_phase": "l4_execute",
+    "is_stale": false,
+    "decided_by_event_id": null
+  },
+  "lifecycle": {
+    "status_index": {},
+    "last_event_index": {},
+    "open_bridge_window_ids": [],
+    "orphan_candidate_ids": []
+  },
+  "bindings": {
+    "detail_level": "compact",
+    "counts": {
+      "bridge_windows": 0,
+      "teams": 0,
+      "tasks": 0,
+      "tool_uses": 0
+    },
+    "bridge_windows": {},
+    "teams": {},
+    "tasks": {},
+    "tool_uses": {},
+    "omitted": {
+      "bridge_windows": 0,
+      "tool_uses": 0
+    }
+  },
+  "allowed_actions": [
+    "call_bridge_sdk",
+    "record_bridge_event",
+    "advance_phase",
+    "reroute_phase",
+    "request_approval",
+    "abort_run"
+  ],
+  "allowed_routes": [
+    "l3_bridge",
+    "leader_freeze",
+    "l2_advisory",
+    "l4_implement",
+    "l4_execute",
+    "l4_anomaly"
+  ],
+  "integrity": {
+    "has_hard_stop": false,
+    "awaiting_approval": false,
+    "awaiting_user_answer": false,
+    "awaiting_user_answer_bridge_window_ids": [],
+    "has_blocking_orchestration_anomaly": false,
+    "has_execute_watchdog_alert": false,
+    "open_alerts": []
+  },
+  "runtime_diagnostics": {
+    "detail_level": "compact",
+    "observer_stream_counts": {
+      "teammate_reports": 0,
+      "artifacts": 0,
+      "process_events": 0,
+      "completion_checks": 0,
+      "tool_events": 0,
+      "agent_messages": 0
+    },
+    "orchestration_anomalies": [],
+    "execute_watchdog_alerts": [],
+    "has_blocking_orchestration_anomaly": false,
+    "has_execute_watchdog_alert": false,
+    "omitted": {
+      "orchestration_anomalies": 0,
+      "execute_watchdog_alerts": 0
+    }
+  },
+  "last_bridge_result": null,
+  "phase_exit_readiness": {
+    "current_phase": "l3_bridge",
+    "exit_ready": true,
+    "blocking_event_ids": [],
+    "blocking_task_ids": [],
+    "blocking_bridge_window_ids": [],
+    "changed_recently": true
+  }
+}

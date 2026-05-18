@@ -109,7 +109,12 @@
         "ClaudeTmuxTerminalApiError",
         "ClaudeTmuxSoftTimeoutNoProgress",
         "ClaudeTmuxTimeout",
-        "TransientClaudeTmuxTransportApiError"
+        "TransientClaudeTmuxTransportApiError",
+        "ProviderTransportApiError",
+        "ProviderTransportConnectionRefused",
+        "ProviderTransportRateLimited",
+        "ProviderTransportReset",
+        "ProviderGateTimeout"
       ]
     },
     "teammate_report_missing": {

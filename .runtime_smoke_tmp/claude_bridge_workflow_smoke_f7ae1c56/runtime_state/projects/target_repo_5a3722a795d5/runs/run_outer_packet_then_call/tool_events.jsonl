@@ -1,0 +1,2 @@
+{"tool_name": "mcp__bridge__build_bridge_packet", "status": "completed", "tool_use_id": "tool_build"}
+{"tool_name": "mcp__bridge__call_bridge_sdk", "status": "started", "tool_use_id": "tool_call"}

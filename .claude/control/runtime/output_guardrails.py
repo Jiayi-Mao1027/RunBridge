@@ -187,9 +187,11 @@ def validate_completion_report(payload: Any, *, control_root: str | Path | None 
     checks = payload.get("completion_checks") if isinstance(payload.get("completion_checks"), dict) else {}
     if not checks:
         return validation_error(error_type="MissingCompletionChecks", path="$.completion_checks", message="completion report requires completion_checks")
+    contract = payload.get("completion_contract") if isinstance(payload.get("completion_contract"), dict) else {}
+    required_artifacts = contract.get("required_artifacts") if isinstance(contract.get("required_artifacts"), list) else []
     if checks.get("required_outputs_present") and not payload.get("reports"):
         return validation_error(error_type="MissingReportEvidence", path="$.reports", message="completion output claims reports exist but reports are missing")
-    if checks.get("required_artifacts_present") and not payload.get("artifact_refs"):
+    if required_artifacts and checks.get("required_artifacts_present") and not payload.get("artifact_refs"):
         return validation_error(error_type="MissingArtifactRefs", path="$.artifact_refs", message="completion output claims artifacts checked but artifact_refs are absent")
     for index, report in enumerate(payload.get("reports", []) if isinstance(payload.get("reports"), list) else []):
         validation = validate_teammate_report(report, path=f"$.reports[{index}]", strict=True, control_root=control_root)

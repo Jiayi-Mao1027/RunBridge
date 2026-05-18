@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -38,6 +41,83 @@ ORCHESTRATION_ANOMALY_STUCK_STATUSES = {
     "message_dispatch_completed",
 }
 EXECUTE_WATCHDOG_HEARTBEAT_GRACE_MULTIPLIER = 3
+
+_DISPATCH_LOCK_GUARD = threading.RLock()
+_DISPATCH_LOCK_COUNTS: dict[str, int] = {}
+
+
+def _lock_key_for_run(paths: ControlPaths, run_id: str) -> str:
+    return str((paths.run_root(run_id) / ".workflow_dispatch.lock").resolve())
+
+
+def _acquire_file_lock(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _release_file_lock(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _workflow_dispatch_lock(paths: ControlPaths, run_id: str):
+    lock_key = _lock_key_for_run(paths, run_id)
+    with _DISPATCH_LOCK_GUARD:
+        count = _DISPATCH_LOCK_COUNTS.get(lock_key, 0)
+        if count:
+            _DISPATCH_LOCK_COUNTS[lock_key] = count + 1
+            reentrant = True
+        else:
+            reentrant = False
+
+    if reentrant:
+        try:
+            yield
+        finally:
+            with _DISPATCH_LOCK_GUARD:
+                remaining = _DISPATCH_LOCK_COUNTS.get(lock_key, 1) - 1
+                if remaining > 0:
+                    _DISPATCH_LOCK_COUNTS[lock_key] = remaining
+                else:
+                    _DISPATCH_LOCK_COUNTS.pop(lock_key, None)
+        return
+
+    lock_path = Path(lock_key)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        _acquire_file_lock(handle)
+        with _DISPATCH_LOCK_GUARD:
+            _DISPATCH_LOCK_COUNTS[lock_key] = 1
+        try:
+            yield
+        finally:
+            with _DISPATCH_LOCK_GUARD:
+                _DISPATCH_LOCK_COUNTS.pop(lock_key, None)
+            _release_file_lock(handle)
+    finally:
+        handle.close()
 EXECUTE_WATCHDOG_MIN_STALE_SECONDS = 300
 BRIDGE_TRANSPORT_ERROR_TYPES = {
     "ClaudeTmuxTerminalError",
@@ -45,6 +125,10 @@ BRIDGE_TRANSPORT_ERROR_TYPES = {
     "ClaudeTmuxSoftTimeoutNoProgress",
     "ClaudeTmuxTimeout",
     "TransientClaudeTmuxTransportApiError",
+}
+BRIDGE_NO_REPORT_ERROR_TYPES = {
+    "BridgeLeaderNoReport",
+    "RuntimeOwnedTeammateNoReport",
 }
 TRANSIENT_TRANSPORT_TEXT_MARKERS = (
     "econnreset",
@@ -55,7 +139,10 @@ TRANSIENT_TRANSPORT_TEXT_MARKERS = (
 )
 TEAMMATE_REPORT_LOSS_TEXT_MARKERS = (
     "teammate_report_missing",
+    "teammate_report_missing_or_transport_failure",
+    "teammate_report_collection_gap",
     "missing_teammates",
+    "missing_teammate_reports",
     "missing teammate",
     "missing implementor report",
     "no usable implementor report",
@@ -119,6 +206,7 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
     "bridge_call_prechecked": {
         "call_bridge_sdk_started": "bridge_call_started",
         "call_bridge_sdk_error": "bridge_call_failed",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "bridge_call_started": {
@@ -142,25 +230,37 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
     "team_create_started": {
         "team_create_succeeded": "team_create_completed",
         "team_create_failed": "team_create_failed",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "team_create_failed": {"bridge_result_returned": "bridge_window_failed"},
-    "team_create_completed": {"task_create_started": "task_create_started", "bridge_call_interrupted": "bridge_window_interrupted"},
+    "team_create_completed": {
+        "task_create_started": "task_create_started",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
+        "bridge_call_interrupted": "bridge_window_interrupted",
+    },
     "task_create_started": {
         "task_create_succeeded": "task_create_completed",
         "task_create_failed": "task_create_failed",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "task_create_failed": {"bridge_result_returned": "bridge_window_failed"},
     "task_create_completed": {
         "taskcreated_hook_accepted": "task_created_recorded",
         "taskcreated_hook_denied": "task_create_failed",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
-    "task_created_recorded": {"message_dispatch_started": "message_dispatch_started", "bridge_call_interrupted": "bridge_window_interrupted"},
+    "task_created_recorded": {
+        "message_dispatch_started": "message_dispatch_started",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
+        "bridge_call_interrupted": "bridge_window_interrupted",
+    },
     "message_dispatch_started": {
         "message_dispatch_succeeded": "message_dispatch_completed",
         "message_dispatch_failed": "message_dispatch_failed",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "message_dispatch_failed": {
@@ -175,6 +275,7 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "partial_evidence_collected": "bridge_window_partial_returned",
         "user_clarification_required": "blocked_for_user_clarification",
         "blocked_for_user_clarification": "blocked_for_user_clarification",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "team_waiting": {
@@ -222,6 +323,8 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
     "team_delete_started": {
         "team_delete_succeeded": "team_delete_completed",
         "team_delete_failed": "team_delete_failed",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
+        "orphan_timeout_without_heartbeat": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "team_delete_completed": {
@@ -421,6 +524,17 @@ def dispatch_workflow_event(
             runtime_runs_root = get_repo_runtime_root(control_root, str(event_repo_key))
     paths = ControlPaths.from_root(control_root, runtime_runs_root)
     run_id = str(event_payload.get("run_id") or "").strip()
+    if persist and run_id and not event_payload.get("_workflow_dispatch_lock_held"):
+        locked_payload = deepcopy(event_payload)
+        locked_payload["_workflow_dispatch_lock_held"] = True
+        with _workflow_dispatch_lock(paths, run_id):
+            return dispatch_workflow_event(
+                control_root,
+                locked_payload,
+                runtime_runs_root=runtime_runs_root,
+                repo_key=repo_key,
+                persist=persist,
+            )
     existing_run = load_json_file(paths.run_ledger_path(run_id), default={}) or {}
     event = WorkflowEvent.from_payload(event_payload, existing_run)
     if not event.run_id:
@@ -661,8 +775,12 @@ def _retry_scope_for_failure(event: WorkflowEvent, check_result: CheckResult, sn
         return "bridge_sdk_call"
     if event.event_kind == "bridge_result_returned_with_failure":
         bridge_error_type = _bridge_result_error_type(event.payload)
+        if bridge_error_type in BRIDGE_NO_REPORT_ERROR_TYPES:
+            return "teammate_report_missing"
         if bridge_error_type in BRIDGE_TRANSPORT_ERROR_TYPES:
             return "bridge_sdk_call"
+        if _bridge_result_reports_teammate_transport_loss(event.payload):
+            return "teammate_report_missing"
     if event.event_kind in {"bridge_result_returned", "bridge_result_returned_with_partial", "bridge_result_returned_with_cleanup_required"}:
         if _bridge_result_reports_teammate_transport_loss(event.payload):
             return "teammate_report_missing"
@@ -842,7 +960,17 @@ def _compact_text_facts(value: Any, *, _depth: int = 0) -> str:
 
 
 def _contains_any_marker(text: str, markers: tuple[str, ...]) -> bool:
-    return any(marker in text for marker in markers)
+    normalized_text = " ".join(str(text or "").lower().split())
+    squashed_text = "".join(normalized_text.split())
+    for marker in markers:
+        normalized_marker = " ".join(str(marker or "").lower().split())
+        if not normalized_marker:
+            continue
+        if normalized_marker in normalized_text:
+            return True
+        if "".join(normalized_marker.split()) in squashed_text:
+            return True
+    return False
 
 
 def _packet_hash_for_retry(event: WorkflowEvent, run_ledger: dict[str, Any]) -> str | None:

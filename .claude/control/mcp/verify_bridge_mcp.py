@@ -121,7 +121,7 @@ def main() -> int:
             not isinstance(model_binding, dict)
             or model_binding.get("model") != "gpt-main"
             or model_binding.get("agent_tool_model_field") != "system_payload_must_be_absent"
-            or model_binding.get("tolerated_schema_carrier") != "sonnet"
+            or "tolerated_schema_carrier" in model_binding
         ):
             print(f"dispatch_contract model_binding mismatch for {teammate_name}: {teammate}", file=sys.stderr)
             return 1

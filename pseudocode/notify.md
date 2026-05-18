@@ -130,7 +130,7 @@ function notify(ctx: RuntimeContext, trigger, source_result_or_null) -> NotifyRe
             )
 
     if trigger == "post_bridge_return":
-        if snapshot.last_bridge_result is not null and snapshot.last_bridge_result.status in {"partial","partial_or_failed"}:
+        if snapshot.last_bridge_result.is_partial:
             notify_items.append(
                 NotifyItem(
                     level="warn",
@@ -140,138 +140,6 @@ function notify(ctx: RuntimeContext, trigger, source_result_or_null) -> NotifyRe
                     recommended_action_or_null="decide retry, followup task, or reroute"
                 )
             )
-
-        if snapshot.last_bridge_result is not null and snapshot.last_bridge_result.status == "failed":
-            notify_items.append(
-                NotifyItem(
-                    level="error",
-                    category="bridge_result_failed",
-                    message="bridge returned failed result",
-                    related_ids=collect_bridge_result_ids(snapshot.last_bridge_result),
-                    recommended_action_or_null="read_runtime_snapshot_and_decide_retry_or_report"
-                )
-            )
-
-        if snapshot.last_bridge_result is not null and snapshot.last_bridge_result.cleanup_required:
-            notify_items.append(
-                NotifyItem(
-                    level="warn",
-                    category="cleanup_required",
-                    message="bridge returned with cleanup still required",
-                    related_ids=collect_bridge_result_ids(snapshot.last_bridge_result),
-                    recommended_action_or_null="schedule_cleanup_followup_or_report_cleanup_risk"
-                )
-            )
-
-    if trigger == "bridge_call_failed":
-        notify_items.append(
-            NotifyItem(
-                level="error",
-                category="bridge_call_failed",
-                message="main-leader bridge sdk call failed before normal bridge result",
-                related_ids=collect_related_ids(ctx, source_result_or_null),
-                recommended_action_or_null="read_runtime_snapshot_and_decide_retry_or_report"
-            )
-        )
-
-    if trigger == "bridge_window_orphaned":
-        notify_items.append(
-            NotifyItem(
-                level="blocking",
-                category="bridge_window_orphaned",
-                message="bridge window has start/open events but no normal return before timeout",
-                related_ids=collect_related_ids(ctx, source_result_or_null),
-                recommended_action_or_null="recover_or_mark_failed_before_dispatching_new_dependent_work"
-            )
-        )
-
-    if trigger == "bridge_packet_rejected":
-        notify_items.append(
-            NotifyItem(
-                level="error",
-                category="bridge_packet_rejected",
-                message="bridge-leader rejected the packet",
-                related_ids=collect_related_ids(ctx, source_result_or_null),
-                recommended_action_or_null="rebuild_packet_from_runtime_truth_or_report_blocked"
-            )
-        )
-
-    if trigger == "team_create_failed":
-        notify_items.append(
-            NotifyItem(
-                level="error",
-                category="team_create_failed",
-                message="bridge-leader failed to create team",
-                related_ids=collect_related_ids(ctx, source_result_or_null),
-                recommended_action_or_null="retry_bridge_window_or_report_failure"
-            )
-        )
-
-    if trigger == "task_create_failed":
-        notify_items.append(
-            NotifyItem(
-                level="error",
-                category="task_create_failed",
-                message="bridge-leader failed to create or record task",
-                related_ids=collect_related_ids(ctx, source_result_or_null),
-                recommended_action_or_null="delete_team_if_created_then_rebuild_task_packet"
-            )
-        )
-
-    if trigger == "message_dispatch_failed":
-        notify_items.append(
-            NotifyItem(
-                level="warn",
-                category="message_dispatch_failed",
-                message="bridge-leader failed to dispatch teammate message",
-                related_ids=collect_related_ids(ctx, source_result_or_null),
-                recommended_action_or_null="retry_send_or_fail_task_inside_same_bridge_window"
-            )
-        )
-
-    if trigger == "team_waiting":
-        notify_items.append(
-            NotifyItem(
-                level="info",
-                category="team_waiting",
-                message="team is waiting for long-running work or owned process results",
-                related_ids=collect_related_ids(ctx, source_result_or_null),
-                recommended_action_or_null="continue_waiting_or_poll_according_to_timeout_policy"
-            )
-        )
-
-    if trigger == "team_wait_timeout":
-        notify_items.append(
-            NotifyItem(
-                level="error",
-                category="team_wait_timeout",
-                message="team wait timed out or owned process was lost",
-                related_ids=collect_related_ids(ctx, source_result_or_null),
-                recommended_action_or_null="collect_partial_evidence_then_decide_retry_or_fail"
-            )
-        )
-
-    if trigger == "task_completion_rejected":
-        notify_items.append(
-            NotifyItem(
-                level="warn",
-                category="task_completion_rejected",
-                message="task completion contract is not satisfied",
-                related_ids=collect_related_ids(ctx, source_result_or_null),
-                recommended_action_or_null="continue_waiting_retry_collection_or_fail_task"
-            )
-        )
-
-    if trigger == "team_delete_failed":
-        notify_items.append(
-            NotifyItem(
-                level="warn",
-                category="team_delete_failed",
-                message="team deletion failed after task/window work",
-                related_ids=collect_related_ids(ctx, source_result_or_null),
-                recommended_action_or_null="mark_cleanup_required_and_schedule_cleanup_followup"
-            )
-        )
 
     # ----------------------------------------
     # 4. dedupe + prioritize

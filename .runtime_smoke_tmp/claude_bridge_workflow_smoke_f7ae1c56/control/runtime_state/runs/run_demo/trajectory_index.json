@@ -1,0 +1,152 @@
+{
+  "schema_version": "0.1.0",
+  "updated_at": "2026-05-17T09:17:16.933605+00:00",
+  "repo_key": "unscoped_repo",
+  "run_id": "run_demo",
+  "step_count": 200,
+  "latest_step": {
+    "trajectory_id": "traj_000200",
+    "step_index": 200,
+    "timestamp": "2026-05-17T09:17:16.929166+00:00",
+    "action_kind": "workflow_event"
+  },
+  "artifact_producers": {
+    "artifact": "traj_000032",
+    "log_manifest": "traj_000032",
+    "{'schema_version': 'artifact_ref.v1', 'ref_type': 'log_manifest', 'id': 'art_04863287184d9f13', 'path': 'C:\\\\Users\\\\admin\\\\Desktop\\\\Structure-config-1\\\\log_manifest', 'sha256': None, 'producer': {'agent_id': 'bridge-leader', 'event_id': 'evt_95864c2c48614ec0'}, 'created_at': '2026-05-17T09:14:44.161047+00:00', 'safe_preview': 'log_manifest', 'run_id': 'run_demo', 'bridge_window_id': 'bw_run_demo_sub_f471505e45ed', 'team_id': 'team_d5b2094056a2', 'task_id': 'task_25cb813c6646'}": "traj_000061",
+    "{'schema_version': 'artifact_ref.v1', 'ref_type': 'log_manifest', 'id': 'art_04863287184d9f13', 'path': 'C:\\\\Users\\\\admin\\\\Desktop\\\\Structure-config-1\\\\log_manifest', 'sha256': None, 'producer': {'agent_id': 'bridge-leader', 'event_id': 'evt_6e4abc9c67cf426c'}, 'created_at': '2026-05-17T09:15:34.388197+00:00', 'safe_preview': 'log_manifest', 'run_id': 'run_demo', 'bridge_window_id': 'bw_run_demo_sub_821b9471058e', 'team_id': 'team_ca6c62b0cdd8', 'task_id': 'task_71a1ca820039'}": "traj_000128",
+    "{'schema_version': 'artifact_ref.v1', 'ref_type': 'log_manifest', 'id': 'art_4ea586f53fc17d97', 'path': 'C:\\\\Users\\\\admin\\\\Desktop\\\\Structure-config-1\\\\logs\\\\runs\\\\demo\\\\artifact_manifest.json', 'sha256': None, 'producer': {'agent_id': 'bridge-leader', 'event_id': 'evt_79dac481dc1743b8'}, 'created_at': '2026-05-17T09:17:08.264907+00:00', 'safe_preview': 'logs/runs/demo/artifact_manifest.json', 'run_id': 'run_demo', 'bridge_window_id': 'bw_run_demo_sub_168a024c88da', 'team_id': 'team_de24ec274dce', 'task_id': 'task_77abf4ceb350'}": "traj_000197"
+  },
+  "process_producers": {
+    "12345": "traj_000160"
+  },
+  "completion_checks": [
+    {
+      "trajectory_id": "traj_000032",
+      "step_index": 32,
+      "supporting_trajectory_refs": [
+        "traj_000031"
+      ],
+      "supports_refs": [
+        "traj_000031"
+      ],
+      "related_completion_check_refs": [
+        "completion_checks.jsonl:evt_24a23ff93bfd4316"
+      ],
+      "related_artifact_refs": [
+        "artifact",
+        "log_manifest"
+      ]
+    },
+    {
+      "trajectory_id": "traj_000035",
+      "step_index": 35,
+      "supporting_trajectory_refs": [
+        "traj_000034"
+      ],
+      "supports_refs": [
+        "traj_000034"
+      ],
+      "related_completion_check_refs": [],
+      "related_artifact_refs": []
+    },
+    {
+      "trajectory_id": "traj_000061",
+      "step_index": 61,
+      "supporting_trajectory_refs": [
+        "traj_000060"
+      ],
+      "supports_refs": [
+        "traj_000060"
+      ],
+      "related_completion_check_refs": [
+        "completion_checks.jsonl:evt_b9196d2349ad4059"
+      ],
+      "related_artifact_refs": [
+        "{'schema_version': 'artifact_ref.v1', 'ref_type': 'log_manifest', 'id': 'art_04863287184d9f13', 'path': 'C:\\\\Users\\\\admin\\\\Desktop\\\\Structure-config-1\\\\log_manifest', 'sha256': None, 'producer': {'agent_id': 'bridge-leader', 'event_id': 'evt_95864c2c48614ec0'}, 'created_at': '2026-05-17T09:14:44.161047+00:00', 'safe_preview': 'log_manifest', 'run_id': 'run_demo', 'bridge_window_id': 'bw_run_demo_sub_f471505e45ed', 'team_id': 'team_d5b2094056a2', 'task_id': 'task_25cb813c6646'}"
+      ]
+    },
+    {
+      "trajectory_id": "traj_000064",
+      "step_index": 64,
+      "supporting_trajectory_refs": [
+        "traj_000063"
+      ],
+      "supports_refs": [
+        "traj_000063"
+      ],
+      "related_completion_check_refs": [],
+      "related_artifact_refs": []
+    },
+    {
+      "trajectory_id": "traj_000128",
+      "step_index": 128,
+      "supporting_trajectory_refs": [
+        "traj_000127"
+      ],
+      "supports_refs": [
+        "traj_000127"
+      ],
+      "related_completion_check_refs": [
+        "completion_checks.jsonl:evt_8f962cc7630b4df5"
+      ],
+      "related_artifact_refs": [
+        "{'schema_version': 'artifact_ref.v1', 'ref_type': 'log_manifest', 'id': 'art_04863287184d9f13', 'path': 'C:\\\\Users\\\\admin\\\\Desktop\\\\Structure-config-1\\\\log_manifest', 'sha256': None, 'producer': {'agent_id': 'bridge-leader', 'event_id': 'evt_6e4abc9c67cf426c'}, 'created_at': '2026-05-17T09:15:34.388197+00:00', 'safe_preview': 'log_manifest', 'run_id': 'run_demo', 'bridge_window_id': 'bw_run_demo_sub_821b9471058e', 'team_id': 'team_ca6c62b0cdd8', 'task_id': 'task_71a1ca820039'}"
+      ]
+    },
+    {
+      "trajectory_id": "traj_000131",
+      "step_index": 131,
+      "supporting_trajectory_refs": [
+        "traj_000130"
+      ],
+      "supports_refs": [
+        "traj_000130"
+      ],
+      "related_completion_check_refs": [],
+      "related_artifact_refs": []
+    },
+    {
+      "trajectory_id": "traj_000178",
+      "step_index": 178,
+      "supporting_trajectory_refs": [
+        "traj_000177"
+      ],
+      "supports_refs": [
+        "traj_000177"
+      ],
+      "related_completion_check_refs": [
+        "completion_checks.jsonl:evt_ab9356c8b28240db"
+      ],
+      "related_artifact_refs": []
+    },
+    {
+      "trajectory_id": "traj_000197",
+      "step_index": 197,
+      "supporting_trajectory_refs": [
+        "traj_000196"
+      ],
+      "supports_refs": [
+        "traj_000196"
+      ],
+      "related_completion_check_refs": [
+        "completion_checks.jsonl:evt_13999888ed144c4f"
+      ],
+      "related_artifact_refs": [
+        "{'schema_version': 'artifact_ref.v1', 'ref_type': 'log_manifest', 'id': 'art_4ea586f53fc17d97', 'path': 'C:\\\\Users\\\\admin\\\\Desktop\\\\Structure-config-1\\\\logs\\\\runs\\\\demo\\\\artifact_manifest.json', 'sha256': None, 'producer': {'agent_id': 'bridge-leader', 'event_id': 'evt_79dac481dc1743b8'}, 'created_at': '2026-05-17T09:17:08.264907+00:00', 'safe_preview': 'logs/runs/demo/artifact_manifest.json', 'run_id': 'run_demo', 'bridge_window_id': 'bw_run_demo_sub_168a024c88da', 'team_id': 'team_de24ec274dce', 'task_id': 'task_77abf4ceb350'}"
+      ]
+    },
+    {
+      "trajectory_id": "traj_000200",
+      "step_index": 200,
+      "supporting_trajectory_refs": [
+        "traj_000199"
+      ],
+      "supports_refs": [
+        "traj_000199"
+      ],
+      "related_completion_check_refs": [],
+      "related_artifact_refs": []
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "repo_key": "target_repo_5a3722a795d5",
+  "repo_root": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\target_repo",
+  "display_name": "target_repo",
+  "git": {
+    "remote_url_hash": "e2c9466d051ac389",
+    "current_branch": "master",
+    "head_sha": "deec28cd55a5e6003be18b5701394c3d36d0f3ba"
+  },
+  "created_at": "2026-05-17T09:14:23.863220+00:00",
+  "last_seen_at": "2026-05-17T09:14:29.967923+00:00",
+  "runtime_schema_version": 2,
+  "is_active": true
+}

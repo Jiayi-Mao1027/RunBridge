@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1.0",
+  "checkpoint_id": "chkpt_000005_evt_6f882f0ee7c142fa",
+  "sequence": 5,
+  "timestamp": "2026-05-17T09:14:21.163722+00:00",
+  "repo_key": "unscoped_repo",
+  "run_id": "run_demo",
+  "event_id": "evt_6f882f0ee7c142fa",
+  "event_kind": "bridge_packet_accepted",
+  "state": {
+    "repo_key": "unscoped_repo",
+    "run_id": "run_demo",
+    "phase": "leader_freeze",
+    "lifecycle_state": "bridge_packet_accepted",
+    "graph_node": "bridge_packet_accepted",
+    "active_bridge_window_id": "bw_user_clarification",
+    "active_team_id": null,
+    "active_task_id": null,
+    "frozen_semantics_hash": null,
+    "packet_hash": "f2c59ccd74c4267bb925c269",
+    "completion_contract_hash": "0af213370df77f9ef9f651db",
+    "retry_context": {},
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": []
+  },
+  "state_hash": "cd4c78eb7797f69143bc769e",
+  "snapshot_hash": "a9514ae16cd4406ba089d200"
+}

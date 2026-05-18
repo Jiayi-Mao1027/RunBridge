@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1.0",
+  "checkpoint_id": "chkpt_000029_evt_9217bee644954879",
+  "sequence": 29,
+  "timestamp": "2026-05-17T09:14:23.192043+00:00",
+  "repo_key": "unscoped_repo",
+  "run_id": "run_demo",
+  "event_id": "evt_9217bee644954879",
+  "event_kind": "message_dispatch_succeeded",
+  "state": {
+    "repo_key": "unscoped_repo",
+    "run_id": "run_demo",
+    "phase": "leader_freeze",
+    "lifecycle_state": "message_dispatch_completed",
+    "graph_node": "message_dispatch_completed",
+    "active_bridge_window_id": "bw_success",
+    "active_team_id": "team_success",
+    "active_task_id": "task_success",
+    "frozen_semantics_hash": null,
+    "packet_hash": "2adcaf8a27651c38b8fb897e",
+    "completion_contract_hash": "0af213370df77f9ef9f651db",
+    "retry_context": {},
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": []
+  },
+  "state_hash": "59b57e3c3a1df51e0efbe70d",
+  "snapshot_hash": "896699bcd0cb3fd7755eee35"
+}

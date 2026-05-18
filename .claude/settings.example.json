@@ -11,26 +11,6 @@
   },
   "agent": "leader-orchestrator",
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python ../.claude/hooks/hook_session_start.py"
-          }
-        ]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python ../.claude/hooks/hook_session_start.py"
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -43,7 +23,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": ".*",
+        "matcher": "mcp__bridge__call_bridge_sdk|call_bridge_sdk|team_create|task_create|send_messages|send_message|task_complete|team_delete",
         "hooks": [
           {
             "type": "command",
@@ -54,7 +34,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": ".*",
+        "matcher": "mcp__bridge__call_bridge_sdk|call_bridge_sdk|team_create|task_create|send_messages|send_message|team_delete",
         "hooks": [
           {
             "type": "command",

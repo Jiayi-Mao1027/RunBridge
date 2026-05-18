@@ -1,0 +1,1297 @@
+{
+  "schema_version": "0.2.0",
+  "workflow_name": "bridge_window_workflow",
+  "description": "Native RunBridge state graph. Nodes mirror phase routing and bridge lifecycle states without introducing a LangGraph dependency.",
+  "nodes": [
+    {
+      "id": "read_runtime_truth",
+      "description": "Read ledgers, snapshot, observer indexes, and repo registry truth",
+      "type": "control"
+    },
+    {
+      "id": "freeze_semantics",
+      "description": "Freeze execution-relevant user semantics and scope",
+      "type": "control"
+    },
+    {
+      "id": "validate_route",
+      "description": "Validate target phase and route against policy",
+      "type": "control"
+    },
+    {
+      "id": "build_bridge_packet",
+      "description": "Build one BridgePacket for one bridge invocation",
+      "type": "control"
+    },
+    {
+      "id": "bridge_call_intended",
+      "description": "Main leader intends to call the bridge SDK",
+      "type": "lifecycle"
+    },
+    {
+      "id": "bridge_call_prechecked",
+      "description": "Bridge call was allowed by main-leader pretool guard",
+      "type": "lifecycle"
+    },
+    {
+      "id": "bridge_call_started",
+      "description": "Bridge SDK call started",
+      "type": "lifecycle"
+    },
+    {
+      "id": "bridge_window_opened",
+      "description": "Bridge leader opened the bridge window",
+      "type": "lifecycle"
+    },
+    {
+      "id": "bridge_packet_accepted",
+      "description": "Bridge leader accepted the packet boundary",
+      "type": "lifecycle"
+    },
+    {
+      "id": "bridge_packet_rejected",
+      "description": "Bridge leader rejected the packet boundary",
+      "type": "terminal"
+    },
+    {
+      "id": "team_create_started",
+      "description": "Bridge team creation started",
+      "type": "lifecycle"
+    },
+    {
+      "id": "team_create_completed",
+      "description": "Bridge team creation completed",
+      "type": "lifecycle"
+    },
+    {
+      "id": "team_create_failed",
+      "description": "Bridge team creation failed",
+      "type": "failure"
+    },
+    {
+      "id": "task_create_started",
+      "description": "Bridge task creation started",
+      "type": "lifecycle"
+    },
+    {
+      "id": "task_create_completed",
+      "description": "Bridge task creation completed",
+      "type": "lifecycle"
+    },
+    {
+      "id": "task_create_failed",
+      "description": "Bridge task creation failed",
+      "type": "failure"
+    },
+    {
+      "id": "task_created_recorded",
+      "description": "TaskCreated hook accepted and recorded the task binding",
+      "type": "lifecycle"
+    },
+    {
+      "id": "message_dispatch_started",
+      "description": "Teammate message dispatch started",
+      "type": "lifecycle"
+    },
+    {
+      "id": "message_dispatch_completed",
+      "description": "Teammate message dispatch completed",
+      "type": "lifecycle"
+    },
+    {
+      "id": "message_dispatch_failed",
+      "description": "Teammate message dispatch failed",
+      "type": "failure"
+    },
+    {
+      "id": "team_waiting",
+      "description": "Bridge team is waiting or process polling",
+      "type": "lifecycle"
+    },
+    {
+      "id": "team_wait_timeout",
+      "description": "Bridge team wait timed out or process was lost",
+      "type": "failure"
+    },
+    {
+      "id": "blocked_for_user_clarification",
+      "description": "Bridge task blocked for user clarification",
+      "type": "pause"
+    },
+    {
+      "id": "paused_for_user_answer",
+      "description": "Bridge result returned a user clarification request",
+      "type": "pause",
+      "terminal": true
+    },
+    {
+      "id": "user_answer_received",
+      "description": "Main leader recorded the user answer",
+      "type": "pause",
+      "terminal": true
+    },
+    {
+      "id": "resume_same_l3_task",
+      "description": "Runtime marked the same L3 task for resume",
+      "type": "pause",
+      "terminal": true
+    },
+    {
+      "id": "continuation_of_previous_l3",
+      "description": "Next L3 bridge call continues the previous user-answer context",
+      "type": "pause",
+      "terminal": true
+    },
+    {
+      "id": "task_completion_started",
+      "description": "Completion artifacts and reports are being validated",
+      "type": "lifecycle"
+    },
+    {
+      "id": "task_completion_rejected",
+      "description": "Completion contract was rejected",
+      "type": "failure"
+    },
+    {
+      "id": "task_completion_completed",
+      "description": "Completion contract was satisfied",
+      "type": "lifecycle"
+    },
+    {
+      "id": "task_failed",
+      "description": "Bridge task failed",
+      "type": "failure"
+    },
+    {
+      "id": "team_delete_started",
+      "description": "Bridge team deletion started",
+      "type": "lifecycle"
+    },
+    {
+      "id": "team_delete_completed",
+      "description": "Bridge team deletion completed",
+      "type": "lifecycle"
+    },
+    {
+      "id": "team_delete_failed",
+      "description": "Bridge team deletion failed",
+      "type": "failure"
+    },
+    {
+      "id": "bridge_call_denied",
+      "description": "Bridge call denied by runtime guard",
+      "type": "terminal",
+      "terminal": true
+    },
+    {
+      "id": "bridge_call_failed",
+      "description": "Bridge SDK call failed",
+      "type": "terminal",
+      "terminal": true
+    },
+    {
+      "id": "bridge_window_returned",
+      "description": "Bridge result returned successfully",
+      "type": "terminal",
+      "terminal": true
+    },
+    {
+      "id": "bridge_window_failed",
+      "description": "Bridge window returned failure",
+      "type": "terminal",
+      "terminal": true
+    },
+    {
+      "id": "bridge_window_partial_returned",
+      "description": "Bridge window returned partial evidence",
+      "type": "terminal",
+      "terminal": true
+    },
+    {
+      "id": "bridge_window_orphaned",
+      "description": "Bridge window was marked orphaned",
+      "type": "terminal",
+      "terminal": true
+    },
+    {
+      "id": "bridge_window_interrupted",
+      "description": "Bridge window was interrupted",
+      "type": "terminal",
+      "terminal": true
+    },
+    {
+      "id": "retry_attempt_scheduled",
+      "description": "Runtime scheduled a bounded retry or repair action",
+      "type": "recovery"
+    },
+    {
+      "id": "enter_anomaly",
+      "description": "Runtime routed the run to anomaly analysis",
+      "type": "recovery"
+    },
+    {
+      "id": "terminal_failure",
+      "description": "Terminal failed bridge/window state",
+      "type": "terminal",
+      "terminal": true
+    }
+  ],
+  "edges": [
+    {
+      "id": "runtime_truth_to_freeze",
+      "from": "read_runtime_truth",
+      "to": "freeze_semantics",
+      "event_kinds": [
+        "session_started",
+        "user_prompt_submitted",
+        "semantic_frozen"
+      ]
+    },
+    {
+      "id": "freeze_to_route",
+      "from": "freeze_semantics",
+      "to": "validate_route",
+      "event_kinds": [
+        "phase_advanced",
+        "route_rerouted"
+      ]
+    },
+    {
+      "id": "phase_routes_policy",
+      "from": "validate_route",
+      "to": "build_bridge_packet",
+      "phase_routes": [
+        [
+          "leader_freeze",
+          "l2_advisory"
+        ],
+        [
+          "leader_freeze",
+          "l3_bridge"
+        ],
+        [
+          "l2_advisory",
+          "l3_bridge"
+        ],
+        [
+          "l3_bridge",
+          "l3_bridge"
+        ],
+        [
+          "l3_bridge",
+          "leader_freeze"
+        ],
+        [
+          "l3_bridge",
+          "l2_advisory"
+        ],
+        [
+          "l3_bridge",
+          "l4_implement"
+        ],
+        [
+          "l3_bridge",
+          "l4_execute"
+        ],
+        [
+          "l3_bridge",
+          "l4_anomaly"
+        ],
+        [
+          "l4_implement",
+          "l4_execute"
+        ],
+        [
+          "l4_implement",
+          "l4_anomaly"
+        ],
+        [
+          "l4_execute",
+          "l4_anomaly"
+        ],
+        [
+          "l4_execute",
+          "l4_implement"
+        ],
+        [
+          "l4_anomaly",
+          "l3_bridge"
+        ],
+        [
+          "l4_anomaly",
+          "l4_implement"
+        ],
+        [
+          "l4_anomaly",
+          "l4_execute"
+        ]
+      ]
+    },
+    {
+      "id": "start_window_from_runtime_truth",
+      "from": "read_runtime_truth",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_window_from_freeze",
+      "from": "freeze_semantics",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_window_from_route",
+      "from": "validate_route",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_window_from_packet",
+      "from": "build_bridge_packet",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_after_return",
+      "from": "bridge_window_returned",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_after_failed",
+      "from": "bridge_window_failed",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_after_partial",
+      "from": "bridge_window_partial_returned",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_after_orphan",
+      "from": "bridge_window_orphaned",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_after_interrupted",
+      "from": "bridge_window_interrupted",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_after_call_failed",
+      "from": "bridge_call_failed",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_after_terminal_failure",
+      "from": "terminal_failure",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_after_denied",
+      "from": "bridge_call_denied",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_after_user_answer_continuation",
+      "from": "continuation_of_previous_l3",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "start_after_retry_marker",
+      "from": "retry_attempt_scheduled",
+      "to": "bridge_call_intended",
+      "event_kinds": [
+        "bridge_call_intended"
+      ]
+    },
+    {
+      "id": "pretool_denied_without_intent",
+      "from": "read_runtime_truth",
+      "to": "bridge_call_denied",
+      "event_kinds": [
+        "pretooluse_denied_by_main_leader"
+      ]
+    },
+    {
+      "id": "bridge_intent_prechecked",
+      "from": "bridge_call_intended",
+      "to": "bridge_call_prechecked",
+      "event_kinds": [
+        "pretooluse_allowed_by_main_leader"
+      ]
+    },
+    {
+      "id": "bridge_intent_denied",
+      "from": "bridge_call_intended",
+      "to": "bridge_call_denied",
+      "event_kinds": [
+        "pretooluse_denied_by_main_leader"
+      ]
+    },
+    {
+      "id": "bridge_intent_interrupted",
+      "from": "bridge_call_intended",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "bridge_prechecked_started",
+      "from": "bridge_call_prechecked",
+      "to": "bridge_call_started",
+      "event_kinds": [
+        "call_bridge_sdk_started"
+      ]
+    },
+    {
+      "id": "bridge_prechecked_failed",
+      "from": "bridge_call_prechecked",
+      "to": "terminal_failure",
+      "event_kinds": [
+        "call_bridge_sdk_error"
+      ]
+    },
+    {
+      "id": "bridge_prechecked_interrupted",
+      "from": "bridge_call_prechecked",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "bridge_started_window_opened",
+      "from": "bridge_call_started",
+      "to": "bridge_window_opened",
+      "event_kinds": [
+        "bridge_window_opened"
+      ]
+    },
+    {
+      "id": "bridge_started_failed",
+      "from": "bridge_call_started",
+      "to": "terminal_failure",
+      "event_kinds": [
+        "call_bridge_sdk_error"
+      ]
+    },
+    {
+      "id": "bridge_started_orphaned",
+      "from": "bridge_call_started",
+      "to": "bridge_window_orphaned",
+      "event_kinds": [
+        "orphan_timeout_without_bridge_return"
+      ]
+    },
+    {
+      "id": "bridge_started_interrupted",
+      "from": "bridge_call_started",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "window_opened_packet_accepted",
+      "from": "bridge_window_opened",
+      "to": "bridge_packet_accepted",
+      "event_kinds": [
+        "bridge_packet_accepted"
+      ]
+    },
+    {
+      "id": "window_opened_packet_rejected",
+      "from": "bridge_window_opened",
+      "to": "bridge_packet_rejected",
+      "event_kinds": [
+        "bridge_packet_rejected"
+      ]
+    },
+    {
+      "id": "window_opened_orphaned",
+      "from": "bridge_window_opened",
+      "to": "bridge_window_orphaned",
+      "event_kinds": [
+        "orphan_timeout_without_bridge_return"
+      ]
+    },
+    {
+      "id": "window_opened_interrupted",
+      "from": "bridge_window_opened",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "packet_rejected_returned",
+      "from": "bridge_packet_rejected",
+      "to": "bridge_window_returned",
+      "event_kinds": [
+        "bridge_result_returned"
+      ]
+    },
+    {
+      "id": "packet_accepted_team_create_started",
+      "from": "bridge_packet_accepted",
+      "to": "team_create_started",
+      "event_kinds": [
+        "team_create_started"
+      ]
+    },
+    {
+      "id": "packet_accepted_orphaned",
+      "from": "bridge_packet_accepted",
+      "to": "bridge_window_orphaned",
+      "event_kinds": [
+        "orphan_timeout_without_bridge_return"
+      ]
+    },
+    {
+      "id": "packet_accepted_interrupted",
+      "from": "bridge_packet_accepted",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "team_create_succeeded",
+      "from": "team_create_started",
+      "to": "team_create_completed",
+      "event_kinds": [
+        "team_create_succeeded"
+      ]
+    },
+    {
+      "id": "team_create_failed",
+      "from": "team_create_started",
+      "to": "team_create_failed",
+      "event_kinds": [
+        "team_create_failed"
+      ]
+    },
+    {
+      "id": "team_create_interrupted",
+      "from": "team_create_started",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "team_create_failure_returned",
+      "from": "team_create_failed",
+      "to": "bridge_window_failed",
+      "event_kinds": [
+        "bridge_result_returned"
+      ]
+    },
+    {
+      "id": "team_created_task_started",
+      "from": "team_create_completed",
+      "to": "task_create_started",
+      "event_kinds": [
+        "task_create_started"
+      ]
+    },
+    {
+      "id": "team_created_interrupted",
+      "from": "team_create_completed",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "task_create_succeeded",
+      "from": "task_create_started",
+      "to": "task_create_completed",
+      "event_kinds": [
+        "task_create_succeeded"
+      ]
+    },
+    {
+      "id": "task_create_failed",
+      "from": "task_create_started",
+      "to": "task_create_failed",
+      "event_kinds": [
+        "task_create_failed"
+      ]
+    },
+    {
+      "id": "task_create_interrupted",
+      "from": "task_create_started",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "task_create_failure_returned",
+      "from": "task_create_failed",
+      "to": "bridge_window_failed",
+      "event_kinds": [
+        "bridge_result_returned"
+      ]
+    },
+    {
+      "id": "task_created_recorded",
+      "from": "task_create_completed",
+      "to": "task_created_recorded",
+      "event_kinds": [
+        "taskcreated_hook_accepted"
+      ]
+    },
+    {
+      "id": "taskcreated_hook_denied",
+      "from": "task_create_completed",
+      "to": "task_create_failed",
+      "event_kinds": [
+        "taskcreated_hook_denied"
+      ]
+    },
+    {
+      "id": "task_created_interrupted",
+      "from": "task_create_completed",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "task_recorded_dispatch_started",
+      "from": "task_created_recorded",
+      "to": "message_dispatch_started",
+      "event_kinds": [
+        "message_dispatch_started"
+      ]
+    },
+    {
+      "id": "task_recorded_interrupted",
+      "from": "task_created_recorded",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "dispatch_succeeded",
+      "from": "message_dispatch_started",
+      "to": "message_dispatch_completed",
+      "event_kinds": [
+        "message_dispatch_succeeded"
+      ]
+    },
+    {
+      "id": "dispatch_failed",
+      "from": "message_dispatch_started",
+      "to": "message_dispatch_failed",
+      "event_kinds": [
+        "message_dispatch_failed"
+      ]
+    },
+    {
+      "id": "dispatch_interrupted",
+      "from": "message_dispatch_started",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "dispatch_retry_started",
+      "from": "message_dispatch_failed",
+      "to": "message_dispatch_started",
+      "event_kinds": [
+        "message_dispatch_retry_started"
+      ]
+    },
+    {
+      "id": "dispatch_failed_task_failed",
+      "from": "message_dispatch_failed",
+      "to": "task_failed",
+      "event_kinds": [
+        "bridge_leader_fails_task"
+      ]
+    },
+    {
+      "id": "dispatch_failed_returned",
+      "from": "message_dispatch_failed",
+      "to": "bridge_window_failed",
+      "event_kinds": [
+        "bridge_result_returned"
+      ]
+    },
+    {
+      "id": "dispatch_completed_waiting",
+      "from": "message_dispatch_completed",
+      "to": "team_waiting",
+      "event_kinds": [
+        "team_idle_waiting"
+      ]
+    },
+    {
+      "id": "dispatch_completed_executor_failed",
+      "from": "message_dispatch_completed",
+      "to": "task_failed",
+      "event_kinds": [
+        "team_executor_failed"
+      ]
+    },
+    {
+      "id": "dispatch_completed_artifacts_ready",
+      "from": "message_dispatch_completed",
+      "to": "task_completion_started",
+      "event_kinds": [
+        "artifacts_ready"
+      ]
+    },
+    {
+      "id": "dispatch_completed_partial",
+      "from": "message_dispatch_completed",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "partial_evidence_collected"
+      ]
+    },
+    {
+      "id": "dispatch_completed_user_clarification",
+      "from": "message_dispatch_completed",
+      "to": "blocked_for_user_clarification",
+      "event_kinds": [
+        "user_clarification_required",
+        "blocked_for_user_clarification"
+      ]
+    },
+    {
+      "id": "dispatch_completed_interrupted",
+      "from": "message_dispatch_completed",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "team_waiting_heartbeat",
+      "from": "team_waiting",
+      "to": "team_waiting",
+      "event_kinds": [
+        "team_idle_waiting"
+      ]
+    },
+    {
+      "id": "team_waiting_artifacts_ready",
+      "from": "team_waiting",
+      "to": "task_completion_started",
+      "event_kinds": [
+        "artifacts_ready"
+      ]
+    },
+    {
+      "id": "team_waiting_partial",
+      "from": "team_waiting",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "partial_evidence_collected"
+      ]
+    },
+    {
+      "id": "team_waiting_user_clarification",
+      "from": "team_waiting",
+      "to": "blocked_for_user_clarification",
+      "event_kinds": [
+        "user_clarification_required",
+        "blocked_for_user_clarification"
+      ]
+    },
+    {
+      "id": "team_waiting_timeout",
+      "from": "team_waiting",
+      "to": "team_wait_timeout",
+      "event_kinds": [
+        "wait_timeout_or_process_lost"
+      ]
+    },
+    {
+      "id": "team_waiting_task_failed",
+      "from": "team_waiting",
+      "to": "task_failed",
+      "event_kinds": [
+        "bridge_leader_fails_task",
+        "task_failed_by_bridge_leader"
+      ]
+    },
+    {
+      "id": "team_waiting_orphaned",
+      "from": "team_waiting",
+      "to": "bridge_window_orphaned",
+      "event_kinds": [
+        "orphan_timeout_without_heartbeat"
+      ]
+    },
+    {
+      "id": "team_waiting_interrupted",
+      "from": "team_waiting",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "clarification_returned",
+      "from": "blocked_for_user_clarification",
+      "to": "paused_for_user_answer",
+      "event_kinds": [
+        "bridge_result_returned_with_user_clarification_request",
+        "paused_for_user_answer"
+      ]
+    },
+    {
+      "id": "user_answer_received",
+      "from": "paused_for_user_answer",
+      "to": "user_answer_received",
+      "event_kinds": [
+        "user_answer_received"
+      ]
+    },
+    {
+      "id": "resume_same_l3_task",
+      "from": "user_answer_received",
+      "to": "resume_same_l3_task",
+      "event_kinds": [
+        "resume_same_l3_task"
+      ]
+    },
+    {
+      "id": "continuation_of_previous_l3",
+      "from": "resume_same_l3_task",
+      "to": "continuation_of_previous_l3",
+      "event_kinds": [
+        "continuation_of_previous_l3"
+      ]
+    },
+    {
+      "id": "team_wait_timeout_partial",
+      "from": "team_wait_timeout",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "partial_evidence_collected"
+      ]
+    },
+    {
+      "id": "team_wait_timeout_failed",
+      "from": "team_wait_timeout",
+      "to": "task_failed",
+      "event_kinds": [
+        "task_failed_by_bridge_leader"
+      ]
+    },
+    {
+      "id": "team_wait_timeout_returned",
+      "from": "team_wait_timeout",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "bridge_result_returned"
+      ]
+    },
+    {
+      "id": "team_wait_timeout_interrupted",
+      "from": "team_wait_timeout",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "completion_satisfied",
+      "from": "task_completion_started",
+      "to": "task_completion_completed",
+      "event_kinds": [
+        "completion_contract_satisfied"
+      ]
+    },
+    {
+      "id": "completion_rejected",
+      "from": "task_completion_started",
+      "to": "task_completion_rejected",
+      "event_kinds": [
+        "completion_contract_rejected"
+      ]
+    },
+    {
+      "id": "completion_interrupted",
+      "from": "task_completion_started",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "completion_rejected_continue_waiting",
+      "from": "task_completion_rejected",
+      "to": "team_waiting",
+      "event_kinds": [
+        "continue_waiting"
+      ]
+    },
+    {
+      "id": "completion_rejected_retry_artifacts",
+      "from": "task_completion_rejected",
+      "to": "task_completion_started",
+      "event_kinds": [
+        "retry_artifact_collection"
+      ]
+    },
+    {
+      "id": "completion_rejected_user_clarification",
+      "from": "task_completion_rejected",
+      "to": "blocked_for_user_clarification",
+      "event_kinds": [
+        "user_clarification_required",
+        "blocked_for_user_clarification"
+      ]
+    },
+    {
+      "id": "completion_rejected_task_failed",
+      "from": "task_completion_rejected",
+      "to": "task_failed",
+      "event_kinds": [
+        "bridge_leader_fails_task"
+      ]
+    },
+    {
+      "id": "completion_rejected_returned",
+      "from": "task_completion_rejected",
+      "to": "bridge_window_failed",
+      "event_kinds": [
+        "bridge_result_returned"
+      ]
+    },
+    {
+      "id": "completion_rejected_interrupted",
+      "from": "task_completion_rejected",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "completion_completed_team_delete",
+      "from": "task_completion_completed",
+      "to": "team_delete_started",
+      "event_kinds": [
+        "team_delete_started"
+      ]
+    },
+    {
+      "id": "completion_completed_interrupted",
+      "from": "task_completion_completed",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "task_failed_team_delete",
+      "from": "task_failed",
+      "to": "team_delete_started",
+      "event_kinds": [
+        "team_delete_started"
+      ]
+    },
+    {
+      "id": "task_failed_returned",
+      "from": "task_failed",
+      "to": "bridge_window_failed",
+      "event_kinds": [
+        "bridge_result_returned"
+      ]
+    },
+    {
+      "id": "task_failed_interrupted",
+      "from": "task_failed",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "partial_return_team_delete",
+      "from": "bridge_window_partial_returned",
+      "to": "team_delete_started",
+      "event_kinds": [
+        "team_delete_started"
+      ]
+    },
+    {
+      "id": "partial_return_interrupted",
+      "from": "bridge_window_partial_returned",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "team_delete_succeeded",
+      "from": "team_delete_started",
+      "to": "team_delete_completed",
+      "event_kinds": [
+        "team_delete_succeeded"
+      ]
+    },
+    {
+      "id": "team_delete_failed",
+      "from": "team_delete_started",
+      "to": "team_delete_failed",
+      "event_kinds": [
+        "team_delete_failed"
+      ]
+    },
+    {
+      "id": "team_delete_interrupted",
+      "from": "team_delete_started",
+      "to": "bridge_window_interrupted",
+      "event_kinds": [
+        "bridge_call_interrupted"
+      ]
+    },
+    {
+      "id": "team_deleted_returned",
+      "from": "team_delete_completed",
+      "to": "bridge_window_returned",
+      "event_kinds": [
+        "bridge_result_returned"
+      ]
+    },
+    {
+      "id": "team_deleted_failed_return",
+      "from": "team_delete_completed",
+      "to": "bridge_window_failed",
+      "event_kinds": [
+        "bridge_result_returned_with_failure"
+      ]
+    },
+    {
+      "id": "team_deleted_partial_return",
+      "from": "team_delete_completed",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "bridge_result_returned_with_partial"
+      ]
+    },
+    {
+      "id": "team_delete_failed_cleanup_return",
+      "from": "team_delete_failed",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "bridge_result_returned_with_cleanup_required"
+      ]
+    },
+    {
+      "id": "call_failed_retry_scheduled",
+      "from": "bridge_call_failed",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "terminal_failure_retry_scheduled",
+      "from": "terminal_failure",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "team_create_failed_retry_scheduled",
+      "from": "team_create_failed",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "task_create_failed_retry_scheduled",
+      "from": "task_create_failed",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "dispatch_failed_retry_scheduled",
+      "from": "message_dispatch_failed",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "wait_timeout_retry_scheduled",
+      "from": "team_wait_timeout",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "completion_rejected_retry_scheduled",
+      "from": "task_completion_rejected",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "task_failed_retry_scheduled",
+      "from": "task_failed",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "team_delete_failed_retry_scheduled",
+      "from": "team_delete_failed",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "window_returned_retry_scheduled",
+      "from": "bridge_window_returned",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "window_failed_retry_scheduled",
+      "from": "bridge_window_failed",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "window_partial_retry_scheduled",
+      "from": "bridge_window_partial_returned",
+      "to": "retry_attempt_scheduled",
+      "event_kinds": [
+        "retry_attempt_scheduled"
+      ]
+    },
+    {
+      "id": "retry_continue_waiting",
+      "from": "retry_attempt_scheduled",
+      "to": "team_waiting",
+      "event_kinds": [
+        "continue_waiting"
+      ]
+    },
+    {
+      "id": "retry_artifact_collection",
+      "from": "retry_attempt_scheduled",
+      "to": "task_completion_started",
+      "event_kinds": [
+        "retry_artifact_collection"
+      ]
+    },
+    {
+      "id": "retry_message_dispatch",
+      "from": "retry_attempt_scheduled",
+      "to": "message_dispatch_started",
+      "event_kinds": [
+        "message_dispatch_retry_started"
+      ]
+    },
+    {
+      "id": "retry_enter_anomaly",
+      "from": "retry_attempt_scheduled",
+      "to": "enter_anomaly",
+      "event_kinds": [
+        "enter_anomaly"
+      ]
+    },
+    {
+      "id": "failure_enter_anomaly_call",
+      "from": "bridge_call_failed",
+      "to": "enter_anomaly",
+      "event_kinds": [
+        "enter_anomaly"
+      ]
+    },
+    {
+      "id": "failure_enter_anomaly_completion",
+      "from": "task_completion_rejected",
+      "to": "enter_anomaly",
+      "event_kinds": [
+        "enter_anomaly"
+      ]
+    },
+    {
+      "id": "failure_enter_anomaly_wait",
+      "from": "team_wait_timeout",
+      "to": "enter_anomaly",
+      "event_kinds": [
+        "enter_anomaly"
+      ]
+    },
+    {
+      "id": "failure_enter_anomaly_window",
+      "from": "bridge_window_failed",
+      "to": "enter_anomaly",
+      "event_kinds": [
+        "enter_anomaly"
+      ]
+    },
+    {
+      "id": "enter_anomaly_terminal_failure",
+      "from": "enter_anomaly",
+      "to": "terminal_failure",
+      "event_kinds": [
+        "bridge_result_returned_with_failure",
+        "bridge_call_interrupted"
+      ]
+    }
+  ]
+}

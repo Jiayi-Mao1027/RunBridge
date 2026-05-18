@@ -1,0 +1,18 @@
+{
+  "schema_version": "outer_host_context.v1",
+  "written_at": "2026-05-17T09:14:30.227781+00:00",
+  "host_instance_id": "outer_host_bf281b895f17",
+  "repo_key": "target_repo_5a3722a795d5",
+  "repo_root": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\target_repo",
+  "run_id": "run_20260517T091424Z_0850ad",
+  "main_session_id": "outer_smoke_main",
+  "input_id": "in_1f6403ee8ece4f75",
+  "input_kind": "user_prompt",
+  "event_kind": "user_prompt_submitted",
+  "user_instruction": "record a CLI host input",
+  "target_phase": null,
+  "dispatch_intent": "inspect_only",
+  "task_spec": {},
+  "runtime_event_id": "evt_c73a858654fa4842",
+  "source": "outer_sdk_host"
+}

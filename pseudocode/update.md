@@ -9,23 +9,7 @@ function update(ctx: RuntimeContext, update_kind, checked_result: CheckResult) -
         actor=ctx.agent_type
     )
 
-    failure_update_kinds = {
-        "record_bridge_call_denied",
-        "record_bridge_call_failed",
-        "persist_bridge_packet_rejected",
-        "persist_team_create_failed",
-        "persist_task_create_failed",
-        "persist_message_dispatch_failed",
-        "persist_team_wait_timeout",
-        "persist_task_completion_rejected",
-        "persist_task_failed",
-        "persist_team_delete_failed",
-        "persist_bridge_window_orphaned"
-    }
-
-    # denied/failed events are still real lifecycle facts.
-    # they must be persisted when the update_kind is explicitly a failure/deny update.
-    if checked_result.decision != "allow" and update_kind not in failure_update_kinds:
+    if checked_result.decision != "allow":
         runtime.append_update_record(
             run_id=ctx.run_id,
             event_id=ctx.event_id,
@@ -73,106 +57,13 @@ function update(ctx: RuntimeContext, update_kind, checked_result: CheckResult) -
     # ----------------------------------------
     transitions = []
 
-    if update_kind == "record_bridge_call_intent":
-        transitions.append(
-            transition.build(
-                type="bridge_call_intended",
-                run_id=ctx.run_id,
-                main_session_id=ctx.main_session_id,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                tool_use_id=ctx.tool_use_id_or_null,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "record_bridge_call_prechecked":
-        transitions.append(
-            transition.build(
-                type="bridge_call_prechecked",
-                run_id=ctx.run_id,
-                main_session_id=ctx.main_session_id,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                tool_use_id=ctx.tool_use_id_or_null,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "record_bridge_call_denied":
-        transitions.append(
-            transition.build(
-                type="bridge_call_denied",
-                run_id=ctx.run_id,
-                main_session_id=ctx.main_session_id,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                tool_use_id=ctx.tool_use_id_or_null,
-                reasons=checked_result.reasons,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "record_bridge_call_failed":
-        transitions.append(
-            transition.build(
-                type="bridge_call_failed",
-                run_id=ctx.run_id,
-                main_session_id=ctx.main_session_id,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                tool_use_id=ctx.tool_use_id_or_null,
-                error=checked_result.normalized_payload.error_or_null,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "register_bridge_window_open":
+    if update_kind == "register_bridge_window_open":
         transitions.append(
             transition.build(
                 type="bridge_window_opened",
                 run_id=ctx.run_id,
                 main_session_id=ctx.main_session_id,
                 sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_bridge_packet_rejected":
-        transitions.append(
-            transition.build(
-                type="bridge_packet_rejected",
-                run_id=ctx.run_id,
-                main_session_id=ctx.main_session_id,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                reasons=checked_result.reasons,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_team_created":
-        transitions.append(
-            transition.build(
-                type="team_create_completed",
-                run_id=ctx.run_id,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_team_create_failed":
-        transitions.append(
-            transition.build(
-                type="team_create_failed",
-                run_id=ctx.run_id,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                error=checked_result.normalized_payload.error_or_null,
                 based_on_event=ctx.event_id
             )
         )
@@ -180,85 +71,10 @@ function update(ctx: RuntimeContext, update_kind, checked_result: CheckResult) -
     else if update_kind == "persist_task_created":
         transitions.append(
             transition.build(
-                type="task_created_recorded",
+                type="task_created",
                 run_id=ctx.run_id,
                 task_id=ctx.task_id_or_null,
                 sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_task_create_failed":
-        transitions.append(
-            transition.build(
-                type="task_create_failed",
-                run_id=ctx.run_id,
-                task_id=ctx.task_id_or_null,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                reasons=checked_result.reasons,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_message_dispatched":
-        transitions.append(
-            transition.build(
-                type="message_dispatch_completed",
-                run_id=ctx.run_id,
-                task_id=ctx.task_id_or_null,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                tool_use_id=ctx.tool_use_id_or_null,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_message_dispatch_failed":
-        transitions.append(
-            transition.build(
-                type="message_dispatch_failed",
-                run_id=ctx.run_id,
-                task_id=ctx.task_id_or_null,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                tool_use_id=ctx.tool_use_id_or_null,
-                error=checked_result.normalized_payload.error_or_null,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_team_waiting":
-        transitions.append(
-            transition.build(
-                type="team_waiting",
-                run_id=ctx.run_id,
-                task_id=ctx.task_id_or_null,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                wait_reason=checked_result.normalized_payload.wait_reason,
-                owned_process_refs=checked_result.normalized_payload.owned_process_refs,
-                last_heartbeat_at=checked_result.normalized_payload.last_heartbeat_at,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_team_wait_timeout":
-        transitions.append(
-            transition.build(
-                type="team_wait_timeout",
-                run_id=ctx.run_id,
-                task_id=ctx.task_id_or_null,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                evidence=checked_result.normalized_payload.evidence,
                 based_on_event=ctx.event_id
             )
         )
@@ -266,43 +82,10 @@ function update(ctx: RuntimeContext, update_kind, checked_result: CheckResult) -
     else if update_kind == "persist_task_completed":
         transitions.append(
             transition.build(
-                type="task_completion_completed",
+                type="task_completed",
                 run_id=ctx.run_id,
                 task_id=ctx.task_id_or_null,
                 sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                artifact_refs=checked_result.normalized_payload.artifact_refs,
-                reports=checked_result.normalized_payload.reports,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_task_completion_rejected":
-        transitions.append(
-            transition.build(
-                type="task_completion_rejected",
-                run_id=ctx.run_id,
-                task_id=ctx.task_id_or_null,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                missing_contract_items=checked_result.normalized_payload.missing_contract_items,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_task_failed":
-        transitions.append(
-            transition.build(
-                type="task_failed",
-                run_id=ctx.run_id,
-                task_id=ctx.task_id_or_null,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                evidence=checked_result.normalized_payload.evidence,
-                error=checked_result.normalized_payload.error_or_null,
                 based_on_event=ctx.event_id
             )
         )
@@ -310,60 +93,9 @@ function update(ctx: RuntimeContext, update_kind, checked_result: CheckResult) -
     else if update_kind == "persist_team_deleted":
         transitions.append(
             transition.build(
-                type="team_delete_completed",
+                type="team_deleted",
                 run_id=ctx.run_id,
                 sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_team_delete_failed":
-        transitions.append(
-            transition.build(
-                type="team_delete_failed",
-                run_id=ctx.run_id,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                cleanup_required=true,
-                error=checked_result.normalized_payload.error_or_null,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_bridge_result_returned":
-        transitions.append(
-            transition.build(
-                type=transition.resolve_bridge_result_type(checked_result.normalized_payload.bridge_result.status),
-                # resolve_bridge_result_type:
-                #   succeeded -> bridge_window_returned
-                #   rejected  -> bridge_window_returned
-                #   failed    -> bridge_window_failed
-                #   partial   -> bridge_window_partial_returned
-                #   partial_or_failed -> bridge_window_partial_returned
-                #   orphaned  -> bridge_window_orphaned
-                run_id=ctx.run_id,
-                main_session_id=ctx.main_session_id,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                team_id=ctx.team_id_or_null,
-                task_id=ctx.task_id_or_null,
-                bridge_result=checked_result.normalized_payload.bridge_result,
-                based_on_event=ctx.event_id
-            )
-        )
-
-    else if update_kind == "persist_bridge_window_orphaned":
-        transitions.append(
-            transition.build(
-                type="bridge_window_orphaned",
-                run_id=ctx.run_id,
-                main_session_id=ctx.main_session_id,
-                sub_session_id=ctx.sub_session_id_or_null,
-                bridge_window_id=ctx.bridge_window_id_or_null,
-                last_known_event_ref=checked_result.normalized_payload.last_known_event_ref,
                 based_on_event=ctx.event_id
             )
         )

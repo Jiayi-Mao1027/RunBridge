@@ -1,0 +1,63 @@
+{
+  "schema_version": "0.1.0",
+  "checkpoint_id": "chkpt_000056_evt_a8a386554b7e4b91",
+  "sequence": 56,
+  "timestamp": "2026-05-17T09:14:43.161612+00:00",
+  "repo_key": "unscoped_repo",
+  "run_id": "run_demo",
+  "event_id": "evt_a8a386554b7e4b91",
+  "event_kind": "task_create_succeeded",
+  "state": {
+    "repo_key": "unscoped_repo",
+    "run_id": "run_demo",
+    "phase": "leader_freeze",
+    "lifecycle_state": "task_create_completed",
+    "graph_node": "task_create_completed",
+    "active_bridge_window_id": "bw_run_demo_sub_f471505e45ed",
+    "active_team_id": "team_d5b2094056a2",
+    "active_task_id": "task_25cb813c6646",
+    "frozen_semantics_hash": null,
+    "packet_hash": "5e1fece0f813f45e029617ea",
+    "completion_contract_hash": "1fa9cc49b1d774cf296c3800",
+    "retry_context": {
+      "event_type": "retry_attempt_scheduled",
+      "timestamp": "2026-05-17T09:14:39.692529+00:00",
+      "repo_key": "unscoped_repo",
+      "run_id": "run_demo",
+      "bridge_window_id": "bw_failed",
+      "retry_scope": "bridge_sdk_call",
+      "attempt": 2,
+      "max_attempts": 3,
+      "delay_ms": 4000,
+      "packet_hash": "1532cd97a7a005e5dbd9a751",
+      "reason": {
+        "source_event_id": "evt_aaa91459e91a4009",
+        "source_event_kind": "call_bridge_sdk_error",
+        "check_decision": "allow",
+        "check_reasons": [],
+        "error_type": "sdk failed",
+        "retryable": true
+      },
+      "retryable": true,
+      "exhausted": false,
+      "next_action": "retry_same_packet",
+      "source_event_id": "evt_aaa91459e91a4009",
+      "source_event_kind": "call_bridge_sdk_error",
+      "same_packet_boundary_required": true,
+      "retry_action": {
+        "kind": "retry_bridge_sdk_call",
+        "allowed": true,
+        "requires_new_bridge_window": false,
+        "requires_same_packet": true,
+        "requires_user": false
+      }
+    },
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": []
+  },
+  "state_hash": "45fe5175ad4118c463932ac3",
+  "snapshot_hash": "67d33e014b874cd79c70ce2e"
+}

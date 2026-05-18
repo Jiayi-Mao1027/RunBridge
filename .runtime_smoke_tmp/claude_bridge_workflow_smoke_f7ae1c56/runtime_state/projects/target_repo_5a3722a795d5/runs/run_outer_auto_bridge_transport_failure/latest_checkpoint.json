@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "chkpt_000001_evt_cfc1a1e6aef74afa",
+  "sequence": 1,
+  "timestamp": "2026-05-17T09:14:27.626010+00:00",
+  "repo_key": "target_repo_5a3722a795d5",
+  "run_id": "run_outer_auto_bridge_transport_failure",
+  "event_id": "evt_cfc1a1e6aef74afa",
+  "event_kind": "user_prompt_submitted",
+  "state_hash": "fe0f3cb385343acc1d1f7996",
+  "path": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\runtime_state\\projects\\target_repo_5a3722a795d5\\runs\\run_outer_auto_bridge_transport_failure\\checkpoints\\000001_evt_cfc1a1e6aef74afa.json",
+  "state": {
+    "repo_key": "target_repo_5a3722a795d5",
+    "run_id": "run_outer_auto_bridge_transport_failure",
+    "phase": "leader_freeze",
+    "lifecycle_state": "read_runtime_truth",
+    "graph_node": "freeze_semantics",
+    "active_bridge_window_id": null,
+    "active_team_id": null,
+    "active_task_id": null,
+    "frozen_semantics_hash": null,
+    "packet_hash": null,
+    "completion_contract_hash": null,
+    "retry_context": {},
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": []
+  }
+}

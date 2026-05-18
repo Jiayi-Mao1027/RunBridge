@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "runtime-event-envelope.schema.json",
+  "title": "RuntimeEventEnvelopeV1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_id",
+    "run_id",
+    "session_id",
+    "window_id",
+    "team_id",
+    "task_id",
+    "agent_id",
+    "phase",
+    "event_kind",
+    "source",
+    "seq",
+    "timestamp",
+    "caused_by",
+    "payload_ref",
+    "safe_preview",
+    "authority"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "event_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "window_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "team_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agent_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "phase": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "event_kind": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "outer_sdk",
+        "inner_sdk",
+        "cli",
+        "hook",
+        "runtime",
+        "companion"
+      ]
+    },
+    "seq": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "timestamp": {
+      "type": "string"
+    },
+    "caused_by": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "payload_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "safe_preview": {
+      "type": "string"
+    },
+    "authority": {
+      "type": "string",
+      "enum": [
+        "authoritative",
+        "source",
+        "observed",
+        "derived",
+        "projection"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

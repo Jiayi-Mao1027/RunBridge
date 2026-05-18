@@ -290,6 +290,7 @@ class BridgeLeaderRuntime:
 
     def _complete_task(self, execution: dict[str, Any]) -> bool:
         checks = self._completion_validation(execution)
+        execution["_completion_checks"] = checks
         self._event("artifacts_ready", team_id=self.team_id, task_id=self.task_id, tool_name="task_complete", payload={"artifact_refs": execution.get("artifact_refs", [])})
         if not completion_succeeded(checks):
             return False
@@ -309,9 +310,21 @@ class BridgeLeaderRuntime:
         )
         return True
 
-    def _reject_completion(self, execution: dict[str, Any]) -> None:
-        checks = self._completion_validation(execution)
+    def _reject_completion(self, execution: dict[str, Any]) -> dict[str, Any]:
+        checks = execution.get("_completion_checks") if isinstance(execution.get("_completion_checks"), dict) else self._completion_validation(execution)
         missing = list(checks.get("missing_outputs", [])) + list(checks.get("missing_artifacts", [])) + list(checks.get("failed_validations", []))
+        error = {
+            "type": "CompletionContractRejected",
+            "message": _completion_rejection_message(checks, missing),
+        }
+        evidence = execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {}
+        evidence = {
+            **evidence,
+            "completion_checks": checks,
+            "missing_contract_items": missing,
+        }
+        execution["evidence"] = evidence
+        execution["error_or_null"] = error
         self._event(
             "completion_contract_rejected",
             team_id=self.team_id,
@@ -320,13 +333,15 @@ class BridgeLeaderRuntime:
             agent_type="hook",
             payload={
                 "completion_contract": self.packet.get("completion_contract", {}),
-                "completion_evidence": execution.get("evidence"),
+                "completion_evidence": evidence,
                 "reports": execution.get("reports", []),
                 "artifact_refs": execution.get("artifact_refs", []),
                 "completion_checks": checks,
                 "missing_contract_items": missing,
+                "error_or_null": error,
             },
         )
+        return checks
 
     def _completion_validation(self, execution: dict[str, Any]) -> dict[str, Any]:
         validation = validate_bridge_completion(
@@ -548,6 +563,25 @@ def _completion_checks(contract: dict[str, Any], execution: dict[str, Any]) -> d
         "failed_validations": failed_validations,
         "notes": [],
     }
+
+
+def _completion_rejection_message(checks: dict[str, Any], missing: list[Any]) -> str:
+    disposition = str(checks.get("final_disposition") or "unknown")
+    failed_subjects: list[str] = []
+    for item in checks.get("checks", []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "").lower() not in {"fail", "block"}:
+            continue
+        subject = str(item.get("subject") or item.get("name") or "completion_check")
+        if subject:
+            failed_subjects.append(subject[:160])
+    parts = [f"completion contract rejected at task_complete; final_disposition={disposition}"]
+    if missing:
+        parts.append("missing=" + ", ".join(str(item) for item in missing[:8]))
+    if failed_subjects:
+        parts.append("failed_checks=" + " | ".join(failed_subjects[:6]))
+    return "; ".join(parts)
 
 
 def _missing_required_artifacts(required_artifacts: Any, artifact_refs: Any) -> list[str]:

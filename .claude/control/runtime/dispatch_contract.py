@@ -9,7 +9,7 @@ DISPATCH_CONTRACT_SCHEMA_VERSION = "dispatch_contract.v1"
 BASE_AGENT_INPUT_KEYS = ["description", "prompt", "subagent_type"]
 AGENT_INPUT_KEYS = list(BASE_AGENT_INPUT_KEYS)
 GENERIC_MODEL_ALIASES = {"haiku", "opus", "sonnet"}
-AGENT_TOOL_MODEL_SCHEMA_CARRIER = "sonnet"
+AGENT_TOOL_MODEL_SCHEMA_CARRIERS = {"haiku", "sonnet"}
 AGENT_WRAPPER_AUTO_KEYS = {"isolation", "run_in_background"}
 
 
@@ -130,8 +130,9 @@ def validate_agent_call_against_dispatch_contract(
     if reasons:
         return reasons
 
-    subagent_type = str(tool_input.get("subagent_type") or "").strip()
     teammates = contract.get("teammates") if isinstance(contract.get("teammates"), dict) else {}
+    raw_subagent_type = str(tool_input.get("subagent_type") or "").strip()
+    subagent_type = _canonical_subagent_type(raw_subagent_type, teammates)
     expected = teammates.get(subagent_type) if subagent_type else None
     if not isinstance(expected, dict):
         reasons.append("agent_dispatch_subagent_type_not_in_contract")
@@ -142,15 +143,16 @@ def validate_agent_call_against_dispatch_contract(
     actual_keys = set(str(key) for key in tool_input.keys())
     core_actual_keys = actual_keys - AGENT_WRAPPER_AUTO_KEYS
     tolerated_actual_keys = set(AGENT_WRAPPER_AUTO_KEYS)
-    if _is_agent_tool_model_schema_carrier(tool_input.get("model")):
+    actual_model = tool_input.get("model")
+    model_is_tolerated = _is_agent_tool_model_schema_carrier(actual_model) or _model_matches_binding(actual_model, expected)
+    if model_is_tolerated:
         tolerated_actual_keys.add("model")
     unknown_extra_keys = actual_keys - allowed_keys - tolerated_actual_keys
     missing_keys = allowed_keys - actual_keys
     if unknown_extra_keys or missing_keys:
         reasons.append("agent_dispatch_input_keys_mismatch")
 
-    actual_model = tool_input.get("model")
-    if "model" in actual_keys and not _is_agent_tool_model_schema_carrier(actual_model):
+    if "model" in actual_keys and not model_is_tolerated:
         if _generic_model_alias(actual_model):
             reasons.append("agent_dispatch_model_alias_forbidden")
         else:
@@ -160,6 +162,14 @@ def validate_agent_call_against_dispatch_contract(
         if key == "prompt":
             if _has_text(expected_dispatch.get("prompt")) and not _has_text(tool_input.get("prompt")):
                 reasons.append("agent_dispatch_prompt_empty")
+            continue
+        if key == "description":
+            if _has_text(expected_dispatch.get("description")) and not _has_text(tool_input.get("description")):
+                reasons.append("agent_dispatch_description_empty")
+            continue
+        if key == "subagent_type":
+            if subagent_type != expected_dispatch.get(key):
+                reasons.append("agent_dispatch_subagent_type_mismatch")
             continue
         if tool_input.get(key) != expected_dispatch.get(key):
             reasons.append(f"agent_dispatch_{key}_mismatch")
@@ -201,6 +211,16 @@ def _first_text(*values: Any) -> str | None:
     return None
 
 
+def _canonical_subagent_type(value: str, teammates: dict[str, Any]) -> str:
+    normalized = str(value or "").strip()
+    if normalized in teammates:
+        return normalized
+    first_token = normalized.split(maxsplit=1)[0] if normalized else ""
+    if first_token in teammates:
+        return first_token
+    return normalized
+
+
 def _has_text(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
@@ -213,7 +233,15 @@ def _generic_model_alias(value: Any) -> str | None:
 
 
 def _is_agent_tool_model_schema_carrier(value: Any) -> bool:
-    return isinstance(value, str) and value.strip().casefold() == AGENT_TOOL_MODEL_SCHEMA_CARRIER
+    return isinstance(value, str) and value.strip().casefold() in AGENT_TOOL_MODEL_SCHEMA_CARRIERS
+
+
+def _model_matches_binding(value: Any, expected: dict[str, Any]) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    binding = expected.get("model_binding") if isinstance(expected.get("model_binding"), dict) else {}
+    expected_model = str(binding.get("model") or "").strip()
+    return bool(expected_model) and value.strip() == expected_model
 
 
 def _agent_frontmatter_model(name: str) -> str | None:

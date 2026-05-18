@@ -1,0 +1,71 @@
+{
+  "schema_version": "0.1.0",
+  "checkpoint_id": "chkpt_000115_evt_e34e0ca1b34047cd",
+  "sequence": 115,
+  "timestamp": "2026-05-17T09:15:23.824633+00:00",
+  "repo_key": "unscoped_repo",
+  "run_id": "run_demo",
+  "event_id": "evt_e34e0ca1b34047cd",
+  "event_kind": "bridge_call_intended",
+  "state": {
+    "repo_key": "unscoped_repo",
+    "run_id": "run_demo",
+    "phase": "leader_freeze",
+    "lifecycle_state": "bridge_call_intended",
+    "graph_node": "bridge_call_intended",
+    "active_bridge_window_id": "bw_run_demo_sub_821b9471058e",
+    "active_team_id": "team_1f44f31790e3",
+    "active_task_id": "task_e334a9032b05",
+    "frozen_semantics_hash": null,
+    "packet_hash": "c517d39f5c248204c9d08076",
+    "completion_contract_hash": "1fa9cc49b1d774cf296c3800",
+    "retry_context": {
+      "retry_scope": "bridge_leader_execution",
+      "attempt": 2,
+      "max_attempts": 2,
+      "delay_ms": 0,
+      "source_bridge_window_id": "bw_run_demo_sub_d7f8f959e80b",
+      "target_bridge_window_id": "bw_run_demo_sub_821b9471058e",
+      "original_bridge_window_id": "bw_run_demo_sub_d7f8f959e80b",
+      "retry_action": {
+        "kind": "retry_bridge_sdk_call",
+        "requires_new_bridge_window": true,
+        "requires_same_packet": true
+      },
+      "reason": {
+        "error_type": "BridgeLeaderNoReport",
+        "message": "bridge leader returned no result",
+        "failure_stage_or_null": "task_complete"
+      }
+    },
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": [
+      {
+        "level": "warn",
+        "category": "state_graph",
+        "message": "event has no state graph edge from current graph node",
+        "event_kind": "retry_attempt_scheduled",
+        "current_graph_node": "retry_attempt_scheduled",
+        "candidate_edge_ids": [
+          "call_failed_retry_scheduled",
+          "terminal_failure_retry_scheduled",
+          "team_create_failed_retry_scheduled",
+          "task_create_failed_retry_scheduled",
+          "dispatch_failed_retry_scheduled",
+          "wait_timeout_retry_scheduled",
+          "completion_rejected_retry_scheduled",
+          "task_failed_retry_scheduled",
+          "team_delete_failed_retry_scheduled",
+          "window_returned_retry_scheduled",
+          "window_failed_retry_scheduled",
+          "window_partial_retry_scheduled"
+        ]
+      }
+    ]
+  },
+  "state_hash": "8e9bd51f6b659c88cc26a268",
+  "snapshot_hash": "8e7ce4a33e5f11500759006a"
+}

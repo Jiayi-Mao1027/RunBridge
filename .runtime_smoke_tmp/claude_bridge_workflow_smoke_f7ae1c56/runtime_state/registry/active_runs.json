@@ -1,0 +1,30 @@
+{
+  "updated_at": "2026-05-17T09:17:15.843200+00:00",
+  "repos": {
+    "unscoped_repo": {
+      "repo_root": "",
+      "latest_run_id": "run_demo",
+      "active_run_ids": [
+        "run_demo"
+      ],
+      "status": "running",
+      "last_seen_at": "2026-05-17T09:17:15.843200+00:00"
+    },
+    "target_repo_5a3722a795d5": {
+      "repo_root": "",
+      "latest_run_id": "run_20260517T091424Z_0850ad",
+      "active_run_ids": [
+        "run_20260517T091424Z_0850ad",
+        "run_outer_selected",
+        "run_20260517T091425Z_4a0d9e",
+        "run_outer_auto_bridge",
+        "run_outer_auto_bridge_transport_failure",
+        "run_outer_auto_bridge_inspect",
+        "run_outer_long_report",
+        "run_20260517T091428Z_563a90"
+      ],
+      "status": "running",
+      "last_seen_at": "2026-05-17T09:14:30.188668+00:00"
+    }
+  }
+}

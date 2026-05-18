@@ -25,6 +25,11 @@ DEFAULT_RETRY_POLICIES: dict[str, dict[str, Any]] = {
             "ClaudeTmuxSoftTimeoutNoProgress",
             "ClaudeTmuxTimeout",
             "TransientClaudeTmuxTransportApiError",
+            "ProviderTransportApiError",
+            "ProviderTransportConnectionRefused",
+            "ProviderTransportRateLimited",
+            "ProviderTransportReset",
+            "ProviderGateTimeout",
         ],
     },
     "teammate_report_missing": {

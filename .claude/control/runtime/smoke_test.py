@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import uuid
 
+from bridge_sdk import _bridge_leader_failure_retryable
 from bridge_sdk import call_bridge_sdk
 from bridge.executors import AutoBridgeExecutor, BridgeExecutionRequest, CliBridgeExecutor, SdkBridgeExecutor, SimulateBridgeExecutor, TmuxBridgeExecutor, bridge_executor_from_env
 from claude_cli_executor import BRIDGE_RESULT_SCHEMA
@@ -28,12 +29,23 @@ from claude_cli_executor import _parse_claude_payload
 from claude_cli_executor import _parse_claude_stdout_envelope
 from claude_cli_executor import _claude_print_stream_json_args
 from claude_cli_executor import _normalize_bridge_payload
+from claude_cli_executor import _is_agent_dispatch_contract_violation
 from claude_cli_executor import _latest_observer_progress
+from claude_cli_executor import _normalize_runtime_owned_teammate_report
 from claude_cli_executor import _observer_progress_epoch
+from claude_cli_executor import _prefer_runtime_owned_teammate_fallback
+from claude_cli_executor import _provider_transport_failure
 from claude_cli_executor import _project_state_key
 from claude_cli_executor import _reconcile_observed_teammate_activity
 from claude_cli_executor import _redact_cmd
 from claude_cli_executor import _required_agent_models
+from claude_cli_executor import _runtime_owned_bridge_result_from_teammate_reports
+from claude_cli_executor import _runtime_owned_teammate_allowed_tools
+from claude_cli_executor import _runtime_owned_teammate_error_retryable
+from claude_cli_executor import _runtime_owned_teammate_fallback_allowed
+from claude_cli_executor import _runtime_owned_teammate_names
+from claude_cli_executor import _runtime_owned_teammate_report_schema
+from claude_cli_executor import _runtime_owned_teammate_retry_attempts
 from claude_cli_executor import _runtime_run_root
 from claude_cli_executor import _run_claude_streaming
 from claude_cli_executor import _sdk_stream_event_paths
@@ -42,6 +54,7 @@ from claude_cli_executor import _should_use_bare_print_mode
 from claude_cli_executor import _soft_timeout_seconds
 from claude_cli_executor import _strip_claude_mcp_args
 from claude_cli_executor import _tmux_assistant_text
+from claude_cli_executor import _tmux_runtime_teammate_idle_without_report
 from claude_cli_executor import _tmux_terminal_error
 from claude_cli_executor import _tmux_submit_delay_seconds
 from claude_cli_executor import should_use_tmux_bridge_executor
@@ -61,6 +74,10 @@ from outer_sdk.tmux_repl_adapter import _tmux_no_assistant_signature as _outer_t
 from outer_sdk.tmux_repl_adapter import _tmux_prompt_completion_candidate as _outer_tmux_prompt_completion_candidate
 from outer_sdk.tmux_repl_adapter import _tmux_waiting_on_bridge_status as _outer_tmux_waiting_on_bridge_status
 from outer_sdk.tmux_repl_adapter import _runtime_bridge_completion_state as _outer_runtime_bridge_completion_state
+from outer_sdk.tmux_repl_adapter import _runtime_terminal_bridge_result as _outer_runtime_terminal_bridge_result
+from outer_sdk.tmux_repl_adapter import _bridge_result_backed_leader_result as _outer_bridge_result_backed_leader_result
+from outer_sdk.tmux_repl_adapter import _bridge_result_should_override_success as _outer_bridge_result_should_override_success
+from outer_sdk.tmux_repl_adapter import OuterLeaderTmuxTerminalError as OuterTmuxTerminalError
 from outer_sdk.tmux_repl_adapter import _tmux_terminal_error as _outer_tmux_terminal_error
 from outer_sdk.tmux_repl_adapter import _tmux_retrying_api_status as _outer_tmux_retrying_api_status
 from outer_sdk.tmux_repl_adapter import _tmux_idle_prompt_after_submit as _outer_tmux_idle_prompt_after_submit
@@ -76,7 +93,8 @@ from retry_policy import decide_retry, load_retry_policies, packet_hash
 from runtime_event_envelope import normalize_runtime_event, normalize_stream_record
 from state_graph import load_state_graph, replay_run_state, validate_state_graph
 from team_planner import RiskBasedTeamSelector
-from workflow_runtime import dispatch_workflow_event
+from workflow_runtime import CheckResult, WorkflowEvent, dispatch_workflow_event
+from workflow_runtime import _retry_action_contract, _retry_scope_for_failure
 from workflow_runtime import _bridge_result_reports_teammate_transport_loss
 from workflow_runtime import reconcile_workflow_from_ledger
 
@@ -261,8 +279,8 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
 def event(kind: str, bridge_window_id: str, sub_session_id: str, **kwargs: object) -> dict:
     payload = kwargs.pop("payload", {})
     return {
-        "run_id": "run_demo",
-        "main_session_id": "main_demo",
+        "run_id": kwargs.pop("run_id", "run_demo"),
+        "main_session_id": kwargs.pop("main_session_id", "main_demo"),
         "sub_session_id": sub_session_id,
         "bridge_window_id": bridge_window_id,
         "team_id": kwargs.pop("team_id", None),
@@ -659,7 +677,49 @@ def run_mcp_lifecycle_helper(control_root: Path, runs_root: Path) -> dict:
     ss = "sub_mcp_helper"
     p = packet(bw, ss)
     module._ensure_main_bridge_lifecycle_started(str(control_root), p, str(runs_root), persist=True)
-    return dispatch(control_root, runs_root, event("orphan_timeout_without_bridge_return", bw, ss, agent_type="runtime", agent_id="orphan_scanner", payload={"last_known_event_ref": "call_bridge_sdk_started"}))
+    dispatch(control_root, runs_root, event("bridge_window_opened", bw, ss, agent_type="bridge-leader", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("bridge_packet_accepted", bw, ss, payload={"packet": p}))
+    dispatch(control_root, runs_root, event("team_create_started", bw, ss, team_id="team_mcp_helper", tool_name="team_create"))
+    dispatch(control_root, runs_root, event("team_create_succeeded", bw, ss, team_id="team_mcp_helper", tool_name="team_create", payload={"team_name": "team_mcp_helper", "teammate_ids": ["mate_1"]}))
+    dispatch(control_root, runs_root, event("task_create_started", bw, ss, team_id="team_mcp_helper", task_id="task_mcp_helper", tool_name="task_create"))
+    dispatch(control_root, runs_root, event("task_create_succeeded", bw, ss, team_id="team_mcp_helper", task_id="task_mcp_helper", tool_name="task_create"))
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "taskcreated_hook_accepted",
+            bw,
+            ss,
+            team_id="team_mcp_helper",
+            task_id="task_mcp_helper",
+            agent_type="hook",
+            agent_id="hook.task_created",
+            payload={
+                "task_subject": "task_mcp_helper",
+                "task_description": "smoke task created",
+                "task_spec": p["task_spec"],
+                "team_spec": p["team_spec"],
+                "task_team_mapping": p["task_team_mapping"],
+                "teammate_ids": ["mate_1"],
+            },
+        ),
+    )
+    old_override = os.environ.get("BRIDGE_ALLOW_RUNTIME_RUNS_ROOT_OVERRIDE")
+    os.environ["BRIDGE_ALLOW_RUNTIME_RUNS_ROOT_OVERRIDE"] = "1"
+    try:
+        response = module._call_tool(
+            "mark_bridge_orphaned",
+            {"run_id": "run_demo", "bridge_window_id": bw, "sub_session_id": ss, "persist": True, "reason": "smoke orphan helper", "runtime_runs_root": str(runs_root)},
+        )
+    finally:
+        if old_override is None:
+            os.environ.pop("BRIDGE_ALLOW_RUNTIME_RUNS_ROOT_OVERRIDE", None)
+        else:
+            os.environ["BRIDGE_ALLOW_RUNTIME_RUNS_ROOT_OVERRIDE"] = old_override
+    payload = json.loads(response["content"][0]["text"])
+    if not payload.get("ok"):
+        raise AssertionError(json.dumps(payload, ensure_ascii=False, indent=2))
+    return payload["runtime_snapshot"]
 
 
 def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
@@ -777,6 +837,60 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
     exception_event_kinds = [item.get("event_kind") for item in exception_events]
     if "team_executor_failed" not in exception_event_kinds or "wait_timeout_or_process_lost" in exception_event_kinds:
         raise AssertionError(json.dumps(exception_event_kinds, ensure_ascii=False, indent=2))
+
+    retry_packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="run bridge leader self retry smoke task",
+        task_spec={"task_subject": "bridge leader retry smoke", "task_kind": "bridge_window_smoke"},
+    )
+    retry_packet.setdefault("retry_policies", {}).setdefault("bridge_sdk_call", {})
+    retry_packet["retry_policies"]["bridge_sdk_call"].update(
+        {
+            "maximum_attempts": 2,
+            "initial_interval_ms": 0,
+            "maximum_interval_ms": 0,
+            "backoff_coefficient": 1.0,
+        }
+    )
+    retry_calls = []
+
+    def flaky_bridge_leader_executor(execution_input: dict) -> dict:
+        retry_calls.append(execution_input["bridge_window_id"])
+        if len(retry_calls) == 1:
+            return {
+                "status": "failed",
+                "reports": [],
+                "artifact_refs": [],
+                "evidence": {"failure_classification": "bridge_leader_no_report"},
+                "error_or_null": {"type": "BridgeLeaderNoReport", "message": "bridge leader returned no result"},
+                "cleanup_required": False,
+            }
+        successful = simulated_team_executor(execution_input)
+        successful["reports"][0]["summary"] = "bridge leader retry succeeded"
+        successful.setdefault("evidence", {})["retry_smoke"] = "succeeded"
+        return successful
+
+    retry_result = call_bridge_sdk(
+        str(control_root),
+        retry_packet,
+        runtime_runs_root=str(runs_root),
+        persist=True,
+        team_executor=flaky_bridge_leader_executor,
+    )
+    retry_evidence = retry_result.get("evidence", {}).get("bridge_leader_retry", {})
+    if retry_result.get("status") != "succeeded" or len(retry_calls) != 2 or retry_calls[0] == retry_calls[1]:
+        raise AssertionError(json.dumps({"result": retry_result, "calls": retry_calls}, ensure_ascii=False, indent=2))
+    if retry_evidence.get("final_attempt") != 2 or retry_evidence.get("max_attempts") != 2:
+        raise AssertionError(json.dumps(retry_evidence, ensure_ascii=False, indent=2))
+    retry_events = _read_jsonl(runs_root / "run_demo" / "event_log.jsonl")
+    retry_event_kinds = [item.get("event_kind") for item in retry_events]
+    if "retry_attempt_scheduled" not in retry_event_kinds:
+        raise AssertionError(json.dumps(retry_event_kinds[-20:], ensure_ascii=False, indent=2))
+    if not any(item.get("bridge_window_id") == retry_calls[1] and item.get("event_kind") == "bridge_call_intended" for item in retry_events):
+        raise AssertionError(json.dumps({"retry_calls": retry_calls, "events": retry_events[-20:]}, ensure_ascii=False, indent=2))
 
     partial_packet = decide_next_bridge_packet(
         str(control_root),
@@ -1601,8 +1715,8 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
             os.environ.pop(key, None)
         if _effective_anthropic_base_url(project_root=custom_project) != "http://mjydsb.top":
             raise AssertionError(_effective_anthropic_base_url(project_root=custom_project))
-        if _should_use_bare_print_mode(custom_project):
-            raise AssertionError("custom provider should not implicitly enable bare print mode")
+        if not _should_use_bare_print_mode(custom_project):
+            raise AssertionError("custom provider should implicitly enable bare print mode")
         os.environ["BRIDGE_CLAUDE_PRINT_BARE"] = "0"
         if _should_use_bare_print_mode(custom_project):
             raise AssertionError("BRIDGE_CLAUDE_PRINT_BARE=0 did not disable bare print mode")
@@ -1839,13 +1953,9 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         "",
     )
     if (
-        normalized_single_report.get("status") != "failed"
-        or normalized_single_report.get("error_or_null", {}).get("type") != "MissingRequiredEvidenceRef"
+        normalized_single_report.get("status") != "succeeded"
+        or normalized_single_report.get("reports", [{}])[0].get("evidence_refs") != ["run_single_report"]
     ):
-        raise AssertionError(json.dumps(normalized_single_report, ensure_ascii=False, indent=2))
-    single_report_payload = normalized_single_report.get("evidence", {}).get("payload", {})
-    single_report = single_report_payload.get("reports", [{}])[0] if isinstance(single_report_payload.get("reports"), list) else {}
-    if single_report.get("evidence") or single_report.get("evidence_refs"):
         raise AssertionError(json.dumps(normalized_single_report, ensure_ascii=False, indent=2))
     normalized_valid_single_report = _normalize_bridge_payload(
         {
@@ -1887,16 +1997,14 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         "",
     )
     if (
-        normalized_report_list.get("status") != "failed"
-        or normalized_report_list.get("error_or_null", {}).get("type") != "MissingRequiredEvidenceRef"
+        normalized_report_list.get("status") != "succeeded"
+        or normalized_report_list.get("reports", [{}])[0].get("evidence_refs") != ["run_report_list"]
     ):
-        raise AssertionError(json.dumps(normalized_report_list, ensure_ascii=False, indent=2))
-    list_report_payload = normalized_report_list.get("evidence", {}).get("payload", {})
-    list_report = list_report_payload.get("reports", [{}])[0] if isinstance(list_report_payload.get("reports"), list) else {}
-    if list_report.get("evidence") or list_report.get("evidence_refs"):
         raise AssertionError(json.dumps(normalized_report_list, ensure_ascii=False, indent=2))
     if _tmux_submit_delay_seconds("short") < 0.2 or _tmux_submit_delay_seconds("x" * 100000) > 2.0:
         raise AssertionError("tmux submit delay bounds failed")
+    if should_use_tmux_bridge_executor(custom_project):
+        raise AssertionError("custom provider with bare print mode should prefer the CLI bridge executor")
     old_tmux_override = os.environ.get("BRIDGE_TMUX_EXECUTOR")
     try:
         os.environ["BRIDGE_TMUX_EXECUTOR"] = "1"
@@ -2018,6 +2126,11 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         {"teammate_name": "implementor", "role": "implement", "allowed_tools": ["Read"], "responsibilities": []},
         {"teammate_name": "rungater", "role": "gate", "allowed_tools": ["Read"], "responsibilities": []},
     ]
+    model_guard_packet["task_team_mapping"]["teammate_assignments"] = [
+        {"teammate_name": "implementor", "assignment": "implement", "expected_output": "report"},
+        {"teammate_name": "rungater", "assignment": "gate", "expected_output": "report"},
+    ]
+    model_guard_packet["dispatch_contract"] = build_dispatch_contract(model_guard_packet)
     model_guard_prompt = _bridge_leader_prompt(
         model_guard_packet,
         {
@@ -2629,6 +2742,7 @@ def run_hook_pretool_packet_derivation_tests(runtime_dir: Path) -> dict:
             "teammate_specs": [
                 {"teammate_name": "preflight-initial", "role": "preflight_audit", "allowed_tools": ["Read"], "responsibilities": []},
                 {"teammate_name": "curator", "role": "artifact_curation", "allowed_tools": ["Read"], "responsibilities": []},
+                {"teammate_name": "refresher", "role": "documentation_refresh", "allowed_tools": ["Read"], "responsibilities": []},
             ],
         },
         "task_spec": {"task_id_or_null": "task_model_guard", "task_subject": "stale", "task_kind": "stale"},
@@ -2638,6 +2752,7 @@ def run_hook_pretool_packet_derivation_tests(runtime_dir: Path) -> dict:
             "teammate_assignments": [
                 {"teammate_name": "preflight-initial", "assignment": "preflight exact assignment", "expected_output": "report"},
                 {"teammate_name": "curator", "assignment": "curator exact assignment", "expected_output": "report"},
+                {"teammate_name": "refresher", "assignment": "refresher exact assignment", "expected_output": "report"},
             ],
         },
         "target_phase": "l3_bridge",
@@ -2923,6 +3038,180 @@ def run_hook_pretool_packet_derivation_tests(runtime_dir: Path) -> dict:
                 indent=2,
             )
         )
+    haiku_wrapper_payload = {
+        **denied_agent_payload,
+        "tool_use_id": "tool_agent_haiku_wrapper_schema_carrier",
+        "tool_input": {
+            "description": "curator: artifact_curation",
+            "subagent_type": "curator",
+            "prompt": "curator exact assignment",
+            "model": "haiku",
+            "isolation": True,
+            "run_in_background": False,
+        },
+    }
+    haiku_wrapper_proc = subprocess.run(
+        [sys.executable, str(hook_path)],
+        input=json.dumps(haiku_wrapper_payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=agent_env,
+        cwd=str(target_root),
+        timeout=30,
+    )
+    if haiku_wrapper_proc.returncode != 0 or "permissionDecision" in haiku_wrapper_proc.stdout:
+        raise AssertionError(
+            json.dumps(
+                {
+                    "returncode": haiku_wrapper_proc.returncode,
+                    "stdout": haiku_wrapper_proc.stdout,
+                    "stderr": haiku_wrapper_proc.stderr,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    frontmatter_model_payload = {
+        **denied_agent_payload,
+        "tool_use_id": "tool_agent_frontmatter_model_binding",
+        "tool_input": {
+            "description": "curator: artifact_curation",
+            "subagent_type": "curator",
+            "prompt": "curator exact assignment",
+            "model": "gpt-main",
+            "isolation": True,
+            "run_in_background": False,
+        },
+    }
+    frontmatter_model_proc = subprocess.run(
+        [sys.executable, str(hook_path)],
+        input=json.dumps(frontmatter_model_payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=agent_env,
+        cwd=str(target_root),
+        timeout=30,
+    )
+    if frontmatter_model_proc.returncode != 0 or "permissionDecision" in frontmatter_model_proc.stdout:
+        raise AssertionError(
+            json.dumps(
+                {
+                    "returncode": frontmatter_model_proc.returncode,
+                    "stdout": frontmatter_model_proc.stdout,
+                    "stderr": frontmatter_model_proc.stderr,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    short_description_payload = {
+        **denied_agent_payload,
+        "tool_use_id": "tool_agent_short_description_schema_carrier",
+        "tool_input": {
+            "description": "preflight: repo audit",
+            "subagent_type": "preflight-initial",
+            "prompt": "preflight exact assignment",
+            "model": "sonnet",
+            "isolation": True,
+            "run_in_background": False,
+        },
+    }
+    short_description_proc = subprocess.run(
+        [sys.executable, str(hook_path)],
+        input=json.dumps(short_description_payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=agent_env,
+        cwd=str(target_root),
+        timeout=30,
+    )
+    if short_description_proc.returncode != 0 or "permissionDecision" in short_description_proc.stdout:
+        raise AssertionError(
+            json.dumps(
+                {
+                    "returncode": short_description_proc.returncode,
+                    "stdout": short_description_proc.stdout,
+                    "stderr": short_description_proc.stderr,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    decorated_subagent_payload = {
+        **denied_agent_payload,
+        "tool_use_id": "tool_agent_decorated_subagent_type_schema_carrier",
+        "tool_input": {
+            "description": "L3 evidence inventory",
+            "subagent_type": "refresher decorated-label",
+            "prompt": "refresher exact assignment",
+            "model": "sonnet",
+            "isolation": True,
+            "run_in_background": False,
+        },
+    }
+    decorated_subagent_proc = subprocess.run(
+        [sys.executable, str(hook_path)],
+        input=json.dumps(decorated_subagent_payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=agent_env,
+        cwd=str(target_root),
+        timeout=30,
+    )
+    if decorated_subagent_proc.returncode != 0 or "permissionDecision" in decorated_subagent_proc.stdout:
+        raise AssertionError(
+            json.dumps(
+                {
+                    "returncode": decorated_subagent_proc.returncode,
+                    "stdout": decorated_subagent_proc.stdout,
+                    "stderr": decorated_subagent_proc.stderr,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    placeholder_subagent_payload = {
+        **denied_agent_payload,
+        "tool_use_id": "tool_agent_placeholder_polluted_subagent_type",
+        "tool_input": {
+            "description": "curator: artifact_curation",
+            "subagent_type": "curator55c00d81-a35f-404d-97f3-e7c5e73e5315_STATUS_PLACEHOLDER_DO_NOT_USE_BROKEN_JSONARSER_APOLOGIES?!",
+            "prompt": "curator exact assignment",
+            "model": "sonnet",
+            "isolation": True,
+            "run_in_background": False,
+        },
+    }
+    placeholder_subagent_proc = subprocess.run(
+        [sys.executable, str(hook_path)],
+        input=json.dumps(placeholder_subagent_payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=agent_env,
+        cwd=str(target_root),
+        timeout=30,
+    )
+    if (
+        placeholder_subagent_proc.returncode != 0
+        or "permissionDecision" not in placeholder_subagent_proc.stdout
+        or "agent_dispatch_subagent_type_not_in_contract" not in placeholder_subagent_proc.stdout
+    ):
+        raise AssertionError(
+            json.dumps(
+                {
+                    "returncode": placeholder_subagent_proc.returncode,
+                    "stdout": placeholder_subagent_proc.stdout,
+                    "stderr": placeholder_subagent_proc.stderr,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     semantic_prompt_payload = {
         **denied_agent_payload,
         "tool_use_id": "tool_agent_semantic_prompt_payload",
@@ -3203,6 +3492,24 @@ def run_retry_policy_tests(control_root: Path, runs_root: Path) -> dict:
     )
     if transient_tmux_transport_failure.retryable or transient_tmux_transport_failure.next_action != "surface_non_retryable_failure":
         raise AssertionError(json.dumps(transient_tmux_transport_failure.as_event_payload(repo_key="unscoped_repo", run_id="run_demo", bridge_window_id="bw_tmux_reset", packet_hash=packet_hash(p)), ensure_ascii=False, indent=2))
+    provider_transport_failure = decide_retry(
+        policies,
+        "bridge_sdk_call",
+        attempt=1,
+        error_type="ProviderTransportReset",
+    )
+    if provider_transport_failure.retryable or provider_transport_failure.next_action != "surface_non_retryable_failure":
+        raise AssertionError(json.dumps(provider_transport_failure.as_event_payload(repo_key="unscoped_repo", run_id="run_demo", bridge_window_id="bw_provider_reset", packet_hash=packet_hash(p)), ensure_ascii=False, indent=2))
+    provider_failure_result = {
+        "status": "failed",
+        "reports": [],
+        "artifact_refs": [],
+        "evidence": {"failure_classification": "provider_transport_failure", "cooldown_required": True},
+        "error_or_null": {"type": "ProviderTransportReset", "message": "provider connection reset"},
+        "cleanup_required": False,
+    }
+    if _bridge_leader_failure_retryable(provider_failure_result, {"retry_policies": {"bridge_sdk_call": {"non_retryable_error_types": []}}}):
+        raise AssertionError(json.dumps(provider_failure_result, ensure_ascii=False, indent=2))
     retry_event = event(
         "retry_attempt_scheduled",
         "bw_success",
@@ -3420,6 +3727,91 @@ def run_retry_policy_tests(control_root: Path, runs_root: Path) -> dict:
     if partial_retry_payload.get("packet_hash") != packet_hash(partial_packet):
         raise AssertionError(json.dumps(partial_retry_payload, ensure_ascii=False, indent=2))
 
+    bw_failed_report_loss = "bw_failed_teammate_report_loss"
+    ss_failed_report_loss = "sub_failed_teammate_report_loss"
+    failed_loss_packet = packet(bw_failed_report_loss, ss_failed_report_loss)
+    failed_loss_team = "team_failed_teammate_report_loss"
+    failed_loss_task = "task_failed_teammate_report_loss"
+    dispatch(control_root, runs_root, event("bridge_call_intended", bw_failed_report_loss, ss_failed_report_loss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_failed_report_loss", payload={"packet": failed_loss_packet}))
+    dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw_failed_report_loss, ss_failed_report_loss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_failed_report_loss", payload={"packet": failed_loss_packet}))
+    dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw_failed_report_loss, ss_failed_report_loss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_failed_report_loss", payload={"packet": failed_loss_packet}))
+    dispatch(control_root, runs_root, event("bridge_window_opened", bw_failed_report_loss, ss_failed_report_loss, agent_type="bridge-leader", payload={"packet": failed_loss_packet}))
+    dispatch(control_root, runs_root, event("bridge_packet_accepted", bw_failed_report_loss, ss_failed_report_loss, payload={"packet": failed_loss_packet}))
+    dispatch(control_root, runs_root, event("team_create_started", bw_failed_report_loss, ss_failed_report_loss, team_id=failed_loss_team, tool_name="team_create"))
+    dispatch(control_root, runs_root, event("team_create_succeeded", bw_failed_report_loss, ss_failed_report_loss, team_id=failed_loss_team, tool_name="team_create", payload={"team_name": failed_loss_team, "teammate_ids": ["implementor"]}))
+    dispatch(control_root, runs_root, event("task_create_started", bw_failed_report_loss, ss_failed_report_loss, team_id=failed_loss_team, task_id=failed_loss_task, tool_name="task_create"))
+    dispatch(control_root, runs_root, event("task_create_succeeded", bw_failed_report_loss, ss_failed_report_loss, team_id=failed_loss_team, task_id=failed_loss_task, tool_name="task_create"))
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "taskcreated_hook_accepted",
+            bw_failed_report_loss,
+            ss_failed_report_loss,
+            team_id=failed_loss_team,
+            task_id=failed_loss_task,
+            agent_type="hook",
+            agent_id="hook.task_created",
+            payload={
+                "task_subject": "task_failed_teammate_report_loss",
+                "task_description": "failed teammate report loss smoke task",
+                "task_spec": failed_loss_packet["task_spec"],
+                "team_spec": failed_loss_packet["team_spec"],
+                "task_team_mapping": failed_loss_packet["task_team_mapping"],
+                "teammate_ids": ["implementor"],
+            },
+        ),
+    )
+    dispatch(control_root, runs_root, event("message_dispatch_started", bw_failed_report_loss, ss_failed_report_loss, team_id=failed_loss_team, task_id=failed_loss_task, tool_name="send_messages"))
+    dispatch(control_root, runs_root, event("message_dispatch_succeeded", bw_failed_report_loss, ss_failed_report_loss, team_id=failed_loss_team, task_id=failed_loss_task, tool_name="send_messages"))
+    failed_loss_report = deepcopy(missing_teammate_report)
+    failed_loss_report["summary"] = "No usable implementor report was collected after API Error: Unable to connect to API (ECONNRESET)"
+    failed_loss_bridge_result = {
+        "status": "failed",
+        "reports": [failed_loss_report],
+        "artifact_refs": [],
+        "evidence": {"dispatch_attempts": [{"teammate": "implementor", "outcome": "api_error_econnreset"}]},
+        "error_or_null": {
+            "type": "t   eammate_report_missing_or_transport_failure",
+            "message": "Bridge task could not complete because no usable teammate report was collected after ECONNRESET.",
+            "missing_teammate   _reports": ["implementor"],
+            "transport_errors": [{"teammate": "implementor", "error": "API Error: Unable to connect to API (ECONNRESET)"}],
+        },
+        "cleanup_required": True,
+    }
+    if not _bridge_result_reports_teammate_transport_loss({"bridge_result": failed_loss_bridge_result}):
+        raise AssertionError(json.dumps(failed_loss_bridge_result, ensure_ascii=False, indent=2))
+    dispatch(control_root, runs_root, event("team_executor_failed", bw_failed_report_loss, ss_failed_report_loss, team_id=failed_loss_team, task_id=failed_loss_task, payload={"error_or_null": failed_loss_bridge_result["error_or_null"]}))
+    dispatch(control_root, runs_root, event("team_delete_started", bw_failed_report_loss, ss_failed_report_loss, team_id=failed_loss_team, task_id=failed_loss_task, tool_name="team_delete"))
+    dispatch(control_root, runs_root, event("team_delete_succeeded", bw_failed_report_loss, ss_failed_report_loss, team_id=failed_loss_team, task_id=failed_loss_task, tool_name="team_delete"))
+    failed_loss_result = dispatch_workflow_event(
+        str(control_root),
+        event(
+            "bridge_result_returned_with_failure",
+            bw_failed_report_loss,
+            ss_failed_report_loss,
+            team_id=failed_loss_team,
+            task_id=failed_loss_task,
+            agent_type="main-leader",
+            agent_id="main",
+            tool_name="call_bridge_sdk",
+            payload={"bridge_result": failed_loss_bridge_result},
+        ),
+        runtime_runs_root=str(runs_root),
+        persist=True,
+    )
+    failed_loss_plan = failed_loss_result.check_result.get("derived_facts", {}).get("auto_recovery", {})
+    if failed_loss_plan.get("dispatch_event_kind") != "retry_attempt_scheduled" or failed_loss_plan.get("retry_scope") != "teammate_report_missing":
+        raise AssertionError(json.dumps(failed_loss_result.check_result, ensure_ascii=False, indent=2))
+    failed_loss_retry_events = [
+        item for item in _read_jsonl(runs_root / "run_demo" / "event_log.jsonl")
+        if item.get("event_kind") == "retry_attempt_scheduled" and item.get("bridge_window_id") == bw_failed_report_loss
+    ]
+    failed_loss_retry_payload = failed_loss_retry_events[-1].get("payload", {}) if failed_loss_retry_events else {}
+    failed_loss_retry_action = failed_loss_retry_payload.get("retry_action", {})
+    if failed_loss_retry_action.get("kind") != "retry_bridge_sdk_call" or failed_loss_retry_action.get("requires_new_bridge_window") is not True or failed_loss_retry_action.get("requires_same_packet") is not True:
+        raise AssertionError(json.dumps(failed_loss_retry_payload, ensure_ascii=False, indent=2))
+
     bw_repair = "bw_completion_repair"
     ss_repair = "sub_completion_repair"
     repair_packet = packet(bw_repair, ss_repair)
@@ -3521,6 +3913,47 @@ def run_retry_policy_tests(control_root: Path, runs_root: Path) -> dict:
     scheduled = load_scheduled_retry_events(control_root, "run_demo", runtime_runs_root=str(runs_root))
     if not any(item.get("bridge_window_id") == bw_repair for item in scheduled):
         raise AssertionError(json.dumps(scheduled[-5:], ensure_ascii=False, indent=2))
+
+    no_report_payload = {
+        "bridge_result": {
+            "status": "failed",
+            "reports": [],
+            "artifact_refs": [],
+            "evidence": {"terminal_error": "returned to prompt without structured report"},
+            "error_or_null": {"type": "BridgeLeaderNoReport", "message": "tmux returned to prompt without a BridgeResult"},
+            "cleanup_required": False,
+        }
+    }
+    no_report_event = WorkflowEvent.from_payload(
+        event(
+            "bridge_result_returned_with_failure",
+            "bw_BridgeLeaderNoReport",
+            "sub_BridgeLeaderNoReport",
+            team_id="team_BridgeLeaderNoReport",
+            task_id="task_BridgeLeaderNoReport",
+            agent_type="main-leader",
+            agent_id="main",
+            tool_name="call_bridge_sdk",
+            payload=no_report_payload,
+        )
+    )
+    no_report_check = CheckResult(
+        ok=False,
+        decision="reject",
+        code="check_failed",
+        reasons=[],
+        normalized_payload={},
+        derived_facts={},
+        audit_ref="chk_no_report",
+    )
+    no_report_scope = _retry_scope_for_failure(no_report_event, no_report_check, {})
+    if no_report_scope != "teammate_report_missing":
+        raise AssertionError(json.dumps({"retry_scope": no_report_scope}, ensure_ascii=False, indent=2))
+    no_report_decision = decide_retry(load_retry_policies(control_root), no_report_scope, attempt=2, error_type="BridgeLeaderNoReport")
+    no_report_action = _retry_action_contract(no_report_event, no_report_scope, no_report_decision)
+    if no_report_action.get("kind") != "retry_bridge_sdk_call" or no_report_action.get("requires_new_bridge_window") is not True or no_report_action.get("requires_same_packet") is not True:
+        raise AssertionError(json.dumps(no_report_action, ensure_ascii=False, indent=2))
+
     return {"retry_policy": "passed"}
 
 
@@ -3537,9 +3970,266 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     summary_only = validate_bridge_result({"status": "succeeded", "reports": [{"summary": "only"}], "artifact_refs": ["artifact"], "evidence": {"event_ids": ["evt"]}, "error_or_null": None, "cleanup_required": False})
     if summary_only.get("valid") or summary_only.get("error_type") not in {"SchemaValidationFailed", "MissingInstructionCoverage"}:
         raise AssertionError(json.dumps(summary_only, ensure_ascii=False, indent=2))
+    nested_bridge_stdout = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "result": json.dumps(
+                {
+                    "status": "partial",
+                    "bridge_result": {
+                        "status": "partial",
+                        "reports": [
+                            {
+                                "summary": "nested bridge report",
+                                "instruction_coverage": {"item": "blocked"},
+                            }
+                        ],
+                        "artifact_refs": [],
+                        "evidence": {"event_ids": ["evt_nested"]},
+                        "error_or_null": "Agent tool was not exposed",
+                        "cleanup_required": False,
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        },
+        ensure_ascii=False,
+    )
+    nested_payload = _parse_claude_payload(nested_bridge_stdout, "")
+    nested_normalized = _normalize_bridge_payload(nested_payload["payload"], nested_bridge_stdout, "")
+    if (
+        nested_normalized.get("status") != "partial"
+        or nested_normalized.get("reports", [{}])[0].get("summary") != "nested bridge report"
+        or nested_normalized.get("error_or_null", {}).get("type") != "BridgeLeaderReportedError"
+    ):
+        raise AssertionError(json.dumps(nested_normalized, ensure_ascii=False, indent=2))
+    repaired_bridge_payload = {
+        "status": "succeeded",
+        "reports": [
+            {
+                "summary": "created contract doc",
+                "instruction_coverage": {"write contract doc": "completed"},
+                "semantic_identity_resolution": {"disposition": "not_applicable", "basis": "smoke"},
+            }
+        ],
+        "artifact_refs": ["docs/contract.md"],
+        "evidence": {"created_file": "docs/contract.md"},
+        "error_or_null": None,
+        "cleanup_required": False,
+    }
+    repaired_normalized = _normalize_bridge_payload(repaired_bridge_payload, "", "")
+    if repaired_normalized.get("status") != "succeeded" or not repaired_normalized.get("reports", [{}])[0].get("evidence_refs"):
+        raise AssertionError(json.dumps(repaired_normalized, ensure_ascii=False, indent=2))
     completed_without_evidence = validate_teammate_report({"summary": "bad", "instruction_coverage": {"item": "completed"}}, strict=True)
     if completed_without_evidence.get("valid") or completed_without_evidence.get("error_type") != "MissingRequiredEvidenceRef":
         raise AssertionError(json.dumps(completed_without_evidence, ensure_ascii=False, indent=2))
+    fallback_packet = packet("bw_runtime_owned_fallback", "sub_runtime_owned_fallback")
+    fallback_packet["target_phase"] = "l3_bridge"
+    fallback_packet["phase_route"] = ["l3_bridge"]
+    fallback_packet["team_spec"]["teammate_specs"] = [
+        {
+            "teammate_name": "preflight-initial",
+            "role": "preflight_audit",
+            "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "MultiEdit", "NotebookEdit", "Write"],
+            "responsibilities": [],
+        }
+    ]
+    fallback_packet["task_team_mapping"]["teammate_assignments"] = [
+        {"teammate_name": "preflight-initial", "assignment": "Inspect docs/plan.md and report readiness.", "expected_output": "report"}
+    ]
+    fallback_packet["task_spec"]["target_phase"] = "l3_bridge"
+    fallback_packet["task_spec"]["instruction_coverage_checklist"] = ["plan readiness inspected"]
+    fallback_packet["completion_contract"] = {"required_outputs": ["report"], "required_artifacts": [], "timeout_policy": {"hard_timeout_seconds": 900}}
+    fallback_packet["task_spec"]["completion_contract"] = fallback_packet["completion_contract"]
+    fallback_packet["dispatch_contract"] = build_dispatch_contract(fallback_packet)
+    original_dispatch_failure = {
+        "status": "failed",
+        "reports": [],
+        "artifact_refs": [],
+        "evidence": {"hook_denial": "AgentDispatchContractViolation"},
+        "error_or_null": {"type": "AgentDispatchContractViolation", "message": "Agent payload did not match dispatch contract"},
+        "cleanup_required": False,
+    }
+    if not _is_agent_dispatch_contract_violation(original_dispatch_failure):
+        raise AssertionError(json.dumps(original_dispatch_failure, ensure_ascii=False, indent=2))
+    if not _runtime_owned_teammate_fallback_allowed(fallback_packet, original_dispatch_failure):
+        raise AssertionError(json.dumps(fallback_packet, ensure_ascii=False, indent=2))
+    agent_tool_unavailable = {
+        "status": "partial",
+        "reports": [{"summary": "bridge leader synthesized limited evidence"}],
+        "artifact_refs": [],
+        "evidence": {},
+        "error_or_null": {
+            "type": "BridgeLeaderReportedError",
+            "message": "No Agent dispatch tool was available in this Claude Code tool surface.",
+        },
+        "cleanup_required": False,
+    }
+    if not _runtime_owned_teammate_fallback_allowed(fallback_packet, agent_tool_unavailable):
+        raise AssertionError(json.dumps(agent_tool_unavailable, ensure_ascii=False, indent=2))
+    if not _prefer_runtime_owned_teammate_fallback(fallback_packet, bare_print_mode=True):
+        raise AssertionError(json.dumps(fallback_packet, ensure_ascii=False, indent=2))
+    if _prefer_runtime_owned_teammate_fallback(fallback_packet, bare_print_mode=False):
+        raise AssertionError(json.dumps(fallback_packet, ensure_ascii=False, indent=2))
+    l4_implement_fallback_packet = deepcopy(fallback_packet)
+    l4_implement_fallback_packet["target_phase"] = "l4_implement"
+    l4_implement_fallback_packet["phase_route"] = ["l3_bridge", "l4_implement"]
+    l4_implement_fallback_packet["task_spec"]["target_phase"] = "l4_implement"
+    l4_implement_fallback_packet["team_spec"]["teammate_specs"] = [
+        {
+            "teammate_name": "implementor",
+            "role": "implementation_prep",
+            "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"],
+            "responsibilities": [],
+        },
+        {
+            "teammate_name": "rungater",
+            "role": "implementation_gate",
+            "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash"],
+            "responsibilities": [],
+        },
+    ]
+    l4_implement_fallback_packet["task_team_mapping"]["teammate_assignments"] = [
+        {"teammate_name": "implementor", "assignment": "Define implementation contracts; no file changes.", "expected_output": "report"},
+        {"teammate_name": "rungater", "assignment": "Gate readiness; no execution.", "expected_output": "report"},
+    ]
+    l4_implement_fallback_packet["dispatch_contract"] = build_dispatch_contract(l4_implement_fallback_packet)
+    cli_failure = {
+        "status": "failed",
+        "reports": [],
+        "artifact_refs": [],
+        "evidence": {"stdout": "api_retry attempt 10/10"},
+        "error_or_null": {"type": "ClaudeCliFailed", "message": "claude cli bridge executor failed"},
+        "cleanup_required": False,
+    }
+    if not _runtime_owned_teammate_fallback_allowed(l4_implement_fallback_packet, cli_failure):
+        raise AssertionError(json.dumps(l4_implement_fallback_packet, ensure_ascii=False, indent=2))
+    if not _prefer_runtime_owned_teammate_fallback(l4_implement_fallback_packet, bare_print_mode=True):
+        raise AssertionError(json.dumps(l4_implement_fallback_packet, ensure_ascii=False, indent=2))
+    implementor_runtime_tools = _runtime_owned_teammate_allowed_tools(l4_implement_fallback_packet, "implementor")
+    if any(tool in implementor_runtime_tools for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"]):
+        raise AssertionError(json.dumps(implementor_runtime_tools, ensure_ascii=False, indent=2))
+    teammate_schema = _runtime_owned_teammate_report_schema()
+    if "evidence_refs" in teammate_schema.get("required", []):
+        raise AssertionError(json.dumps(teammate_schema, ensure_ascii=False, indent=2))
+    old_teammate_attempts = os.environ.pop("BRIDGE_RUNTIME_FALLBACK_TEAMMATE_ATTEMPTS", None)
+    try:
+        if _runtime_owned_teammate_retry_attempts() != 2:
+            raise AssertionError(_runtime_owned_teammate_retry_attempts())
+        os.environ["BRIDGE_RUNTIME_FALLBACK_TEAMMATE_ATTEMPTS"] = "9"
+        if _runtime_owned_teammate_retry_attempts() != 5:
+            raise AssertionError(_runtime_owned_teammate_retry_attempts())
+    finally:
+        if old_teammate_attempts is None:
+            os.environ.pop("BRIDGE_RUNTIME_FALLBACK_TEAMMATE_ATTEMPTS", None)
+        else:
+            os.environ["BRIDGE_RUNTIME_FALLBACK_TEAMMATE_ATTEMPTS"] = old_teammate_attempts
+    if not _runtime_owned_teammate_error_retryable({"type": "RuntimeOwnedTeammateCliFailed"}):
+        raise AssertionError("runtime-owned teammate CLI failures must be retryable")
+    if _runtime_owned_teammate_error_retryable({"type": "MissingRequiredEvidenceRef"}):
+        raise AssertionError("semantic/guardrail failures must not be treated as transport retries")
+    provider_reset = _provider_transport_failure("API Error: Unable to connect to API (ECONNRESET)", "")
+    if not provider_reset or provider_reset.get("type") != "ProviderTransportReset":
+        raise AssertionError(json.dumps(provider_reset, ensure_ascii=False, indent=2))
+    provider_reset_with_prompt_noise = _provider_transport_failure(
+        "User context mentions supplier rate limit 20/10s.\nAPI Error: Unable to connect to API (ECONNRESET)",
+        "",
+    )
+    if not provider_reset_with_prompt_noise or provider_reset_with_prompt_noise.get("type") != "ProviderTransportReset":
+        raise AssertionError(json.dumps(provider_reset_with_prompt_noise, ensure_ascii=False, indent=2))
+    if _provider_transport_failure("User context mentions supplier rate limit 20/10s, but no transport error occurred.", "") is not None:
+        raise AssertionError("prompt text alone must not be classified as a provider transport failure")
+    provider_rate_limited = _provider_transport_failure('{"type":"system","subtype":"api_retry","error_status":429,"error":"rate_limit_error"}', "")
+    if not provider_rate_limited or provider_rate_limited.get("type") != "ProviderTransportRateLimited":
+        raise AssertionError(json.dumps(provider_rate_limited, ensure_ascii=False, indent=2))
+    if _runtime_owned_teammate_error_retryable(provider_reset):
+        raise AssertionError("provider transport reset must not be retried as a teammate CLI failure")
+    l4_execute_fallback_packet = deepcopy(l4_implement_fallback_packet)
+    l4_execute_fallback_packet["target_phase"] = "l4_execute"
+    l4_execute_fallback_packet["task_spec"]["target_phase"] = "l4_execute"
+    if _runtime_owned_teammate_fallback_allowed(l4_execute_fallback_packet, cli_failure):
+        raise AssertionError(json.dumps(l4_execute_fallback_packet, ensure_ascii=False, indent=2))
+    runtime_owned_tools = _runtime_owned_teammate_allowed_tools(fallback_packet, "preflight-initial")
+    for mutating_tool in ["Edit", "MultiEdit", "NotebookEdit", "Write"]:
+        if mutating_tool in runtime_owned_tools:
+            raise AssertionError(json.dumps(runtime_owned_tools, ensure_ascii=False, indent=2))
+    if "Read" not in runtime_owned_tools or "Bash" in runtime_owned_tools:
+        raise AssertionError(json.dumps(runtime_owned_tools, ensure_ascii=False, indent=2))
+    curator_packet = deepcopy(fallback_packet)
+    curator_packet["team_spec"]["teammate_specs"] = [
+        {
+            "teammate_name": "curator",
+            "role": "artifact_curation",
+            "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"],
+            "responsibilities": [],
+        }
+    ]
+    curator_packet["task_team_mapping"]["teammate_assignments"] = [
+        {"teammate_name": "curator", "assignment": "Curate stale artifacts if needed.", "expected_output": "report"}
+    ]
+    curator_packet["task_spec"]["instruction_coverage_checklist"] = ["curation inspected"]
+    curator_packet["dispatch_contract"] = build_dispatch_contract(curator_packet)
+    curator_tools = _runtime_owned_teammate_allowed_tools(curator_packet, "curator")
+    if "Bash" not in curator_tools or any(tool in curator_tools for tool in ["Edit", "Write"]):
+        raise AssertionError(json.dumps(curator_tools, ensure_ascii=False, indent=2))
+    read_only_curator_packet = deepcopy(curator_packet)
+    read_only_curator_packet["task_team_mapping"]["teammate_assignments"][0]["assignment"] = "Read-only curation assessment; no edits and no destructive operations."
+    read_only_curator_tools = _runtime_owned_teammate_allowed_tools(read_only_curator_packet, "curator")
+    if "Bash" in read_only_curator_tools:
+        raise AssertionError(json.dumps(read_only_curator_tools, ensure_ascii=False, indent=2))
+    read_only_team_packet = deepcopy(fallback_packet)
+    read_only_team_packet["team_spec"]["teammate_specs"] = [
+        {"teammate_name": "curator", "role": "artifact_curation", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash"], "responsibilities": []},
+        {"teammate_name": "preflight-initial", "role": "preflight_audit", "allowed_tools": ["Read", "Grep", "Glob", "LS"], "responsibilities": []},
+        {"teammate_name": "refresher", "role": "documentation_refresh", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Edit", "Write"], "responsibilities": []},
+    ]
+    read_only_team_packet["task_team_mapping"]["teammate_assignments"] = [
+        {"teammate_name": "curator", "assignment": "Read-only active-surface assessment; no file changes.", "expected_output": "report"},
+        {"teammate_name": "preflight-initial", "assignment": "Read-only implementation readiness check.", "expected_output": "report"},
+        {"teammate_name": "refresher", "assignment": "Documentation refresh only if file changes are allowed.", "expected_output": "report"},
+    ]
+    read_only_team_packet["dispatch_contract"] = build_dispatch_contract(read_only_team_packet)
+    read_only_fallback_names = _runtime_owned_teammate_names(read_only_team_packet)
+    if read_only_fallback_names != ["curator", "preflight-initial"]:
+        raise AssertionError(json.dumps(read_only_fallback_names, ensure_ascii=False, indent=2))
+    idle_no_report_capture = "\n──── refresher ──\n❯\n? for shortcuts\n"
+    if not _tmux_runtime_teammate_idle_without_report(idle_no_report_capture, "return json"):
+        raise AssertionError(json.dumps({"idle_no_report_capture": idle_no_report_capture}, ensure_ascii=False, indent=2))
+    idle_no_report_escape_footer = "\n* Ruminating... (7s)\n──── preflight-initial ──\n❯\nesc to interrupt\n"
+    if not _tmux_runtime_teammate_idle_without_report(idle_no_report_escape_footer, "return json"):
+        raise AssertionError(json.dumps({"idle_no_report_escape_footer": idle_no_report_escape_footer}, ensure_ascii=False, indent=2))
+    active_teammate_capture = "\n* Razzmatazzing… (5s · ↓ 8.8k tokens)\n"
+    if _tmux_runtime_teammate_idle_without_report(active_teammate_capture, "return json"):
+        raise AssertionError(json.dumps({"active_teammate_capture": active_teammate_capture}, ensure_ascii=False, indent=2))
+    fallback_report = _normalize_runtime_owned_teammate_report(
+        {"summary": "Read-only preflight completed."},
+        "preflight-initial",
+        fallback_packet,
+        "Read-only preflight completed.",
+        {"tmux_session": "tmux_smoke"},
+    )
+    fallback_result = _runtime_owned_bridge_result_from_teammate_reports(
+        packet=fallback_packet,
+        execution_input={
+            "run_id": "run_demo",
+            "main_session_id": "main_demo",
+            "sub_session_id": "sub_runtime_owned_fallback",
+            "bridge_window_id": "bw_runtime_owned_fallback",
+            "team_id": "team_bw_runtime_owned_fallback",
+            "task_id": "task_bw_runtime_owned_fallback",
+        },
+        reports=[fallback_report],
+        original_result=original_dispatch_failure,
+        prompt_path=control_root / "runtime_state" / "bridge_prompts" / "runtime_owned.md",
+        transport="smoke",
+        attempts=[{"teammate": "preflight-initial", "adapter": "smoke"}],
+    )
+    if fallback_result.get("status") != "succeeded" or not fallback_result.get("evidence", {}).get("runtime_owned_teammate_fallback"):
+        raise AssertionError(json.dumps(fallback_result, ensure_ascii=False, indent=2))
+    fallback_validation = validate_bridge_result(fallback_result, completion_contract=fallback_packet["completion_contract"])
+    if not fallback_validation.get("valid"):
+        raise AssertionError(json.dumps(fallback_validation, ensure_ascii=False, indent=2))
     completion_invalid = validate_completion_report({"completion_checks": {"required_outputs_present": True}, "artifact_refs": []})
     if completion_invalid.get("valid"):
         raise AssertionError(json.dumps(completion_invalid, ensure_ascii=False, indent=2))
@@ -3554,6 +4244,7 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
         raise AssertionError(json.dumps(completion_without_evidence, ensure_ascii=False, indent=2))
     artifact_claim_without_refs = validate_completion_report(
         {
+            "completion_contract": {"required_artifacts": ["log_manifest"]},
             "completion_checks": {"required_outputs_present": True, "required_artifacts_present": True, "validation_passed": False},
             "reports": [report()],
             "artifact_refs": [],
@@ -3561,6 +4252,17 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     )
     if artifact_claim_without_refs.get("valid") or artifact_claim_without_refs.get("error_type") != "MissingArtifactRefs":
         raise AssertionError(json.dumps(artifact_claim_without_refs, ensure_ascii=False, indent=2))
+    no_required_artifacts_with_empty_refs = validate_completion_report(
+        {
+            "completion_contract": {"required_outputs": ["report"], "required_artifacts": []},
+            "completion_checks": {"required_outputs_present": True, "required_artifacts_present": True, "validation_passed": True},
+            "completion_evidence": {"event_ids": ["evt_no_artifact_required"]},
+            "reports": [report()],
+            "artifact_refs": [],
+        }
+    )
+    if not no_required_artifacts_with_empty_refs.get("valid"):
+        raise AssertionError(json.dumps(no_required_artifacts_with_empty_refs, ensure_ascii=False, indent=2))
     bad_manifest = validate_log_manifest({"run_id": "run_demo", "bridge_window_id": "bw", "task_id": "task", "terminal_status": "completed"})
     if bad_manifest.get("valid") or bad_manifest.get("error_type") != "SchemaValidationFailed":
         raise AssertionError(json.dumps(bad_manifest, ensure_ascii=False, indent=2))
@@ -4171,6 +4873,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
             else:
                 os.environ[name] = value
     expected_tmux_fragments = [
+        "--bare",
         "--add-dir",
         str(repo_root),
         str(control_root.parent),
@@ -4203,6 +4906,8 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
             os.environ["OUTER_LEADER_TMUX_TOOL_ARGS"] = old_tmux_tool_args
     expected_tool_arg_fragments = [
         "--allowedTools",
+        "mcp__bridge__list_registered_repos",
+        "mcp__bridge__list_runs",
         "mcp__bridge__read_runtime_snapshot",
         "mcp__bridge__call_bridge_sdk",
         "Read",
@@ -4276,6 +4981,10 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     second_default = host.handle_user_input({"text": "second message should stay on host default run"})
     if second_default.get("host", {}).get("run_id") != run_id:
         raise AssertionError(json.dumps({"first": response.get("host"), "second": second_default.get("host")}, ensure_ascii=False, indent=2))
+    restarted_host = OuterSdkHost(config, adapter=UnavailableOuterLeaderAdapter())
+    restarted_status = restarted_host.status(repo_key=repo_key)
+    if restarted_status.get("default_run_id") != run_id:
+        raise AssertionError(json.dumps({"expected": run_id, "restarted": restarted_status}, ensure_ascii=False, indent=2))
     run_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / run_id
     event_log = _read_jsonl(run_root / "event_log.jsonl")
     if not any(item.get("event_kind") == "user_prompt_submitted" for item in event_log):
@@ -4295,6 +5004,9 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         or outer_context.get("source") != "outer_sdk_host"
     ):
         raise AssertionError(json.dumps(outer_context, ensure_ascii=False, indent=2))
+    selected_run_response = restarted_host.handle_user_input({"text": "continue a selected run", "run_id": "run_outer_selected"})
+    if selected_run_response.get("host", {}).get("default_run_id") != "run_outer_selected":
+        raise AssertionError(json.dumps(selected_run_response.get("host", {}), ensure_ascii=False, indent=2))
     camel_task_response = host.handle_user_input(
         {
             "text": "camel task spec should be preserved",
@@ -4309,6 +5021,90 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     camel_payloads = [item.get("payload", {}) for item in camel_events if item.get("event_kind") == "user_prompt_submitted"]
     if not camel_payloads or camel_payloads[-1].get("task_spec", {}).get("task_subject") != "camel task spec smoke":
         raise AssertionError(json.dumps({"response": camel_task_response, "events": camel_events[-5:]}, ensure_ascii=False, indent=2))
+
+    class SuccessNoBridgeAdapter:
+        name = "success-no-bridge-smoke"
+
+        def handle_user_input(self, request, *, event_sink=None):
+            return {
+                "status": "succeeded",
+                "handled_by": self.name,
+                "reports": [{"summary": "outer leader returned without a bridge call", "source": "smoke"}],
+                "artifact_refs": [],
+                "evidence": {},
+                "error_or_null": None,
+                "cleanup_required": False,
+            }
+
+    auto_bridge_calls = []
+
+    def fake_auto_bridge_runner(request):
+        auto_bridge_calls.append(dict(request))
+        return {
+            "status": "succeeded",
+            "bridge_window_id": "bw_auto_bridge_smoke",
+            "reports": [{"summary": "auto bridge smoke report"}],
+            "artifact_refs": [],
+            "error_or_null": None,
+            "cleanup_required": False,
+        }
+
+    auto_bridge_host = OuterSdkHost(config, adapter=SuccessNoBridgeAdapter(), auto_bridge_runner=fake_auto_bridge_runner)
+    auto_bridge_response = auto_bridge_host.handle_user_input(
+        {
+            "text": "continue the selected run through the bridge",
+            "run_id": "run_outer_auto_bridge",
+            "dispatch_intent": "advance_or_continue",
+            "target_phase": "l3_bridge",
+        }
+    )
+    auto_bridge_result = auto_bridge_response.get("leader_result", {})
+    if (
+        auto_bridge_result.get("handled_by") != "outer_sdk_host_auto_bridge"
+        or auto_bridge_result.get("status") != "succeeded"
+        or len(auto_bridge_calls) != 1
+    ):
+        raise AssertionError(json.dumps({"response": auto_bridge_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+
+    class TransportFailureNoBridgeAdapter:
+        name = "transport-failure-no-bridge-smoke"
+
+        def handle_user_input(self, request, *, event_sink=None):
+            return {
+                "status": "failed",
+                "handled_by": self.name,
+                "reports": [{"summary": "Unable to connect to API (ECONNRESET)", "source": "smoke"}],
+                "artifact_refs": [],
+                "evidence": {},
+                "error_or_null": {"type": "OuterLeaderTmuxTerminalApiError", "message": "Unable to connect to API (ECONNRESET)"},
+                "cleanup_required": False,
+            }
+
+    transport_failure_host = OuterSdkHost(config, adapter=TransportFailureNoBridgeAdapter(), auto_bridge_runner=fake_auto_bridge_runner)
+    transport_failure_response = transport_failure_host.handle_user_input(
+        {
+            "text": "continue after outer leader transport failure",
+            "run_id": "run_outer_auto_bridge_transport_failure",
+            "dispatch_intent": "advance_or_continue",
+            "target_phase": "l3_bridge",
+        }
+    )
+    transport_failure_result = transport_failure_response.get("leader_result", {})
+    if (
+        transport_failure_result.get("handled_by") != "outer_sdk_host_auto_bridge"
+        or transport_failure_result.get("status") != "succeeded"
+        or len(auto_bridge_calls) != 2
+    ):
+        raise AssertionError(json.dumps({"response": transport_failure_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+    inspect_response = auto_bridge_host.handle_user_input(
+        {
+            "text": "inspect only, do not advance",
+            "run_id": "run_outer_auto_bridge_inspect",
+            "dispatch_intent": "inspect_only",
+        }
+    )
+    if inspect_response.get("leader_result", {}).get("handled_by") == "outer_sdk_host_auto_bridge" or len(auto_bridge_calls) != 2:
+        raise AssertionError(json.dumps({"response": inspect_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
 
     class LongReportAdapter:
         name = "long-report-smoke"
@@ -4390,6 +5186,37 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     packet_only_violation = _outer_leader_tmux_contract_violation(config, {"repo_key": repo_key, "run_id": packet_only_run_id}, "build complete")
     if not packet_only_violation or "stopped before" not in packet_only_violation:
         raise AssertionError(packet_only_violation)
+    reconcile_only_run_id = "run_outer_reconcile_only_advance"
+    reconcile_only_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / reconcile_only_run_id
+    reconcile_only_root.mkdir(parents=True, exist_ok=True)
+    (reconcile_only_root / "tool_events.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"timestamp": "2026-05-16T00:00:00+00:00", "tool_name": "mcp__bridge__build_bridge_packet", "status": "completed", "tool_use_id": "old_build"}, ensure_ascii=False),
+                json.dumps({"timestamp": "2026-05-16T00:00:01+00:00", "tool_name": "mcp__bridge__call_bridge_sdk", "status": "started", "tool_use_id": "old_call"}, ensure_ascii=False),
+                json.dumps({"timestamp": "2026-05-16T00:01:01+00:00", "tool_name": "mcp__bridge__reconcile_workflow_from_ledger", "status": "completed", "tool_use_id": "tool_reconcile"}, ensure_ascii=False),
+                json.dumps({"timestamp": "2026-05-16T00:01:02+00:00", "tool_name": "Read", "status": "completed", "tool_use_id": "tool_read"}, ensure_ascii=False),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    reconcile_only_request = {
+        "repo_key": repo_key,
+        "run_id": reconcile_only_run_id,
+        "dispatch_intent": "advance_or_continue",
+        "created_at": "2026-05-16T00:01:00+00:00",
+    }
+    reconcile_only_violation = _outer_leader_tmux_contract_violation(config, reconcile_only_request, "reconciled workflow state")
+    if not reconcile_only_violation or "reconciled workflow state" not in reconcile_only_violation:
+        raise AssertionError(reconcile_only_violation)
+    inspect_reconcile_violation = _outer_leader_tmux_contract_violation(
+        config,
+        {**reconcile_only_request, "dispatch_intent": "inspect_only"},
+        "reconciled workflow state",
+    )
+    if inspect_reconcile_violation:
+        raise AssertionError(inspect_reconcile_violation)
     with_call_run_id = "run_outer_packet_then_call"
     with_call_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / with_call_run_id
     with_call_root.mkdir(parents=True, exist_ok=True)
@@ -4416,6 +5243,28 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     )
     if sdk_packet_only.get("status") != "blocked" or sdk_packet_only.get("error_or_null", {}).get("type") != "OuterLeaderContractViolation":
         raise AssertionError(json.dumps(sdk_packet_only, ensure_ascii=False, indent=2))
+    sdk_reconcile_only = _outer_sdk_result(
+        {"run_id": "run_sdk_reconcile_only", "repo_key": repo_key, "main_session_id": "outer_smoke_sdk", "dispatch_intent": "advance_or_continue"},
+        [
+            {"event_type": "sdk_stream_tool_use", "tool_name": "mcp__bridge__reconcile_workflow_from_ledger"},
+            {"event_type": "sdk_stream_tool_result", "tool_result_id": "tool_reconcile"},
+        ],
+        {"subtype": "success", "result": "reconciled workflow state", "permission_denials": []},
+        handled_by="sdk-smoke",
+    )
+    if sdk_reconcile_only.get("status") != "blocked" or "reconciled workflow state" not in sdk_reconcile_only.get("error_or_null", {}).get("message", ""):
+        raise AssertionError(json.dumps(sdk_reconcile_only, ensure_ascii=False, indent=2))
+    sdk_inspect_reconcile = _outer_sdk_result(
+        {"run_id": "run_sdk_reconcile_inspect", "repo_key": repo_key, "main_session_id": "outer_smoke_sdk", "dispatch_intent": "inspect_only"},
+        [
+            {"event_type": "sdk_stream_tool_use", "tool_name": "mcp__bridge__reconcile_workflow_from_ledger"},
+            {"event_type": "sdk_stream_tool_result", "tool_result_id": "tool_reconcile"},
+        ],
+        {"subtype": "success", "result": "reconciled workflow state", "permission_denials": []},
+        handled_by="sdk-smoke",
+    )
+    if sdk_inspect_reconcile.get("status") != "succeeded":
+        raise AssertionError(json.dumps(sdk_inspect_reconcile, ensure_ascii=False, indent=2))
     sdk_packet_then_call = _outer_sdk_result(
         {"run_id": "run_sdk_packet_then_call", "repo_key": repo_key, "main_session_id": "outer_smoke_sdk"},
         [
@@ -4433,6 +5282,11 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         raise AssertionError(json.dumps({"tmux_status_only": extract_tmux_assistant_text(tmux_status_only, "inspect plan")}, ensure_ascii=False, indent=2))
     if not _outer_tmux_completed_without_assistant(tmux_status_only, "inspect plan"):
         raise AssertionError("outer tmux status-only prompt return should be classified as no assistant text")
+    tmux_separator_only_after_bridge = "\n\u276f continue\n\n  Called bridge (ctrl+o to expand)\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f\n? for shortcuts\n"
+    if extract_tmux_assistant_text(tmux_separator_only_after_bridge, "continue"):
+        raise AssertionError(json.dumps({"tmux_separator_only_after_bridge": extract_tmux_assistant_text(tmux_separator_only_after_bridge, "continue")}, ensure_ascii=False, indent=2))
+    if not _outer_tmux_completed_without_assistant(tmux_separator_only_after_bridge, "continue"):
+        raise AssertionError("outer tmux separator-only prompt return should be classified as no assistant text")
     tmux_esc_prompt_status_only = "\n\u276f inspect plan\n\n\u25cf Reading 1 file, calling bridge 5 times\u2026 (ctrl+o to expand)\n  \u23bf  docs/plan.md\n\n\u273d Frosting\u2026 (13m 33s)\n\n\u2500\u2500\u2500 leader-orchestrator \u2500\u2500\n\u276f\nesc to interrupt\n"
     if extract_tmux_assistant_text(tmux_esc_prompt_status_only, "inspect plan"):
         raise AssertionError(json.dumps({"tmux_esc_prompt_status_only": extract_tmux_assistant_text(tmux_esc_prompt_status_only, "inspect plan")}, ensure_ascii=False, indent=2))
@@ -4488,6 +5342,57 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     bridge_state = _outer_runtime_bridge_completion_state(config, {"repo_key": repo_key, "run_id": bridge_status_run_id})
     if bridge_state.get("open_bridge_windows") != [] or bridge_state.get("terminal_bridge_result_seen") is not True:
         raise AssertionError(json.dumps(bridge_state, ensure_ascii=False, indent=2))
+    bridge_failure = {
+        "status": "failed",
+        "failure_stage_or_null": "task_complete",
+        "bridge_window_id": "bw_failed",
+        "team_id_or_null": "team_failed",
+        "task_id_or_null": "task_failed",
+        "returned_at": "2026-05-16T10:34:42+00:00",
+        "full_result_ref": str(bridge_status_root / "run_ledger.json"),
+        "cleanup_required": False,
+        "error_or_null": {
+            "type": "ClaudeTmuxTerminalApiError",
+            "message": "claude tmux bridge executor hit a terminal Claude API error",
+        },
+        "evidence_summary": {
+            "terminal_error": "API Error: Unable to connect to API (ECONNRESET)",
+            "assistant_text": "x" * 2000,
+            "failure_classification": "bridge_transport_api_failure",
+        },
+    }
+    (bridge_status_root / "runtime_snapshot.json").write_text(
+        json.dumps({"lifecycle": {"open_bridge_window_ids": []}, "last_bridge_result": bridge_failure}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    terminal_bridge = _outer_runtime_terminal_bridge_result(config, {"repo_key": repo_key, "run_id": bridge_status_run_id})
+    if not terminal_bridge or terminal_bridge.get("error_or_null", {}).get("type") != "ClaudeTmuxTerminalApiError":
+        raise AssertionError(json.dumps(terminal_bridge, ensure_ascii=False, indent=2))
+    leader_result = _outer_bridge_result_backed_leader_result(
+        {"repo_key": repo_key, "run_id": bridge_status_run_id},
+        terminal_bridge,
+        outer_error=OuterTmuxTerminalError("no assistant", error_type="OuterLeaderTmuxNoAssistantText", capture=""),
+        session_name="tmux_smoke",
+    )
+    if leader_result.get("error_or_null", {}).get("type") != "ClaudeTmuxTerminalApiError":
+        raise AssertionError(json.dumps(leader_result, ensure_ascii=False, indent=2))
+    evidence_summary = leader_result.get("evidence", {}).get("bridge_evidence_summary", {})
+    if len(str(evidence_summary.get("assistant_text", ""))) > 720:
+        raise AssertionError(json.dumps(evidence_summary, ensure_ascii=False, indent=2))
+    if not _outer_bridge_result_should_override_success(terminal_bridge):
+        raise AssertionError(json.dumps(terminal_bridge, ensure_ascii=False, indent=2))
+    assisted_failure = _outer_bridge_result_backed_leader_result(
+        {"repo_key": repo_key, "run_id": bridge_status_run_id, "main_session_id": "outer-main"},
+        terminal_bridge,
+        outer_error=None,
+        session_name="tmux_smoke",
+        assistant_text="usable outer leader report",
+        duration_ms=1234,
+    )
+    if assisted_failure.get("status") != "failed" or assisted_failure.get("error_or_null", {}).get("type") != "ClaudeTmuxTerminalApiError":
+        raise AssertionError(json.dumps(assisted_failure, ensure_ascii=False, indent=2))
+    if assisted_failure.get("reports", [{}])[0].get("summary") != "usable outer leader report":
+        raise AssertionError(json.dumps(assisted_failure, ensure_ascii=False, indent=2))
     tmux_tool_then_final = "\n\u276f call bridge\n\n\u25cf Calling bridge\u2026 (ctrl+o to expand)\n\n\u25cf bridge result recorded\n\n\u273b Cooked for 10s\n\u276f "
     if "bridge result recorded" not in extract_tmux_assistant_text(tmux_tool_then_final, "call bridge"):
         raise AssertionError(json.dumps({"tmux_tool_then_final": extract_tmux_assistant_text(tmux_tool_then_final, "call bridge")}, ensure_ascii=False, indent=2))
@@ -4621,7 +5526,15 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
             "--adapter",
             "unavailable",
             "--input-json",
-            json.dumps({"text": "record a CLI host input", "input_kind": "user_prompt"}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "text": "record a CLI host input",
+                    "input_kind": "user_prompt",
+                    "run_id": run_id,
+                    "main_session_id": response["host"].get("main_session_id"),
+                },
+                ensure_ascii=False,
+            ),
         ],
         cwd=str(runtime_dir),
         capture_output=True,

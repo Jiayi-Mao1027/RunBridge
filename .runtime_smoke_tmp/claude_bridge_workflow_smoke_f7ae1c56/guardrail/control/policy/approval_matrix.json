@@ -1,0 +1,10 @@
+{
+  "categories": {
+    "control_default": {
+      "allowed_event_kinds": [
+        "retry_attempt_scheduled",
+        "enter_anomaly"
+      ]
+    }
+  }
+}

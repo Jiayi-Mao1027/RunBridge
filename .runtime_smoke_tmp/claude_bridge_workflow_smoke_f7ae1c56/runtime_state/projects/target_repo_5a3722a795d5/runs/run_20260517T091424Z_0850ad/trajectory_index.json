@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1.0",
+  "updated_at": "2026-05-17T09:14:30.221650+00:00",
+  "repo_key": "target_repo_5a3722a795d5",
+  "run_id": "run_20260517T091424Z_0850ad",
+  "step_count": 3,
+  "latest_step": {
+    "trajectory_id": "traj_000003",
+    "step_index": 3,
+    "timestamp": "2026-05-17T09:14:30.219569+00:00",
+    "action_kind": "workflow_event"
+  },
+  "artifact_producers": {},
+  "process_producers": {},
+  "completion_checks": []
+}

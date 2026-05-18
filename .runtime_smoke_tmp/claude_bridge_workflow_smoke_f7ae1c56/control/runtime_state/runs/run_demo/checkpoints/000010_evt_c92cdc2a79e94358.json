@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1.0",
+  "checkpoint_id": "chkpt_000010_evt_c92cdc2a79e94358",
+  "sequence": 10,
+  "timestamp": "2026-05-17T09:14:21.506793+00:00",
+  "repo_key": "unscoped_repo",
+  "run_id": "run_demo",
+  "event_id": "evt_c92cdc2a79e94358",
+  "event_kind": "taskcreated_hook_accepted",
+  "state": {
+    "repo_key": "unscoped_repo",
+    "run_id": "run_demo",
+    "phase": "leader_freeze",
+    "lifecycle_state": "task_created_recorded",
+    "graph_node": "task_created_recorded",
+    "active_bridge_window_id": "bw_user_clarification",
+    "active_team_id": "team_user_clarification",
+    "active_task_id": "task_user_clarification",
+    "frozen_semantics_hash": null,
+    "packet_hash": "f2c59ccd74c4267bb925c269",
+    "completion_contract_hash": "0af213370df77f9ef9f651db",
+    "retry_context": {},
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": []
+  },
+  "state_hash": "c3008ed1f209fa511b2db07d",
+  "snapshot_hash": "088d2dab5fef2a2d982b6d71"
+}

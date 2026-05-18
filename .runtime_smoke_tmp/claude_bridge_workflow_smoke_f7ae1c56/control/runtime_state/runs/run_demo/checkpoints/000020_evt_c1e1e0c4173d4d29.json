@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1.0",
+  "checkpoint_id": "chkpt_000020_evt_c1e1e0c4173d4d29",
+  "sequence": 20,
+  "timestamp": "2026-05-17T09:14:22.277701+00:00",
+  "repo_key": "unscoped_repo",
+  "run_id": "run_demo",
+  "event_id": "evt_c1e1e0c4173d4d29",
+  "event_kind": "call_bridge_sdk_started",
+  "state": {
+    "repo_key": "unscoped_repo",
+    "run_id": "run_demo",
+    "phase": "leader_freeze",
+    "lifecycle_state": "bridge_call_started",
+    "graph_node": "bridge_call_started",
+    "active_bridge_window_id": "bw_success",
+    "active_team_id": null,
+    "active_task_id": null,
+    "frozen_semantics_hash": null,
+    "packet_hash": "2adcaf8a27651c38b8fb897e",
+    "completion_contract_hash": "0af213370df77f9ef9f651db",
+    "retry_context": {},
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": []
+  },
+  "state_hash": "7ae3e0c67c5820e3874fdc93",
+  "snapshot_hash": "e5afb66b2620a2dc9b8aaa04"
+}

@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import time
 from typing import Any
+from urllib.parse import urlsplit
 import uuid
 
 from .adapters import OuterLeaderEventSink
@@ -129,6 +130,24 @@ class TmuxReplOuterLeaderAdapter:
                         "outer_leader_tool_state": _outer_leader_tool_state(self.config, request),
                     },
                 )
+            bridge_result = _runtime_terminal_bridge_result(self.config, request)
+            if _bridge_result_should_override_success(bridge_result):
+                bridge_error = _bridge_result_error(bridge_result)
+                self._emit(
+                    event_sink,
+                    request,
+                    "sdk_stream_error",
+                    {"error_type": bridge_error["type"], "message": bridge_error["message"], "adapter": self.name},
+                    status="failed",
+                )
+                return _bridge_result_backed_leader_result(
+                    request,
+                    bridge_result,
+                    outer_error=None,
+                    session_name=session_name,
+                    assistant_text=assistant_text,
+                    duration_ms=duration_ms,
+                )
             self._emit(
                 event_sink,
                 request,
@@ -175,6 +194,26 @@ class TmuxReplOuterLeaderAdapter:
                 "cleanup_required": False,
             }
         except OuterLeaderTmuxTerminalError as exc:
+            bridge_result = (
+                _runtime_terminal_bridge_result(self.config, request)
+                if exc.error_type in {"OuterLeaderTmuxNoAssistantText", "OuterLeaderTmuxTerminalApiError"}
+                else None
+            )
+            if bridge_result:
+                bridge_error = _bridge_result_error(bridge_result)
+                self._emit(
+                    event_sink,
+                    request,
+                    "sdk_stream_error",
+                    {"error_type": bridge_error["type"], "message": bridge_error["message"], "adapter": self.name},
+                    status="failed",
+                )
+                return _bridge_result_backed_leader_result(
+                    request,
+                    bridge_result,
+                    outer_error=exc,
+                    session_name=session_name,
+                )
             self._emit(
                 event_sink,
                 request,
@@ -229,6 +268,8 @@ class TmuxReplOuterLeaderAdapter:
         parts = ["cd", _q(str(repo_root)), "&&", "env"]
         parts.extend(f"{key}={_q(value)}" for key, value in sorted(env.items()))
         parts.append(_q(str(cli_info.get("cli_path") or "claude")))
+        if _outer_leader_tmux_bare_mode(settings_path):
+            parts.append("--bare")
         if cli_info.get("mcp_config"):
             parts.extend(["--mcp-config", _q(str(cli_info["mcp_config"]))])
         if cli_info.get("strict_mcp_config", True):
@@ -312,6 +353,9 @@ class TmuxReplOuterLeaderAdapter:
                     error_type="OuterLeaderTmuxSessionLost",
                     capture=last,
                 ) from exc
+            runtime_bridge = _runtime_bridge_completion_state(self.config, request)
+            if runtime_bridge.get("terminal_bridge_result_seen") and not _tmux_bridge_status_should_wait(runtime_bridge):
+                return last
             if _looks_complete(last, prompt):
                 return last
             prompt_completion = _tmux_prompt_completion_candidate(last, prompt)
@@ -328,11 +372,39 @@ class TmuxReplOuterLeaderAdapter:
                 stable_prompt_count = 0
             terminal_error = _tmux_terminal_error(last)
             if terminal_error:
+                if _tmux_waiting_on_bridge_status(last):
+                    runtime_bridge = _runtime_bridge_completion_state(self.config, request)
+                    if _tmux_bridge_status_should_wait(runtime_bridge):
+                        stable_no_assistant_tail = ""
+                        stable_no_assistant_count = 0
+                        time.sleep(1.0)
+                        continue
                 raise OuterLeaderTmuxTerminalError(
                     terminal_error["message"],
                     error_type=terminal_error["type"],
                     capture=last,
                 )
+            if _tmux_retrying_api_status(last):
+                runtime_bridge = _runtime_bridge_completion_state(self.config, request)
+                if _tmux_bridge_status_should_wait(runtime_bridge):
+                    stable_no_assistant_tail = ""
+                    stable_no_assistant_count = 0
+                    time.sleep(1.0)
+                    continue
+                no_assistant_tail = _tmux_no_assistant_signature(last)
+                if no_assistant_tail == stable_no_assistant_tail:
+                    stable_no_assistant_count += 1
+                else:
+                    stable_no_assistant_tail = no_assistant_tail
+                    stable_no_assistant_count = 1
+                if stable_no_assistant_count >= _tmux_stable_completion_polls():
+                    raise OuterLeaderTmuxTerminalError(
+                        "Claude TTY returned to the prompt after a terminal bridge result while stale retry status remained visible.",
+                        error_type="OuterLeaderTmuxNoAssistantText",
+                        capture=last,
+                    )
+                time.sleep(1.0)
+                continue
             if _tmux_completed_without_assistant(last, prompt):
                 if _tmux_waiting_on_bridge_status(last):
                     runtime_bridge = _runtime_bridge_completion_state(self.config, request)
@@ -619,7 +691,7 @@ def _is_transient_tui_status(text: str) -> bool:
 def _tmux_waiting_on_bridge_status(text: str) -> bool:
     for raw_line in _strip_ansi(text).splitlines():
         line = _clean_line(raw_line).strip().lower()
-        if "ctrl+o to expand" in line and "calling bridge" in line:
+        if "ctrl+o to expand" in line and ("calling bridge" in line or "called bridge" in line):
             return True
     return False
 
@@ -670,13 +742,29 @@ def _runtime_bridge_completion_state(config: Any, request: dict[str, Any]) -> di
                 event_kind = str(event.get("event_kind") or "")
                 if event_kind.startswith("bridge_result_returned") or event_kind in {"bridge_call_failed", "bridge_window_failed"}:
                     terminal_seen = True
+        last_bridge_result = snapshot.get("last_bridge_result") if isinstance(snapshot.get("last_bridge_result"), dict) else None
         return {
             "open_bridge_windows": open_windows,
             "terminal_bridge_result_seen": terminal_seen,
             "request_age_seconds": request_age_seconds,
+            "snapshot_ref": str(snapshot_path),
+            "last_bridge_result": last_bridge_result,
         }
     except Exception:
         return {"open_bridge_windows": None, "terminal_bridge_result_seen": False, "request_age_seconds": None}
+
+
+def _runtime_terminal_bridge_result(config: Any, request: dict[str, Any]) -> dict[str, Any] | None:
+    state = _runtime_bridge_completion_state(config, request)
+    if not state.get("terminal_bridge_result_seen"):
+        return None
+    result = state.get("last_bridge_result")
+    if not isinstance(result, dict) or not result:
+        return None
+    status = str(result.get("status") or "").strip().lower()
+    if status not in {"succeeded", "failed", "partial", "partial_or_failed", "orphaned", "needs_user_answer", "blocked"} and not isinstance(result.get("error_or_null"), dict):
+        return None
+    return {**result, "_snapshot_ref": state.get("snapshot_ref")}
 
 
 def _tmux_bridge_status_should_wait(state: dict[str, Any]) -> bool:
@@ -755,6 +843,8 @@ def _parse_iso_timestamp(value: Any) -> datetime | None:
 
 def _is_tui_chrome_line(text: str) -> bool:
     stripped = str(text or "").strip()
+    if re.fullmatch(r"[\s\-\u2500\u2501\u2550]{8,}", stripped):
+        return True
     if "leader-orchestrator" not in stripped:
         return False
     chrome = stripped.replace("leader-orchestrator", "").strip()
@@ -785,25 +875,46 @@ def _outer_leader_tmux_contract_violation(config: Any, request: dict[str, Any], 
     state = _outer_leader_tool_state(config, request)
     if _is_tool_artifact_filename(assistant_text):
         return "Outer leader returned only a tool artifact filename instead of a runtime-backed report."
+    if (
+        _is_advance_or_continue_request(request)
+        and state.get("reconcile_workflow_completed")
+        and not state.get("build_bridge_packet_completed")
+        and not state.get("call_bridge_sdk_started")
+    ):
+        return "Outer leader reconciled workflow state for an advance/continue request but stopped before mcp__bridge__build_bridge_packet and mcp__bridge__call_bridge_sdk."
     if state.get("build_bridge_packet_completed") and not state.get("call_bridge_sdk_started"):
         return "Outer leader built a BridgePacket but stopped before mcp__bridge__call_bridge_sdk."
     return None
+
+
+def _is_advance_or_continue_request(request: dict[str, Any]) -> bool:
+    return str(request.get("dispatch_intent") or "").strip() == "advance_or_continue"
 
 
 def _outer_leader_tool_state(config: Any, request: dict[str, Any]) -> dict[str, Any]:
     run_root = _outer_request_run_root(config, request)
     state = {
         "run_root": str(run_root) if run_root else None,
+        "reconcile_workflow_completed": False,
         "build_bridge_packet_completed": False,
         "call_bridge_sdk_started": False,
+        "last_reconcile_tool_use_id": None,
         "last_build_tool_use_id": None,
         "last_call_tool_use_id": None,
     }
     if run_root is None:
         return state
+    request_created_at = _parse_iso_timestamp(request.get("created_at"))
     for record in _read_jsonl_safely(run_root / "tool_events.jsonl")[-200:]:
+        if request_created_at is not None:
+            record_timestamp = _parse_iso_timestamp(record.get("timestamp"))
+            if record_timestamp is None or record_timestamp < request_created_at:
+                continue
         tool_name = str(record.get("tool_name") or "")
         status = str(record.get("status") or "")
+        if tool_name == "mcp__bridge__reconcile_workflow_from_ledger" and status == "completed":
+            state["reconcile_workflow_completed"] = True
+            state["last_reconcile_tool_use_id"] = record.get("tool_use_id")
         if tool_name == "mcp__bridge__build_bridge_packet" and status == "completed":
             state["build_bridge_packet_completed"] = True
             state["last_build_tool_use_id"] = record.get("tool_use_id")
@@ -886,6 +997,132 @@ def _blocked_result(
     }
 
 
+def _bridge_result_backed_leader_result(
+    request: dict[str, Any],
+    bridge_result: dict[str, Any],
+    *,
+    outer_error: OuterLeaderTmuxTerminalError | None,
+    session_name: str,
+    assistant_text: str | None = None,
+    duration_ms: int | None = None,
+) -> dict[str, Any]:
+    bridge_error = _bridge_result_error(bridge_result)
+    status = str(bridge_result.get("status") or "failed").strip() or "failed"
+    summary = _bridge_result_summary(bridge_result, bridge_error)
+    reports = []
+    if assistant_text:
+        reports.append(
+            {
+                "summary": _limit_text(assistant_text, REPORT_TEXT_LIMIT),
+                "source": "outer_leader_tmux_repl",
+                "session_id": request.get("main_session_id"),
+            }
+        )
+    reports.append({"summary": _limit_text(summary, REPORT_TEXT_LIMIT), "source": "runtime_snapshot.last_bridge_result"})
+    return {
+        "status": status,
+        "handled_by": "claude-tmux-repl",
+        "reports": reports,
+        "artifact_refs": bridge_result.get("artifact_refs_preview") if isinstance(bridge_result.get("artifact_refs_preview"), list) else [],
+        "evidence": {
+            "repo_key": request.get("repo_key"),
+            "run_id": request.get("run_id"),
+            "adapter": "claude-tmux-repl",
+            "tmux_session": session_name,
+            "duration_ms": duration_ms,
+            "outer_error_type": outer_error.error_type if outer_error else None,
+            "outer_error_message": str(outer_error) if outer_error else None,
+            "outer_assistant_text_preview": _limit_text(assistant_text, PREVIEW_LIMIT) if assistant_text else None,
+            "snapshot_ref": bridge_result.get("_snapshot_ref"),
+            "full_result_ref": bridge_result.get("full_result_ref"),
+            "bridge_window_id": bridge_result.get("bridge_window_id"),
+            "team_id_or_null": bridge_result.get("team_id_or_null"),
+            "task_id_or_null": bridge_result.get("task_id_or_null"),
+            "failure_stage_or_null": bridge_result.get("failure_stage_or_null"),
+            "returned_at": bridge_result.get("returned_at"),
+            "bridge_error_or_null": bridge_result.get("error_or_null"),
+            "bridge_evidence_summary": _bounded_mapping(bridge_result.get("evidence_summary")),
+        },
+        "error_or_null": bridge_error if status != "succeeded" else None,
+        "cleanup_required": bool(bridge_result.get("cleanup_required")),
+    }
+
+
+def _bridge_result_should_override_success(bridge_result: dict[str, Any] | None) -> bool:
+    if not isinstance(bridge_result, dict) or not bridge_result:
+        return False
+    status = str(bridge_result.get("status") or "").strip().lower()
+    if status and status != "succeeded":
+        return True
+    return isinstance(bridge_result.get("error_or_null"), dict)
+
+
+def _bridge_result_error(bridge_result: dict[str, Any]) -> dict[str, str]:
+    error = bridge_result.get("error_or_null") if isinstance(bridge_result.get("error_or_null"), dict) else {}
+    error_type = str(error.get("type") or "").strip()
+    if not error_type:
+        status = str(bridge_result.get("status") or "").strip().lower()
+        failure_stage = str(bridge_result.get("failure_stage_or_null") or "").strip()
+        if status and status != "succeeded":
+            if failure_stage == "task_complete":
+                error_type = "CompletionContractRejected"
+            else:
+                error_type = "BridgeResultFailedWithoutStructuredError"
+        else:
+            error_type = "BridgeResultReturnedWithoutOuterText"
+    message = str(error.get("message") or "").strip()
+    if not message:
+        status = str(bridge_result.get("status") or "unknown")
+        window_id = str(bridge_result.get("bridge_window_id") or "unknown window")
+        failure_stage = str(bridge_result.get("failure_stage_or_null") or "").strip()
+        if error_type == "CompletionContractRejected":
+            message = f"Bridge returned {status} at task_complete in runtime_snapshot.last_bridge_result for {window_id}; completion contract was rejected but no structured bridge error was recorded."
+        elif error_type == "BridgeResultFailedWithoutStructuredError":
+            stage = f" at {failure_stage}" if failure_stage else ""
+            message = f"Bridge returned {status}{stage} in runtime_snapshot.last_bridge_result for {window_id}, but no structured bridge error was recorded."
+        else:
+            message = f"Bridge returned {status} in runtime_snapshot.last_bridge_result for {window_id}, but outer leader emitted no assistant text."
+    return {"type": error_type, "message": _limit_text(message, PREVIEW_LIMIT)}
+
+
+def _bridge_result_summary(bridge_result: dict[str, Any], bridge_error: dict[str, str]) -> str:
+    parts = [
+        f"Bridge result from runtime_snapshot.last_bridge_result: status={bridge_result.get('status') or 'unknown'}",
+        f"bridge_window_id={bridge_result.get('bridge_window_id') or 'unknown'}",
+    ]
+    if bridge_result.get("failure_stage_or_null"):
+        parts.append(f"failure_stage={bridge_result.get('failure_stage_or_null')}")
+    if bridge_result.get("returned_at"):
+        parts.append(f"returned_at={bridge_result.get('returned_at')}")
+    parts.append(f"{bridge_error['type']}: {bridge_error['message']}")
+    evidence = _bounded_mapping(bridge_result.get("evidence_summary"))
+    terminal_error = evidence.get("terminal_error") if isinstance(evidence, dict) else None
+    failure_classification = evidence.get("failure_classification") if isinstance(evidence, dict) else None
+    if terminal_error:
+        parts.append(f"terminal_error={terminal_error}")
+    if failure_classification:
+        parts.append(f"failure_classification={failure_classification}")
+    return "; ".join(parts)
+
+
+def _bounded_mapping(value: Any, *, limit: int = 700) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    bounded: dict[str, Any] = {}
+    for key, item in value.items():
+        if isinstance(item, str):
+            bounded[str(key)] = _limit_text(item, limit)
+        elif isinstance(item, (int, float, bool)) or item is None:
+            bounded[str(key)] = item
+        elif isinstance(item, dict):
+            bounded[str(key)] = {str(k): _limit_text(v, limit) if isinstance(v, str) else v for k, v in list(item.items())[:8]}
+        elif isinstance(item, list):
+            bounded[str(key)] = item[:8]
+        else:
+            bounded[str(key)] = _limit_text(str(item), limit)
+    return bounded
+
+
 def _strip_ansi(value: str) -> str:
     text = re.sub(r"\x1b\][^\a]*(?:\a|\x1b\\)", "", value)
     text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
@@ -954,6 +1191,36 @@ def _outer_leader_add_dirs(control_root: Path, repo_root: Path) -> list[Path]:
     if parent_claude_root != repo_root:
         add_dirs.append(parent_claude_root)
     return add_dirs
+
+
+def _outer_leader_tmux_bare_mode(settings_path: Path | None) -> bool:
+    override = _env_bool("OUTER_LEADER_TMUX_BARE")
+    if override is None:
+        override = _env_bool("BRIDGE_OUTER_LEADER_TMUX_BARE")
+    if override is not None:
+        return override
+    env = _settings_env(settings_path)
+    return _is_custom_anthropic_base_url(env.get("ANTHROPIC_BASE_URL") or env.get("CLAUDE_CODE_API_BASE_URL"))
+
+
+def _env_bool(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _is_custom_anthropic_base_url(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    host = (urlsplit(raw).hostname or "").lower()
+    return bool(host and host not in {"api.anthropic.com", "claude.ai", "console.anthropic.com"})
 
 
 def _now_iso() -> str:

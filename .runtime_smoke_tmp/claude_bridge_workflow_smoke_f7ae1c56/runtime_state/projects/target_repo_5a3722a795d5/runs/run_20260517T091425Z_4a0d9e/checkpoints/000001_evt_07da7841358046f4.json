@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1.0",
+  "checkpoint_id": "chkpt_000001_evt_07da7841358046f4",
+  "sequence": 1,
+  "timestamp": "2026-05-17T09:14:26.235732+00:00",
+  "repo_key": "target_repo_5a3722a795d5",
+  "run_id": "run_20260517T091425Z_4a0d9e",
+  "event_id": "evt_07da7841358046f4",
+  "event_kind": "user_prompt_submitted",
+  "state": {
+    "repo_key": "target_repo_5a3722a795d5",
+    "run_id": "run_20260517T091425Z_4a0d9e",
+    "phase": "leader_freeze",
+    "lifecycle_state": "read_runtime_truth",
+    "graph_node": "freeze_semantics",
+    "active_bridge_window_id": null,
+    "active_team_id": null,
+    "active_task_id": null,
+    "frozen_semantics_hash": null,
+    "packet_hash": null,
+    "completion_contract_hash": null,
+    "retry_context": {},
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": []
+  },
+  "state_hash": "32a8adafead2eeb05a8c16cf",
+  "snapshot_hash": "a672a5ee9636bf6291774e47"
+}

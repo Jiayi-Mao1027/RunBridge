@@ -10,7 +10,9 @@ from typing import Any
 
 from loader import load_json_file
 from persist import append_jsonl, atomic_write_json
-from repo_runtime import ensure_repo_registered, get_repo_runtime_root, resolve_repo_key, update_active_run_registry
+from bridge_sdk import call_bridge_sdk
+from main_leader import decide_next_bridge_packet, read_runtime_snapshot
+from repo_runtime import ensure_repo_registered, get_repo_runtime_root, registry_root, resolve_repo_key, update_active_run_registry
 from runtime_event_envelope import attach_runtime_event_envelope, normalize_runtime_event
 from workflow_runtime import dispatch_workflow_event
 
@@ -59,12 +61,15 @@ class OuterSdkHost:
         config: OuterSdkHostConfig,
         *,
         adapter: OuterLeaderAdapter | None = None,
+        auto_bridge_runner: Any | None = None,
     ) -> None:
         self.config = config
         self.adapter = adapter or build_outer_leader_adapter(config)
+        self._auto_bridge_runner = auto_bridge_runner
         self.started_at = _now_iso()
         self.host_instance_id = f"outer_host_{uuid.uuid4().hex[:12]}"
-        self.default_run_id = _new_run_id()
+        repo_key = self._repo_key()
+        self.default_run_id = _initial_default_run_id(config, repo_key)
         self._activate_default_run("outer_host_started")
 
     def handle_user_input(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -85,6 +90,7 @@ class OuterSdkHost:
                     sequence=sequence,
                 ),
             )
+            leader_result = self._maybe_auto_bridge_after_outer_leader(request, leader_result)
         else:
             leader_result = {
                 "status": "blocked",
@@ -124,6 +130,180 @@ class OuterSdkHost:
             "leader_result": leader_result,
         }
 
+    def _maybe_auto_bridge_after_outer_leader(self, request: dict[str, Any], leader_result: dict[str, Any]) -> dict[str, Any]:
+        error_type = ""
+        if isinstance(leader_result.get("error_or_null"), dict):
+            error_type = str(leader_result["error_or_null"].get("type") or "")
+        if leader_result.get("status") != "succeeded" and not _outer_leader_failure_allows_auto_bridge(error_type):
+            return leader_result
+        decision = self._auto_bridge_decision(request)
+        if not decision.get("should_auto_bridge"):
+            return leader_result
+        self._write_host_event(
+            "outer_host_auto_bridge_started",
+            {
+                "request": request,
+                "leader_result": leader_result,
+                "decision": decision,
+            },
+        )
+        try:
+            runner = self._auto_bridge_runner or self._run_auto_bridge
+            bridge_result = runner(request)
+            wrapped = _auto_bridge_leader_result(request, leader_result, bridge_result, decision=decision)
+            self._write_host_event(
+                "outer_host_auto_bridge_result",
+                {
+                    "request": request,
+                    "leader_result": wrapped,
+                    "decision": decision,
+                },
+            )
+            return wrapped
+        except Exception as exc:
+            failed = {
+                "status": "failed",
+                "handled_by": "outer_sdk_host",
+                "reports": [
+                    {
+                        "summary": f"Outer host auto-bridge dispatch failed: {exc}",
+                        "source": "outer_sdk_host",
+                    }
+                ],
+                "artifact_refs": [],
+                "evidence": {
+                    "repo_key": request.get("repo_key"),
+                    "run_id": request.get("run_id"),
+                    "decision": decision,
+                    "previous_leader_result": _bound(leader_result),
+                },
+                "error_or_null": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+                "cleanup_required": False,
+            }
+            self._write_host_event(
+                "outer_host_auto_bridge_result",
+                {
+                    "request": request,
+                    "leader_result": failed,
+                    "decision": decision,
+                },
+            )
+            return failed
+
+    def _auto_bridge_decision(self, request: dict[str, Any]) -> dict[str, Any]:
+        if str(request.get("dispatch_intent") or "").strip() != "advance_or_continue":
+            return {"should_auto_bridge": False, "reason": "dispatch_intent_not_advance_or_continue"}
+        repo_key = str(request.get("repo_key") or "").strip()
+        run_id = str(request.get("run_id") or "").strip()
+        if not repo_key or not run_id:
+            return {"should_auto_bridge": False, "reason": "missing_repo_or_run"}
+        run_root = get_repo_runtime_root(self.config.control_root, repo_key) / run_id
+        if _bridge_started_after_request(run_root, request):
+            return {"should_auto_bridge": False, "reason": "bridge_already_started_after_request"}
+        snapshot = read_runtime_snapshot(
+            self.config.control_root,
+            run_id,
+            repo_key=repo_key,
+            runtime_runs_root=run_root.parent,
+        )
+        allowed_actions = set(snapshot.get("allowed_actions") or [])
+        if "call_bridge_sdk" not in allowed_actions:
+            return {"should_auto_bridge": False, "reason": "call_bridge_sdk_not_allowed", "allowed_actions": sorted(allowed_actions)}
+        integrity = snapshot.get("integrity") if isinstance(snapshot.get("integrity"), dict) else {}
+        blocking_keys = [
+            "has_hard_stop",
+            "awaiting_approval",
+            "awaiting_user_answer",
+            "has_blocking_orchestration_anomaly",
+            "has_execute_watchdog_alert",
+        ]
+        active_blockers = [key for key in blocking_keys if integrity.get(key)]
+        if active_blockers:
+            return {"should_auto_bridge": False, "reason": "runtime_integrity_blocker", "active_blockers": active_blockers}
+        lifecycle = snapshot.get("lifecycle") if isinstance(snapshot.get("lifecycle"), dict) else {}
+        open_windows = lifecycle.get("open_bridge_window_ids")
+        if open_windows:
+            return {"should_auto_bridge": False, "reason": "open_bridge_window_exists", "open_bridge_window_ids": open_windows}
+        return {
+            "should_auto_bridge": True,
+            "reason": "advance_or_continue_without_bridge_call_after_outer_leader",
+            "repo_key": repo_key,
+            "run_id": run_id,
+            "current_phase": snapshot.get("current_phase"),
+        }
+
+    def _run_auto_bridge(self, request: dict[str, Any]) -> dict[str, Any]:
+        repo_key = str(request["repo_key"])
+        run_id = str(request["run_id"])
+        runs_root = get_repo_runtime_root(self.config.control_root, repo_key)
+        main_session_id = str(request.get("main_session_id") or run_id)
+        self._freeze_semantics_for_auto_bridge_if_needed(request, runs_root, main_session_id=main_session_id)
+        packet = decide_next_bridge_packet(
+            self.config.control_root,
+            run_id,
+            repo_key=repo_key,
+            runtime_runs_root=runs_root,
+            main_session_id=main_session_id,
+            user_instruction=str(request.get("text") or ""),
+            task_spec=request.get("task_spec") if isinstance(request.get("task_spec"), dict) else {},
+            target_phase=str(request.get("target_phase") or "").strip() or None,
+        )
+        _write_last_bridge_packet(runs_root, run_id, packet)
+        return call_bridge_sdk(
+            self.config.control_root,
+            packet,
+            runtime_runs_root=runs_root,
+            persist=True,
+        )
+
+    def _freeze_semantics_for_auto_bridge_if_needed(
+        self,
+        request: dict[str, Any],
+        runs_root: Path,
+        *,
+        main_session_id: str,
+    ) -> None:
+        snapshot = read_runtime_snapshot(
+            self.config.control_root,
+            str(request["run_id"]),
+            repo_key=str(request["repo_key"]),
+            runtime_runs_root=runs_root,
+        )
+        semantic = snapshot.get("semantic") if isinstance(snapshot.get("semantic"), dict) else {}
+        if semantic.get("frozen") is not None and not semantic.get("requires_refresh"):
+            return
+        task_spec = request.get("task_spec") if isinstance(request.get("task_spec"), dict) else {}
+        result = dispatch_workflow_event(
+            self.config.control_root,
+            {
+                "run_id": str(request["run_id"]),
+                "repo_key": str(request["repo_key"]),
+                "main_session_id": main_session_id,
+                "agent_id": "outer-sdk-host",
+                "agent_type": "main-leader",
+                "event_kind": "semantic_frozen",
+                "payload": {
+                    "repo_key": str(request["repo_key"]),
+                    "frozen_semantics": {
+                        "user_instruction": str(request.get("text") or ""),
+                        "task_subject": task_spec.get("task_subject") or task_spec.get("subject"),
+                        "task_kind": task_spec.get("task_kind"),
+                        "target_phase": request.get("target_phase"),
+                        "freeze_source": "outer_host_auto_bridge",
+                    },
+                    "reason": "outer host auto-bridge requires current frozen semantics before deterministic bridge dispatch",
+                },
+            },
+            repo_key=str(request["repo_key"]),
+            runtime_runs_root=runs_root,
+            persist=True,
+        )
+        if not result.ok:
+            raise RuntimeError(f"semantic_frozen rejected by runtime: {result.check_result.get('reasons')}")
+
     def status(self, *, repo_key: str | None = None, run_id: str | None = None) -> dict[str, Any]:
         resolved_repo_key = repo_key or self._repo_key()
         runs_root = get_repo_runtime_root(self.config.control_root, resolved_repo_key)
@@ -154,7 +334,10 @@ class OuterSdkHost:
         if _truthy(payload.get("start_new_run") or payload.get("startNewRun")):
             self.default_run_id = _new_run_id()
             self._activate_default_run("outer_host_default_run_rotated")
-        run_id = str(payload.get("run_id") or payload.get("runId") or "").strip() or self.default_run_id
+        explicit_run_id = str(payload.get("run_id") or payload.get("runId") or "").strip()
+        run_id = explicit_run_id or self.default_run_id
+        if explicit_run_id and explicit_run_id != self.default_run_id:
+            self.default_run_id = explicit_run_id
         main_session_id = str(
             payload.get("main_session_id")
             or payload.get("mainSessionId")
@@ -387,6 +570,124 @@ class OuterSdkHost:
         ]
 
 
+def _write_last_bridge_packet(runs_root: Path, run_id: str, packet: dict[str, Any]) -> None:
+    atomic_write_json(runs_root / run_id / ".last_bridge_packet.json", packet)
+
+
+def _bridge_started_after_request(run_root: Path, request: dict[str, Any]) -> bool:
+    request_created_at = _parse_iso_timestamp(request.get("created_at"))
+    event_names = {
+        "bridge_call_intended",
+        "pretooluse_allowed_by_main_leader",
+        "call_bridge_sdk_started",
+        "bridge_result_returned",
+        "bridge_result_returned_with_failure",
+        "bridge_result_returned_partial",
+        "bridge_window_failed",
+        "bridge_window_partial_returned",
+        "bridge_window_returned",
+    }
+    tool_names = {"call_bridge_sdk", "mcp__bridge__call_bridge_sdk"}
+    for record in _read_jsonl_safely(run_root / "event_log.jsonl")[-250:]:
+        if not _record_is_after(record, request_created_at):
+            continue
+        if str(record.get("event_kind") or "") in event_names:
+            return True
+        if str(record.get("tool_name") or "") in tool_names:
+            return True
+    for record in _read_jsonl_safely(run_root / "tool_events.jsonl")[-250:]:
+        if not _record_is_after(record, request_created_at):
+            continue
+        if str(record.get("tool_name") or "") in tool_names:
+            return True
+    return False
+
+
+def _record_is_after(record: dict[str, Any], cutoff: datetime | None) -> bool:
+    if cutoff is None:
+        return True
+    timestamp = _parse_iso_timestamp(record.get("timestamp"))
+    return timestamp is not None and timestamp >= cutoff
+
+
+def _parse_iso_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _read_jsonl_safely(path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    return records
+
+
+def _auto_bridge_leader_result(
+    request: dict[str, Any],
+    previous_leader_result: dict[str, Any],
+    bridge_result: dict[str, Any],
+    *,
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    bridge_status = str(bridge_result.get("status") or "failed").strip() or "failed"
+    bridge_error = bridge_result.get("error_or_null") if isinstance(bridge_result.get("error_or_null"), dict) else None
+    bridge_window_id = bridge_result.get("bridge_window_id") or bridge_result.get("binding", {}).get("bridge_window_id")
+    report_count = len(bridge_result.get("reports") or []) if isinstance(bridge_result.get("reports"), list) else bridge_result.get("report_count")
+    summary = (
+        "Outer host auto-dispatched one bridge because an advance/continue request returned from outer leader "
+        "without any call_bridge_sdk event after the request. "
+        f"BridgeResult status={bridge_status}; bridge_window_id={bridge_window_id or 'unknown'}; report_count={report_count or 0}."
+    )
+    if bridge_error:
+        summary = f"{summary} {bridge_error.get('type') or 'BridgeError'}: {bridge_error.get('message') or ''}".strip()
+    return {
+        "status": bridge_status,
+        "handled_by": "outer_sdk_host_auto_bridge",
+        "reports": [{"summary": summary, "source": "outer_sdk_host"}],
+        "artifact_refs": bridge_result.get("artifact_refs") if isinstance(bridge_result.get("artifact_refs"), list) else [],
+        "evidence": {
+            "repo_key": request.get("repo_key"),
+            "run_id": request.get("run_id"),
+            "decision": decision,
+            "previous_leader_result": _bound(previous_leader_result),
+            "bridge_result": _bound(bridge_result),
+        },
+        "error_or_null": bridge_error if bridge_status != "succeeded" else None,
+        "cleanup_required": bool(bridge_result.get("cleanup_required")),
+    }
+
+
+def _outer_leader_failure_allows_auto_bridge(error_type: str) -> bool:
+    return error_type in {
+        "OuterLeaderContractViolation",
+        "OuterLeaderTmuxTerminalApiError",
+        "OuterLeaderTmuxNoAssistantText",
+        "OuterLeaderTransportApiFailure",
+        "OuterLeaderApiError",
+    }
+
+
 def _latest_run_id(runs_root: Path) -> str | None:
     if not runs_root.exists():
         return None
@@ -394,6 +695,47 @@ def _latest_run_id(runs_root: Path) -> str | None:
     if not dirs:
         return None
     return sorted(dirs, key=lambda item: item.stat().st_mtime, reverse=True)[0].name
+
+
+def _initial_default_run_id(config: OuterSdkHostConfig, repo_key: str) -> str:
+    runs_root = get_repo_runtime_root(config.control_root, repo_key)
+    active = load_json_file(registry_root(config.control_root) / "active_runs.json", default={})
+    repos = active.get("repos") if isinstance(active.get("repos"), dict) else {}
+    entry = repos.get(repo_key) if isinstance(repos.get(repo_key), dict) else {}
+    latest = str(entry.get("latest_run_id") or "").strip()
+    active_ids = [str(item).strip() for item in entry.get("active_run_ids", []) if str(item).strip()]
+    candidates: list[str] = []
+    for run_id in [latest, *reversed(active_ids)]:
+        if run_id and run_id not in candidates:
+            candidates.append(run_id)
+    for run_id in candidates:
+        if _run_has_runtime_truth(runs_root / run_id):
+            return run_id
+    latest_meaningful = _latest_meaningful_run_id(runs_root)
+    return latest_meaningful or _new_run_id()
+
+
+def _latest_meaningful_run_id(runs_root: Path) -> str | None:
+    if not runs_root.exists():
+        return None
+    dirs = sorted((item for item in runs_root.iterdir() if item.is_dir()), key=lambda item: item.stat().st_mtime, reverse=True)
+    for run_dir in dirs:
+        if _run_has_runtime_truth(run_dir):
+            return run_dir.name
+    return None
+
+
+def _run_has_runtime_truth(run_root: Path) -> bool:
+    if not run_root.exists():
+        return False
+    for name in ("runtime_snapshot.json", "run_ledger.json", "event_log.jsonl"):
+        path = run_root / name
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _startup_diagnostics(control_root: Path, repo_root: Path | None) -> dict[str, Any]:

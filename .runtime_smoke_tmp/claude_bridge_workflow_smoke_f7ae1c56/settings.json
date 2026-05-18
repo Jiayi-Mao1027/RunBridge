@@ -1,0 +1,1 @@
+{"env": {"ANTHROPIC_BASE_URL": "http://example.invalid", "ANTHROPIC_AUTH_TOKEN": "test-token"}}

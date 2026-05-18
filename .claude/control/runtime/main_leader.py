@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any
 import uuid
 
@@ -887,6 +888,50 @@ def _split_instruction_text(text: str) -> list[str]:
             if stripped:
                 pieces.append(stripped)
     return pieces
+
+
+def _legacy_split_instruction_text(text: str) -> list[str]:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    pieces: list[str] = []
+    for line in normalized.split("\n"):
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        cleaned = cleaned.lstrip("-*0123456789. \t")
+        cleaned = cleaned.replace("\uff1b", ";").replace("\u3002", ".").replace("\uff0c", ",")
+        for part in re.split(r";+|(?<=[.!?])\s+", cleaned):
+            pieces.extend(_bounded_instruction_pieces(part))
+    return pieces
+
+
+def _bounded_instruction_pieces(text: str, *, limit: int = 220) -> list[str]:
+    text = " ".join(str(text or "").split())
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    pieces: list[str] = []
+    current = ""
+    for part in re.split(r",\s+|\s+-\s+", text):
+        if not part:
+            continue
+        candidate = f"{current}, {part}" if current else part
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            pieces.append(current)
+        current = part
+        while len(current) > limit:
+            pieces.append(current[:limit].rstrip())
+            current = current[limit:].lstrip()
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def _split_instruction_text(text: str) -> list[str]:
+    return _legacy_split_instruction_text(text)
 
 
 def _dedupe_nonempty(items: list[str]) -> list[str]:

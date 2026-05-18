@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "chkpt_000001_evt_d757e269392a423c",
+  "sequence": 1,
+  "timestamp": "2026-05-17T09:14:28.985647+00:00",
+  "repo_key": "target_repo_5a3722a795d5",
+  "run_id": "run_20260517T091428Z_563a90",
+  "event_id": "evt_d757e269392a423c",
+  "event_kind": "user_prompt_submitted",
+  "state_hash": "4730f09d8dbf9c8bfe4b8400",
+  "path": "C:\\Users\\admin\\Desktop\\Structure-config-1\\.runtime_smoke_tmp\\claude_bridge_workflow_smoke_f7ae1c56\\runtime_state\\projects\\target_repo_5a3722a795d5\\runs\\run_20260517T091428Z_563a90\\checkpoints\\000001_evt_d757e269392a423c.json",
+  "state": {
+    "repo_key": "target_repo_5a3722a795d5",
+    "run_id": "run_20260517T091428Z_563a90",
+    "phase": "leader_freeze",
+    "lifecycle_state": "read_runtime_truth",
+    "graph_node": "freeze_semantics",
+    "active_bridge_window_id": null,
+    "active_team_id": null,
+    "active_task_id": null,
+    "frozen_semantics_hash": null,
+    "packet_hash": null,
+    "completion_contract_hash": null,
+    "retry_context": {},
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": []
+  }
+}

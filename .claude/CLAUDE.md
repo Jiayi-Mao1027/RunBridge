@@ -71,18 +71,14 @@ It must not:
 Control truth priority:
 
 1. `.claude/control/runtime/workflow_runtime.py`
-2. `.claude/control/runtime/state_graph.py`
-3. `.claude/control/policy/state_graph.json`
-4. `.claude/control/policy/lifecycle_transition_table.json`
-5. `.claude/control/policy/phase_graph.json`
-6. `.claude/control/policy/approval_matrix.json`
-7. `.claude/control/policy/phase_contracts.json`
-8. `.claude/control/policy/reconcile_rules.json`
-9. `.claude/control/runtime/checkpoint_store.py`, `retry_policy.py`, `retry_driver.py`, `trajectory.py`, `output_guardrails.py`, and `repo_runtime.py`
-10. `.claude/control/schemas/*.json`
-11. `.claude/hooks/*.py`
-12. project-level workflow/semantic documents
-13. conversation text
+2. `.claude/control/policy/lifecycle_transition_table.json`
+3. `.claude/control/policy/phase_graph.json`
+4. `.claude/control/policy/approval_matrix.json`
+5. `.claude/control/policy/reconcile_rules.json`
+6. `.claude/control/schemas/workflow_runtime.schema.json`
+7. `.claude/hooks/*.py`
+8. project-level workflow/semantic documents
+9. conversation text
 
 Conversation text may explain intent. It is not execution truth.
 
@@ -118,7 +114,6 @@ Each `BridgePacket` is rebuilt for one bridge invocation only.
 
 It must include:
 
-- `policy_contract_ref`
 - `binding`
 - `frozen_semantics`
 - `frozen_scope`
@@ -134,24 +129,6 @@ It must include:
 - `approval_requirements`
 
 One bridge window binds exactly one team and one task. The task may have multiple teammate assignments, but the packet must not describe multiple independent tasks.
-
-Phase/team/tool/report contracts are system-owned in `.claude/control/policy/phase_contracts.json`. Agent prompts may explain role behavior, but packet construction, teammate mapping, allowed tools, semantic-resolution fields, classification taxonomy, execution policy, and formal log manifest required fields should come from that policy file rather than duplicated prose in role prompts.
-
-The task spec must preserve the full user-facing intent, not only a shortened description. Complex instructions should be carried as `original_user_instruction`, `instruction_coverage_checklist`, `current_user_intent_context`, and preserved context fields. Downstream assignments must require every checklist item to be completed, explicitly deferred with a concrete reason, or escalated; reports must include the same coverage disposition. This prevents main-leader from executing only the first or easiest half of a compound request.
-
-`current_user_intent_context` is the nearest active direction for the bridge window. It should carry the latest user intent, relevant L2 report refs or summary, proposed future directions, open questions, and the evidence basis when known. L3 must confirm, refine, supersede, block, or escalate that intent from repo/docs/artifact evidence and preserve the disposition for the next phase. Conversation text may motivate the field, but the packet carries the bridge-facing intent.
-
-The task spec must also carry a `semantic_resolution_contract`. L3 must actively resolve model/method, checkpoint, dataset/split, prompt/template, config, metric/objective, and inherited-default identities before L4 inherits the task. If the user did not ask to change dataset, prompt, split, metric, or config, the downstream packet should preserve the current active basis and name the evidence for that inheritance. L4 implement and execute must not silently guess or swap unresolved semantic identities.
-
-L3 bridge packets must make repository-facing documentation freshness explicit. When a task touches docs, Markdown, `CLAUDE.md`, README, setup/usage instructions, agent behavior, or workflow rules, the L3 task should require the team to inspect whether docs need updating and to make the smallest correct update inside writable scope. `CLAUDE.md` is a first-class L3 documentation target when workflow or agent behavior changes.
-
-L3 also owns minimum-viable active-surface curation. Before preflight or implementation proceeds, curator should establish what the current step is, what prior work is already completed, and which files/artifacts are genuinely required by the next phase. Stale, duplicate, ambiguous, or non-current datasets, checkpoints, generated outputs, stale code copies, scratch scripts, and misleading inactive documents should be archived out of active reach by default. Logs are cleanup targets but are more nuanced: retain logs that may be reused for comparison, audit, avoiding expensive regeneration, or downstream interpretation; archive only logs that are clearly unused, duplicate, superseded, unrelated, or misleading. Physical deletion is exceptional and should be limited to clearly regenerable trash, empty duplicates, or explicitly approved removals. L3 may archive or organize project files, but code/config behavior changes belong to L4 implement.
-
-L4 implement must preserve the same minimum-viable project surface while changing code. Implementors should prefer modifying existing files, use temporary scripts for one-off work, create new long-lived files only when there is a durable need, and clear or archive implementation byproducts before rungater/executor inherit the repo.
-
-L4 execute treats smoke parameters and formal parameters as different decisions. Executor should run bounded smoke checks to choose formal per-device batch size, microbatch, gradient accumulation, precision, sequence length, and effective batch size. Postrun audits that the formal command used the resolved semantic basis and smoke-derived parameter evidence.
-
-L4 execute must write a manifest inside every generated formal log folder, analogous to checkpoint manifests. The manifest is the durable identity record for the log folder and should include run/window/task IDs, command, cwd, environment, semantic basis, smoke evidence refs, formal parameters/effective batch size, process refs, log files, expected outputs/checkpoints, timestamps, terminal status, and reuse/dependency notes. Do not rely on folder or file names alone.
 
 ## 6. Lifecycle
 
@@ -185,33 +162,19 @@ Failure/recovery facts are first-class:
 
 Absence of a matching end event is meaningful and may become an orphan condition.
 
-Open-window orchestration anomalies are first-class routing facts. If a bridge window stays open past the anomaly threshold while stuck in an early lifecycle state, especially `message_dispatch_completed`, and there are no process refs, teammate reports, artifact refs, or completion checks, main-leader should stop ordinary waiting and classify it as `workflow instability / bridge orchestration hang`. The next response is diagnostic: inspect `runtime_snapshot.runtime_diagnostics`, event log/transitions, process/report/artifact refs, known output dirs, and known logs before retrying, marking orphaned, or rerouting to anomaly work.
-
-Execute watchdog alerts are first-class warning facts. If a bridge window is in `team_waiting` with owned process refs that still look running but `last_heartbeat_at` is stale, `runtime_diagnostics.execute_watchdog_alerts` reports `execute_stale_heartbeat_with_owned_process_refs`. This is not proof of failure or completion; main-leader should inspect process refs, process events, active operations, logs, artifact refs, and known output dirs before deciding whether to poll, keep waiting, reroute to anomaly, or classify process loss.
-
 ## 7. Snapshot And Notify
 
 `RuntimeSnapshot` contains:
 
-- compact snapshot policy and refs to full ledgers/observer streams
 - frozen semantic/scope state
 - route state
 - lifecycle status index
-- compact bridge/team/task/tool binding summaries
+- bridge/team/task/tool bindings
 - allowed actions
 - allowed routes
 - integrity alerts
-- compact runtime diagnostics, including bridge orchestration hang candidates
-- compact last bridge result summary
+- last bridge result
 - phase exit readiness
-
-`RuntimeSnapshot` is intentionally a compact control view, not a transcript, report store, or evidence bundle. It should preserve enough information for main-leader routing and recovery without pulling long reports, full evidence, complete tool streams, or historical binding maps into context. Full details remain in `run_ledger.json`, `event_log.jsonl`, `transitions.jsonl`, `main_leader_inbox.jsonl`, and observer JSONL files referenced by `snapshot_refs`.
-
-RunBridge also maintains native state graph and durable replay artifacts. `state_graph.json` defines graph nodes, lifecycle-event edges, and phase-route edges; `state_graph.py` validates lifecycle/phase policy consistency and can replay `event_log.jsonl` into a compact `RunBridgeState`. `checkpoint_store.py` writes per-event state checkpoints under `checkpoints/` plus `latest_checkpoint.json`; checkpoints must reflect the state after the current event, including the current graph node, not a stale snapshot fallback. `trajectory.py` writes `trajectory.jsonl` and `trajectory_index.json` as UI-safe intent/action/observation/state-delta summaries with supporting/producing refs for completion, artifact, process, guardrail, and retry evidence. These records must stay bounded and must not contain hidden chain-of-thought, secrets, or full large stdout/stderr.
-
-SDK stream observability is separate from real hook tool events. `claude_cli_executor.py` uses `--output-format stream-json --verbose --include-partial-messages` and writes bounded `sdk_stream_events.jsonl` records with text deltas, tool input JSON deltas, raw stream event type, compact tool metadata, and redacted previews. SDK `tool_use` and `tool_result` records are discussion/stream evidence only; real tool events come from hooks into run-scoped observer files.
-
-Retry is a runtime contract, not just an event name. Failure and rejected completion paths decide against `retry_policy.py`, persist attempts in `retry_context.attempts`, and only write `retry_attempt_scheduled` when the action is allowed. Retry payloads must carry the repo/run/window identity, packet hash, same-packet requirement, source event, reason, and an explicit `retry_action`. Exhaustion routes to `enter_anomaly`. `retry_driver.py` defines the future driver contract, but automatic action execution remains disabled until explicitly enabled.
 
 `NotifyResult` writes items to the main-leader inbox. Blocking/error/warn/info messages are derived from check results, update results, integrity state, bridge results, TeamIdle, timeout, cleanup, and orphan events.
 
@@ -229,46 +192,7 @@ Long-running work is represented with `TeamIdle` events and payloads such as:
 
 `TeamIdle` means waiting, not completion. Completion requires evidence satisfying the completion contract.
 
-For long-running execution work, especially L4 execution/training, the execution group must estimate expected wall-clock runtime before launch and include the estimate basis in the execution record. A bridge soft timeout or partial result means the bridge window stopped waiting and returned intermediate state; it does not by itself prove the owned process was killed, failed, or completed.
-
-For L4 execute, the intended contract is stronger: if the executor launches an owned long-running process, the bridge window must remain open until the process reaches a terminal state and postrun has audited terminal logs/artifacts. `TeamIdle` is waiting/progress evidence, not permission to delete the team or return a partial bridge result while the owned process is still running. The execute timeout policy is sized for long training runs and should not use the short 900 second bridge-window default.
-
-Manual bridge interrupts are terminal runtime facts, not durable open windows. If a user interrupts a bridge invocation, record `bridge_call_interrupted` and treat `bridge_window_interrupted` as closed for subsequent routing after reading the fresh runtime snapshot.
-
-L4 execute environment and GPU policy are strict. Formal execution commands must run under conda env `mjy`, preferably via `conda run -n mjy ...` or an explicitly recorded equivalent `conda activate mjy` shell context. Do not use `venv`, `.venv`, `virtualenv`, or ad hoc Python environments for formal execute. For formal GPU training or throughput-sensitive runs, unless the user explicitly requested smoke/dry-run/conservative execution, executor must configure the run to exceed 70GB observed memory after warmup on typical 80GB GPUs, or exceed 90% of selected GPU total memory on other GPU sizes. Lower formal-run utilization requires explicit conservative approval or hard blocking evidence and must be surfaced as a deviation, not treated as success.
-
-When one L4 execute bridge/session contains multiple formal stages, such as train followed by value/evaluate/score, the GPU memory target applies separately to each formal stage. A train-stage smoke, batchbasis, or observed memory record does not prove that the later value/eval/generation stage is correctly configured. Executor must record stage-specific memory evidence, and postrun must audit stage-specific pass/deviation/block status.
-
-Executor Bash hooks are soft guardrails, not killers. For executor-owned Bash commands that look like formal GPU training/evaluation, PreToolUse/PostToolUse may write `soft_reminders` into `tool_events.jsonl` and `session_events.jsonl` when GPU memory probes, batch/effective-batch basis, or log manifest evidence is missing. Hooks must not kill a process solely because current memory use is low, and smoke/dry-run/debug commands should receive only smoke-appropriate reminders.
-
-## 9. Companion Observability
-
-Bridge Companion is a read-only observer. It must not enter agent context, control routing, create tasks, message teammates, or write authoritative workflow state.
-
-The runtime writes side-channel JSONL observability files under each run directory for Companion:
-
-- `bridge_packets.jsonl`
-- `agent_messages.jsonl`
-- `tool_events.jsonl`
-- `session_bindings.jsonl`
-- `session_events.jsonl`
-- `teammate_reports.jsonl`
-- `artifacts.jsonl`
-- `completion_checks.jsonl`
-- `process_events.jsonl`
-- `companion_events.jsonl`
-
-Observer records include a run-local `sequence` / `monotonic_index` for stable UI ordering. `companion_events.jsonl` is a merged stream and includes `source_kind`, `source_file`, `source_sequence`, and `source_offset` so UI drawers can trace every merged item back to its typed JSONL source.
-
-`tool_events.jsonl` should expose UI-safe fields only: `session_kind`, `run_binding_state`, `session_id`, run/window/team/task IDs when available, `teammate_id`, `agent_type`, `tool_name`, `tool_use_id`, `status`, `started_at`, `completed_at`, `duration_ms`, `normalized_input`, `safe_input_preview`, `file_refs`, and bounded summaries such as `read_options`, `edit_summary`, `search_summary`, `command_preview`, `stdout_tail`, and `stderr_tail`. It must not include secrets, full prompts, or complete large file contents. Tool events are observed for all Claude Code sessions, not only bridge child sessions. If no run binding is available, hooks write safe records under `.claude/runtime_state/session_observer/` instead of dropping them.
-
-`session_bindings.jsonl` maps `session_id` to run/window/team/task/teammate identity when known. For teammate child sessions, hooks should recognize `SubagentStart` payload aliases such as `agent_name`, `subagent_name`, and `subagent_type`, persist the teammate binding, and use that binding to reattach later `Read` / `Grep` / `Glob` / `LS` / `Bash` / edit tool events to the run-scoped `tool_events.jsonl` even when those tool payloads only carry `session_id`. `session_events.jsonl` records safe session-level previews such as user prompt, tool call started/completed, stop, and session end. Hooks also maintain `active_operations.json` for run-bound sessions and `.claude/runtime_state/session_observer/active_operations.json` for unbound sessions so UI can render the current active tool without replaying the whole stream.
-
-`agent_messages.jsonl` should include `message_id`, `direction`, `coverage_refs`, and whether a response is required. `tool_events.jsonl` must contain real Claude Code tool calls such as `Read`, `Edit`, `Write`, `MultiEdit`, `Bash`, `Grep`, `Glob`, and `LS` when those hooks fire; UI must not invent low-level actions from reports or artifacts. If a child tool event lacks direct run fields, hooks should rebind it from the latest `session_bindings.jsonl` record for the same `session_id` before writing the run-scoped observer stream. `tool_events.jsonl` may include `soft_reminders` for executor Bash commands; these are nonblocking prompts to collect missing evidence, not runtime denials. `teammate_reports.jsonl` should include structured progress fields such as `progress_state`, `completed_items`, `open_items`, `blocked_items`, `evidence_refs`, and `file_refs`. `completion_checks.jsonl` should include checklist-level `items` with per-item status and evidence/reason fields. `process_events.jsonl` is the read-only place for long-running process state such as PID, command preview, heartbeat, terminal state, log tail ref, and artifact probe.
-
-These files are derived from runtime events and Claude Code hooks. They are for UI/debug inspection only; authoritative workflow truth remains `run_ledger.json`, `event_log.jsonl`, task ledgers, transitions, and `runtime_snapshot.json`.
-
-## 10. Active Runtime Entry Point
+## 9. Active Runtime Entry Point
 
 The Claude Code entry point is self-contained in this parent-sibling `.claude` directory.
 The `bridge` MCP server is declared in `.claude/settings.json`:
@@ -283,7 +207,7 @@ The active CLI accepts workflow events only:
 
 Legacy task-action requests are not accepted by this entry point.
 
-## 11. Completion Standard
+## 10. Completion Standard
 
 The system is behaving correctly only when:
 

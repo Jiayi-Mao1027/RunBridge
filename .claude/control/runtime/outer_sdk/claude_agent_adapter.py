@@ -21,10 +21,13 @@ from .adapters import OuterLeaderEventSink
 
 SDK_PACKAGE = "claude_agent_sdk"
 DEFAULT_ALLOWED_TOOLS = [
+    "mcp__bridge__list_registered_repos",
+    "mcp__bridge__list_runs",
     "mcp__bridge__read_runtime_snapshot",
     "mcp__bridge__build_bridge_packet",
     "mcp__bridge__call_bridge_sdk",
     "mcp__bridge__reconcile_workflow_from_ledger",
+    "mcp__bridge__mark_bridge_orphaned",
     "Read",
     "Grep",
     "Glob",
@@ -1066,7 +1069,7 @@ def _sdk_result(
 ) -> dict[str, Any]:
     subtype = result_message.get("subtype") if result_message else None
     summary = _result_text(result_message) or _last_result_text(messages) or _last_preview(messages) or "outer leader SDK response completed"
-    contract_violation = _outer_leader_contract_violation(summary, result_message) or _outer_leader_message_contract_violation(messages, summary)
+    contract_violation = _outer_leader_contract_violation(summary, result_message) or _outer_leader_message_contract_violation(request, messages, summary)
     system_failure = _outer_leader_system_failure(summary, result_message)
     status = (
         "blocked"
@@ -1146,20 +1149,29 @@ def _outer_leader_contract_violation(summary: str, result_message: dict[str, Any
     return None
 
 
-def _outer_leader_message_contract_violation(messages: list[dict[str, Any]], summary: str) -> str | None:
+def _outer_leader_message_contract_violation(request: dict[str, Any], messages: list[dict[str, Any]], summary: str) -> str | None:
     if _is_tool_artifact_filename(summary):
         return "Outer leader returned only a tool artifact filename instead of a runtime-backed report."
+    reconcile_seen = False
     build_seen = False
     call_seen = False
     for item in messages:
         tool_name = str(item.get("tool_name") or "")
+        if tool_name == "mcp__bridge__reconcile_workflow_from_ledger":
+            reconcile_seen = True
         if tool_name == "mcp__bridge__build_bridge_packet":
             build_seen = True
         if tool_name == "mcp__bridge__call_bridge_sdk":
             call_seen = True
+    if _is_advance_or_continue_request(request) and reconcile_seen and not build_seen and not call_seen:
+        return "Outer leader reconciled workflow state for an advance/continue request but stopped before mcp__bridge__build_bridge_packet and mcp__bridge__call_bridge_sdk."
     if build_seen and not call_seen:
         return "Outer leader built a BridgePacket but stopped before mcp__bridge__call_bridge_sdk."
     return None
+
+
+def _is_advance_or_continue_request(request: dict[str, Any]) -> bool:
+    return str(request.get("dispatch_intent") or "").strip() == "advance_or_continue"
 
 
 def _is_tool_artifact_filename(text: Any) -> bool:

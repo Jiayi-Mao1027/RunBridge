@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -232,6 +233,24 @@ def _tools() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "mark_bridge_orphaned",
+            "description": "Runtime tool: mark one currently blocking bridge window orphaned after runtime evidence shows it has no live execution. If bridge_window_id is omitted and exactly one bridge window blocks phase exit, that window is used.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "repo_key": {"type": "string"},
+                    "main_session_id": {"type": "string"},
+                    "bridge_window_id": {"type": "string"},
+                    "sub_session_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "persist": {"type": "boolean"},
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "list_registered_repos",
             "description": "List repo manifests registered under this parent .claude runtime_state registry.",
             "inputSchema": {
@@ -339,6 +358,8 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             runtime_runs_root=runtime_runs_root,
             persist=bool(arguments.get("persist", True)),
         )
+    elif tool_name == "mark_bridge_orphaned":
+        result = _mark_bridge_orphaned(arguments, runtime_runs_root)
     elif tool_name == "list_registered_repos":
         result = {"repos": [repo.as_dict() for repo in list_registered_repos(CONTROL_ROOT)]}
     elif tool_name == "list_runs":
@@ -398,6 +419,79 @@ def _load_last_packet(runtime_runs_root: str | Path, *, run_id: str | None = Non
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
     return payload if isinstance(payload, dict) else None
+
+
+def _mark_bridge_orphaned(arguments: dict[str, Any], runtime_runs_root: str | Path) -> dict[str, Any]:
+    run_id = _resolve_run_id(arguments, runtime_runs_root, require_active=True)
+    snapshot = read_runtime_snapshot(
+        CONTROL_ROOT,
+        run_id,
+        repo_key=arguments.get("repo_key"),
+        runtime_runs_root=runtime_runs_root,
+    )
+    bridge_window_id = str(arguments.get("bridge_window_id") or "").strip()
+    if not bridge_window_id:
+        blocking = snapshot.get("phase_exit_readiness", {}).get("blocking_bridge_window_ids") or []
+        if len(blocking) != 1:
+            raise ValueError("bridge_window_id is required unless exactly one bridge window blocks phase exit")
+        bridge_window_id = str(blocking[0])
+    lifecycle = snapshot.get("lifecycle") if isinstance(snapshot.get("lifecycle"), dict) else {}
+    status_index = lifecycle.get("status_index") if isinstance(lifecycle.get("status_index"), dict) else {}
+    current_status = str(status_index.get(bridge_window_id) or "").strip()
+    if current_status in {"bridge_window_returned", "bridge_window_partial_returned", "bridge_window_failed", "bridge_window_orphaned", "bridge_window_interrupted"}:
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "bridge_window_id": bridge_window_id,
+            "already_terminal": True,
+            "status": current_status,
+            "runtime_snapshot": snapshot,
+        }
+    sub_session_id = str(arguments.get("sub_session_id") or "").strip() or _sub_session_id_from_bridge_window_id(bridge_window_id)
+    if not sub_session_id:
+        raise ValueError("sub_session_id is required when it cannot be derived from bridge_window_id")
+    main_session_id = _resolve_main_session_id(arguments, runtime_runs_root, run_id, snapshot)
+    reason = str(arguments.get("reason") or "marked orphaned through bridge MCP after runtime evidence showed no live bridge execution").strip()
+    event = {
+        "run_id": run_id,
+        "main_session_id": main_session_id,
+        "sub_session_id": sub_session_id,
+        "bridge_window_id": bridge_window_id,
+        "agent_id": "mcp.mark_bridge_orphaned",
+        "agent_type": "runtime",
+        "event_kind": "orphan_timeout_without_bridge_return",
+        "payload": {
+            "reason": reason,
+            "last_known_status": current_status or None,
+            "last_known_event_ref": current_status or "open_bridge_window",
+            "marked_by": "mcp__bridge__mark_bridge_orphaned",
+        },
+    }
+    dispatch_result = dispatch_workflow_event(
+        CONTROL_ROOT,
+        event,
+        repo_key=arguments.get("repo_key"),
+        runtime_runs_root=runtime_runs_root,
+        persist=bool(arguments.get("persist", True)),
+    )
+    return {
+        "ok": dispatch_result.ok,
+        "run_id": dispatch_result.run_id,
+        "event_id": dispatch_result.event_id,
+        "event_kind": dispatch_result.event_kind,
+        "bridge_window_id": bridge_window_id,
+        "check_result": dispatch_result.check_result,
+        "update_result": dispatch_result.update_result,
+        "runtime_snapshot": dispatch_result.runtime_snapshot,
+        "written_paths": dispatch_result.written_paths,
+    }
+
+
+def _sub_session_id_from_bridge_window_id(bridge_window_id: str) -> str:
+    match = re.search(r"(?:^|_)sub_([A-Za-z0-9]+)$", str(bridge_window_id or ""))
+    if not match:
+        return ""
+    return f"sub_{match.group(1)}"
 
 
 def _last_packet_path(runtime_runs_root: str | Path, *, run_id: str | None = None) -> Path:

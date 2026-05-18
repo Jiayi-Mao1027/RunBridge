@@ -1,0 +1,89 @@
+{
+  "schema_version": "0.1.0",
+  "checkpoint_id": "chkpt_000061_evt_29c5dc79d3d945d5",
+  "sequence": 61,
+  "timestamp": "2026-05-17T09:14:37.231527+00:00",
+  "repo_key": "unscoped_repo",
+  "run_id": "run_demo",
+  "event_id": "evt_29c5dc79d3d945d5",
+  "event_kind": "team_create_started",
+  "state": {
+    "repo_key": "unscoped_repo",
+    "run_id": "run_demo",
+    "phase": "leader_freeze",
+    "lifecycle_state": "team_create_started",
+    "graph_node": "team_create_started",
+    "active_bridge_window_id": "bw_completion_repair",
+    "active_team_id": "team_completion_repair",
+    "active_task_id": "task_failed_teammate_report_loss",
+    "frozen_semantics_hash": null,
+    "packet_hash": "f04fca16d107e83b596aab71",
+    "completion_contract_hash": "0af213370df77f9ef9f651db",
+    "retry_context": {
+      "event_type": "retry_attempt_scheduled",
+      "timestamp": "2026-05-17T09:14:36.145290+00:00",
+      "repo_key": "unscoped_repo",
+      "run_id": "run_demo",
+      "bridge_window_id": "bw_failed_teammate_report_loss",
+      "retry_scope": "teammate_report_missing",
+      "attempt": 2,
+      "max_attempts": 4,
+      "delay_ms": 7500,
+      "packet_hash": "5ff9b35a60e574241ba72cd4",
+      "reason": {
+        "source_event_id": "evt_2bc64cfecd784d8f",
+        "source_event_kind": "bridge_result_returned_with_failure",
+        "check_decision": "allow",
+        "check_reasons": [],
+        "error_type": "t   eammate_report_missing_or_transport_failure",
+        "retryable": true
+      },
+      "retryable": true,
+      "exhausted": false,
+      "next_action": "retry_same_packet",
+      "source_event_id": "evt_2bc64cfecd784d8f",
+      "source_event_kind": "bridge_result_returned_with_failure",
+      "same_packet_boundary_required": true,
+      "retry_after_terminal_bridge_result": true,
+      "source_bridge_window_id": "bw_failed_teammate_report_loss",
+      "target_bridge_window_id_or_null": null,
+      "bridge_window_reuse_allowed": false,
+      "retry_action": {
+        "kind": "retry_bridge_sdk_call",
+        "allowed": true,
+        "requires_new_bridge_window": true,
+        "requires_same_packet": true,
+        "requires_user": false
+      }
+    },
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": [
+      {
+        "level": "warn",
+        "category": "state_graph",
+        "message": "event has no state graph edge from current graph node",
+        "event_kind": "retry_attempt_scheduled",
+        "current_graph_node": "read_runtime_truth",
+        "candidate_edge_ids": [
+          "call_failed_retry_scheduled",
+          "terminal_failure_retry_scheduled",
+          "team_create_failed_retry_scheduled",
+          "task_create_failed_retry_scheduled",
+          "dispatch_failed_retry_scheduled",
+          "wait_timeout_retry_scheduled",
+          "completion_rejected_retry_scheduled",
+          "task_failed_retry_scheduled",
+          "team_delete_failed_retry_scheduled",
+          "window_returned_retry_scheduled",
+          "window_failed_retry_scheduled",
+          "window_partial_retry_scheduled"
+        ]
+      }
+    ]
+  },
+  "state_hash": "c526f0e4aa0f0289aaa67736",
+  "snapshot_hash": "c8b4210e064cdab8c163e079"
+}

@@ -1,0 +1,457 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow_runtime.schema.json",
+  "title": "Bridge Window Workflow Runtime Contracts",
+  "type": "object",
+  "description": "Implementation-facing schema summary for the runtime contracts enforced by workflow_runtime.py.",
+  "definitions": {
+    "RuntimeEvent": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "main_session_id",
+        "event_id",
+        "event_kind",
+        "timestamp",
+        "agent_id",
+        "agent_type",
+        "payload"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "main_session_id": {
+          "type": "string"
+        },
+        "sub_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bridge_window_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "team_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "teammate_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "event_kind": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "agent_type": {
+          "enum": [
+            "main-leader",
+            "bridge-leader",
+            "teammate",
+            "hook",
+            "runtime"
+          ]
+        },
+        "tool_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_use_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payload": {
+          "type": "object"
+        },
+        "payload_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "correlation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "BridgePacket": {
+      "type": "object",
+      "required": [
+        "binding",
+        "frozen_semantics",
+        "frozen_scope",
+        "phase_route",
+        "target_phase",
+        "team_spec",
+        "task_spec",
+        "task_team_mapping",
+        "completion_contract",
+        "report_contract"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "policy_contract_ref": {
+          "type": "object"
+        },
+        "binding": {
+          "$ref": "#/definitions/BridgeWindowBinding"
+        },
+        "frozen_semantics": {
+          "type": "object"
+        },
+        "frozen_scope": {
+          "type": "object"
+        },
+        "phase_route": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "target_phase": {
+          "type": "string"
+        },
+        "team_spec": {
+          "type": "object"
+        },
+        "task_spec": {
+          "type": "object"
+        },
+        "task_team_mapping": {
+          "type": "object",
+          "required": [
+            "teammate_assignments"
+          ],
+          "properties": {
+            "task_id_or_null": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "team_id_or_null": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "teammate_assignments": {
+              "type": "array"
+            }
+          }
+        },
+        "completion_contract": {
+          "type": "object"
+        },
+        "report_contract": {
+          "type": "object"
+        },
+        "allowed_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "approval_requirements": {
+          "type": "array"
+        }
+      }
+    },
+    "BridgeWindowBinding": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "main_session_id",
+        "sub_session_id",
+        "bridge_window_id"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "main_session_id": {
+          "type": "string"
+        },
+        "sub_session_id": {
+          "type": "string"
+        },
+        "bridge_window_id": {
+          "type": "string"
+        },
+        "parent_tool_use_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "opened_by_agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "opened_by_agent_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bridge_leader_id_or_null": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "team_id_or_null": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id_or_null": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lifecycle_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "RuntimeSnapshot": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "main_session_id",
+        "current_phase",
+        "semantic",
+        "scope",
+        "route",
+        "lifecycle",
+        "bindings",
+        "allowed_actions",
+        "allowed_routes",
+        "integrity",
+        "phase_exit_readiness"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "main_session_id": {
+          "type": "string"
+        },
+        "snapshot_detail_level": {
+          "type": "string"
+        },
+        "snapshot_policy": {
+          "type": "object"
+        },
+        "snapshot_refs": {
+          "type": "object"
+        },
+        "current_phase": {
+          "type": "string"
+        },
+        "semantic": {
+          "type": "object"
+        },
+        "scope": {
+          "type": "object"
+        },
+        "route": {
+          "type": "object"
+        },
+        "lifecycle": {
+          "type": "object"
+        },
+        "bindings": {
+          "type": "object"
+        },
+        "allowed_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_routes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "integrity": {
+          "type": "object"
+        },
+        "runtime_diagnostics": {
+          "type": "object"
+        },
+        "last_bridge_result": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "phase_exit_readiness": {
+          "type": "object"
+        }
+      }
+    },
+    "CheckResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "decision",
+        "code",
+        "reasons",
+        "normalized_payload",
+        "derived_facts",
+        "audit_ref"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "decision": {
+          "enum": [
+            "allow",
+            "deny",
+            "needs_review"
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "normalized_payload": {
+          "type": "object"
+        },
+        "derived_facts": {
+          "type": "object"
+        },
+        "audit_ref": {
+          "type": "string"
+        }
+      }
+    },
+    "UpdateResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "decision",
+        "transition_ids",
+        "changed_fields",
+        "audit_ref"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "decision": {
+          "enum": [
+            "applied",
+            "rejected",
+            "noop"
+          ]
+        },
+        "transition_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "new_snapshot_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "changed_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "audit_ref": {
+          "type": "string"
+        }
+      }
+    },
+    "NotifyResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "notify_items",
+        "main_leader_inbox_ref",
+        "audit_ref"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "notify_items": {
+          "type": "array"
+        },
+        "main_leader_inbox_ref": {
+          "type": "string"
+        },
+        "audit_ref": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

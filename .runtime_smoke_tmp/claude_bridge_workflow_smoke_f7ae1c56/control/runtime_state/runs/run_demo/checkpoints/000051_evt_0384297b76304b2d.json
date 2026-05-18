@@ -1,0 +1,63 @@
+{
+  "schema_version": "0.1.0",
+  "checkpoint_id": "chkpt_000051_evt_0384297b76304b2d",
+  "sequence": 51,
+  "timestamp": "2026-05-17T09:14:41.797163+00:00",
+  "repo_key": "unscoped_repo",
+  "run_id": "run_demo",
+  "event_id": "evt_0384297b76304b2d",
+  "event_kind": "bridge_window_opened",
+  "state": {
+    "repo_key": "unscoped_repo",
+    "run_id": "run_demo",
+    "phase": "leader_freeze",
+    "lifecycle_state": "bridge_window_opened",
+    "graph_node": "bridge_window_opened",
+    "active_bridge_window_id": "bw_run_demo_sub_f471505e45ed",
+    "active_team_id": null,
+    "active_task_id": null,
+    "frozen_semantics_hash": null,
+    "packet_hash": "5e1fece0f813f45e029617ea",
+    "completion_contract_hash": "1fa9cc49b1d774cf296c3800",
+    "retry_context": {
+      "event_type": "retry_attempt_scheduled",
+      "timestamp": "2026-05-17T09:14:39.692529+00:00",
+      "repo_key": "unscoped_repo",
+      "run_id": "run_demo",
+      "bridge_window_id": "bw_failed",
+      "retry_scope": "bridge_sdk_call",
+      "attempt": 2,
+      "max_attempts": 3,
+      "delay_ms": 4000,
+      "packet_hash": "1532cd97a7a005e5dbd9a751",
+      "reason": {
+        "source_event_id": "evt_aaa91459e91a4009",
+        "source_event_kind": "call_bridge_sdk_error",
+        "check_decision": "allow",
+        "check_reasons": [],
+        "error_type": "sdk failed",
+        "retryable": true
+      },
+      "retryable": true,
+      "exhausted": false,
+      "next_action": "retry_same_packet",
+      "source_event_id": "evt_aaa91459e91a4009",
+      "source_event_kind": "call_bridge_sdk_error",
+      "same_packet_boundary_required": true,
+      "retry_action": {
+        "kind": "retry_bridge_sdk_call",
+        "allowed": true,
+        "requires_new_bridge_window": false,
+        "requires_same_packet": true,
+        "requires_user": false
+      }
+    },
+    "trajectory_head": {},
+    "open_process_refs": [],
+    "pending_approvals": [],
+    "hard_stops": [],
+    "diagnostics": []
+  },
+  "state_hash": "850fcddeebf29bebb97f0dd2",
+  "snapshot_hash": "9d36462746f51cc826bd9da0"
+}
