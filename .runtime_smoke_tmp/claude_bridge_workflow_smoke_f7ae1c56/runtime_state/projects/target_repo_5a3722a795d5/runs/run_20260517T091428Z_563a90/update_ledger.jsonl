@@ -1,1 +1,0 @@
-{"ok": true, "decision": "applied", "transition_ids": ["wtr_763cadc83ba54fda"], "new_snapshot_ref": "snapshot:run_20260517T091428Z_563a90:evt_d757e269392a423c", "changed_fields": ["phase_exit_readiness", "semantic"], "audit_ref": "upd_bee044b75eb74d05", "event_id": "evt_d757e269392a423c", "event_kind": "user_prompt_submitted", "timestamp": "2026-05-17T09:14:28.956094+00:00"}

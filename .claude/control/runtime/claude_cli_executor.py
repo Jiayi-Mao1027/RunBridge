@@ -900,7 +900,7 @@ def _run_runtime_owned_teammate_fallback(
 def _runtime_owned_teammate_fallback_allowed(packet: dict[str, Any], result: dict[str, Any]) -> bool:
     phase = str(packet.get("target_phase") or "").strip()
     if phase == "l4_execute":
-        return False
+        return _is_agent_dispatch_contract_violation(result)
     if phase == "l3_bridge":
         return (
             _is_agent_dispatch_contract_violation(result)
@@ -986,7 +986,7 @@ def _prefer_runtime_owned_teammate_fallback(packet: dict[str, Any], *, bare_prin
     if configured in {"0", "false", "no", "off", "disable", "disabled"}:
         return False
     phase = str(packet.get("target_phase") or "").strip()
-    if phase not in {"l3_bridge", "l2_advisory", "l4_implement", "l4_anomaly"}:
+    if phase not in {"l3_bridge", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly"}:
         return False
     if not _runtime_owned_teammate_names(packet):
         return False
@@ -1459,14 +1459,18 @@ def _runtime_owned_teammate_allowed_tools(packet: dict[str, Any], teammate_name:
     read_only_scope = _runtime_owned_read_only_scope(packet)
     phase = str(packet.get("target_phase") or "").strip()
     allow_l4_implementation_tools = phase == "l4_implement" and not read_only_scope
-    allow_bash = (teammate_name == "curator" and not read_only_scope) or allow_l4_implementation_tools
+    allow_l4_execute_tools = phase == "l4_execute" and not read_only_scope
+    allow_bash = (teammate_name == "curator" and not read_only_scope) or allow_l4_implementation_tools or allow_l4_execute_tools
     tools: list[str] = []
     for item in configured:
         tool = str(item or "").strip()
         if not tool or tool == "Agent" or tool.startswith("Agent("):
             continue
-        if tool in RUNTIME_OWNED_TEAMMATE_MUTATING_TOOLS and not allow_l4_implementation_tools:
-            continue
+        if tool in RUNTIME_OWNED_TEAMMATE_MUTATING_TOOLS:
+            if allow_l4_execute_tools and teammate_name == "executor" and tool == "Write":
+                pass
+            elif not allow_l4_implementation_tools:
+                continue
         if tool == "Bash" and not allow_bash:
             continue
         if tool not in tools:
@@ -2049,13 +2053,20 @@ def _runtime_owned_bridge_result_from_teammate_reports(
     attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     blocked_teammates = _runtime_owned_transport_blocked_teammates(reports)
-    status = "partial_or_failed" if blocked_teammates else "succeeded"
+    blocked_report_teammates = _runtime_owned_report_blocked_teammates(reports)
+    status = "partial_or_failed" if blocked_teammates or blocked_report_teammates else "succeeded"
     error_or_null = None
     if blocked_teammates:
         error_or_null = {
             "type": "RuntimeOwnedTeammateReportsBlocked",
             "message": "runtime-owned teammate fallback only recovered blocked observer reports for one or more teammates",
             "blocked_teammates": blocked_teammates,
+        }
+    elif blocked_report_teammates:
+        error_or_null = {
+            "type": "RuntimeOwnedTeammateReportedBlocked",
+            "message": "runtime-owned teammate fallback reports contain blocked or escalated completion semantics",
+            "blocked_teammates": blocked_report_teammates,
         }
     result = {
         "status": status,
@@ -2071,6 +2082,7 @@ def _runtime_owned_bridge_result_from_teammate_reports(
             "task_id": execution_input.get("task_id"),
             "teammates": [report.get("teammate_name") or report.get("agent_type") for report in reports],
             "blocked_teammates": blocked_teammates,
+            "blocked_report_teammates": blocked_report_teammates,
             "attempts": attempts or [],
             "original_error": _compact_original_error(original_result),
         },
@@ -2093,6 +2105,47 @@ def _runtime_owned_bridge_result_from_teammate_reports(
             },
         )
     return result
+
+
+def _runtime_owned_report_blocked_teammates(reports: list[dict[str, Any]]) -> list[str]:
+    blocked: list[str] = []
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        classification = str(report.get("classification") or "").strip().lower()
+        if classification in {"hard_stop", "blocked", "execution_blocked", "readiness_blocked", "dependency_blocked"}:
+            teammate = str(report.get("teammate_name") or report.get("agent_type") or report.get("teammate_id") or "").strip()
+            blocked.append(teammate or "unknown")
+            continue
+        if _coverage_has_blocked_or_escalated(report.get("instruction_coverage")):
+            teammate = str(report.get("teammate_name") or report.get("agent_type") or report.get("teammate_id") or "").strip()
+            blocked.append(teammate or "unknown")
+            continue
+        if _semantic_resolution_has_blocked_or_escalated(report.get("semantic_identity_resolution")):
+            teammate = str(report.get("teammate_name") or report.get("agent_type") or report.get("teammate_id") or "").strip()
+            blocked.append(teammate or "unknown")
+    return blocked
+
+
+def _coverage_has_blocked_or_escalated(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"blocked", "escalated"}
+    if isinstance(value, list):
+        return any(_coverage_has_blocked_or_escalated(item) for item in value)
+    if isinstance(value, dict):
+        return any(_coverage_has_blocked_or_escalated(item) for item in value.values())
+    return False
+
+
+def _semantic_resolution_has_blocked_or_escalated(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_semantic_resolution_has_blocked_or_escalated(item) for item in value)
+    if isinstance(value, dict):
+        disposition = str(value.get("disposition") or "").strip().lower()
+        if disposition in {"blocked", "escalated"}:
+            return True
+        return any(_semantic_resolution_has_blocked_or_escalated(item) for item in value.values())
+    return False
 
 
 def _runtime_owned_transport_blocked_teammates(reports: list[dict[str, Any]]) -> list[str]:

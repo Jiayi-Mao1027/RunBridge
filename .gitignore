@@ -1,11 +1,19 @@
 # Local runtime/cache artifacts
 .claude/runtime_state/
 .runtime_smoke_tmp/
-__pycache__/
+**/__pycache__/
 *.py[cod]
+.claude/control/runtime/*_202*.py
 
 # Local agent working notes
 AGENTS.md
+
+# Local UI, drafts, and machine logs outside the minimal system package
+bridge-companion/
+pseudocode/
+pseudocode.md
+state_machine.md
+easytier.log
 
 # Local secrets
 bridge-companion/key.json
