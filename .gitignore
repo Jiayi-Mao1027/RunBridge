@@ -8,8 +8,7 @@
 # Local agent working notes
 AGENTS.md
 
-# Local UI, drafts, and machine logs outside the minimal system package
-bridge-companion/
+# Local drafts and machine logs outside the minimal system package
 pseudocode/
 pseudocode.md
 state_machine.md

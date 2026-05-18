@@ -1,0 +1,2086 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bridge Companion</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111315;
+      --panel: #191d20;
+      --panel-2: #20262a;
+      --line: #343c42;
+      --line-strong: #4b5961;
+      --text: #e7ecef;
+      --muted: #9aa7ae;
+      --accent: #7db7a2;
+      --accent-2: #d3a15f;
+      --danger: #df7f72;
+      --ok: #90c978;
+      --warn: #d5b46d;
+      --shadow: 0 20px 42px rgba(0, 0, 0, .35);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow: hidden;
+    }
+    button, select, textarea, input {
+      font: inherit;
+      color: var(--text);
+      background: #15191c;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+    button {
+      min-height: 34px;
+      padding: 0 11px;
+      cursor: pointer;
+    }
+    button:hover, select:hover, input:hover { border-color: var(--line-strong); }
+    button.active { border-color: var(--accent); color: var(--accent); }
+    select, input {
+      width: 100%;
+      height: 34px;
+      padding: 0 9px;
+    }
+    input[type="number"] { min-width: 110px; }
+    textarea {
+      width: 100%;
+      min-height: 112px;
+      resize: vertical;
+      padding: 9px;
+      line-height: 1.45;
+    }
+    textarea:focus, select:focus, button:focus, input:focus {
+      outline: 1px solid rgba(125, 183, 162, .65);
+      outline-offset: 1px;
+    }
+    .app {
+      height: 100vh;
+      display: grid;
+      grid-template-rows: 58px 1fr;
+      gap: 10px;
+      padding: 12px;
+    }
+    .topbar {
+      display: grid;
+      grid-template-columns: 280px 260px 1fr auto;
+      gap: 10px;
+      align-items: center;
+    }
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      min-width: 0;
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 650;
+      letter-spacing: .01em;
+    }
+    .brand span { color: var(--muted); font-size: 12px; }
+    .field label {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+    .chips {
+      display: flex;
+      gap: 8px;
+      min-width: 0;
+      justify-content: flex-end;
+    }
+    .chip {
+      min-width: 110px;
+      max-width: 210px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      background: #15191c;
+      border-radius: 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .chip b { color: var(--muted); font-weight: 500; margin-right: 6px; }
+    .chip.live { border-color: rgba(125, 183, 162, .58); color: var(--accent); }
+    .chip.warn { border-color: rgba(211, 161, 95, .65); color: var(--warn); }
+    .layout {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(260px, .72fr) minmax(560px, 1.45fr) minmax(420px, 1fr);
+      gap: 10px;
+    }
+    .panel {
+      min-height: 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .panel-header {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .panel-header h2 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 650;
+      letter-spacing: .02em;
+    }
+    .meta { color: var(--muted); font-size: 12px; }
+    .panel-body {
+      min-height: 0;
+      overflow: auto;
+      padding: 10px;
+    }
+    .left-stack, .right-stack {
+      min-height: 0;
+      display: grid;
+      gap: 10px;
+    }
+    .left-stack { grid-template-rows: 210px 265px 1fr; }
+    .center-stack, .right-stack {
+      min-height: 0;
+      display: grid;
+      gap: 10px;
+    }
+    .center-stack { grid-template-rows: minmax(360px, 1.15fr) minmax(280px, .85fr); }
+    .right-stack { grid-template-rows: minmax(360px, 1.15fr) minmax(230px, .7fr); }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .summary-card {
+      padding: 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel-2);
+      min-width: 0;
+    }
+    .summary-card .label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin-bottom: 4px;
+    }
+    .summary-card .value {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tree-list, .activity-list, .trajectory-list, .completion-list {
+      display: grid;
+      gap: 8px;
+    }
+    .member, .event, .step, .check-row {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #15191c;
+      padding: 9px;
+      min-width: 0;
+    }
+    .member.running { border-color: rgba(125, 183, 162, .55); }
+    .member.failed { border-color: rgba(223, 127, 114, .55); }
+    .member-head, .event-head, .step-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .name, .event-title, .step-title {
+      font-weight: 650;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 0 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .badge.running { color: var(--accent); border-color: rgba(125, 183, 162, .55); }
+    .badge.failed, .badge.blocked { color: var(--danger); border-color: rgba(223, 127, 114, .55); }
+    .badge.completed { color: var(--ok); border-color: rgba(144, 201, 120, .5); }
+    .subtext {
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .event {
+      cursor: pointer;
+      transition: border-color .15s ease, background .15s ease;
+    }
+    .member.selectable {
+      cursor: pointer;
+      transition: border-color .15s ease, background .15s ease;
+    }
+    .event:hover, .event.selected, .member.selectable:hover, .member.selected {
+      border-color: var(--accent);
+      background: #17201d;
+    }
+    .event-meta {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 7px;
+    }
+    .raw-link {
+      color: var(--accent-2);
+      border: 0;
+      padding: 0;
+      min-height: 0;
+      background: transparent;
+      text-decoration: underline;
+    }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      background: #15191c;
+    }
+    .lane-tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .tabs button, .lane-tabs button {
+      min-height: 30px;
+      border-radius: 999px;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #c7d0d5;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .detail-sections {
+      display: grid;
+      gap: 10px;
+    }
+    .detail-block {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #15191c;
+      overflow: hidden;
+    }
+    .detail-block h3 {
+      margin: 0;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+      letter-spacing: .06em;
+      color: var(--muted);
+    }
+    .detail-block pre {
+      padding: 10px;
+    }
+    .brief-box {
+      display: grid;
+      gap: 10px;
+    }
+    .terminal-box {
+      display: grid;
+      gap: 10px;
+    }
+    .terminal-row {
+      grid-template-columns: minmax(180px, 1fr) 130px;
+    }
+    .terminal-actions {
+      grid-template-columns: minmax(180px, 1fr) auto auto;
+    }
+    .terminal-output {
+      display: grid;
+      gap: 10px;
+    }
+    .terminal-output pre {
+      max-height: 240px;
+      overflow: auto;
+    }
+    .leader-input {
+      display: grid;
+      gap: 9px;
+    }
+    .input-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .submit-status {
+      color: var(--muted);
+      font-size: 12px;
+      min-height: 18px;
+      overflow-wrap: anywhere;
+    }
+    .submit-status.ok { color: var(--ok); }
+    .submit-status.warn { color: var(--warn); }
+    .submit-status.failed { color: var(--danger); }
+    .leader-report-list {
+      display: grid;
+      gap: 8px;
+    }
+    .leader-report {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #15191c;
+      padding: 9px;
+      min-width: 0;
+    }
+    .leader-report.primary {
+      border-color: rgba(125, 183, 162, .55);
+      background: #16201d;
+    }
+    .leader-summary {
+      color: #dfe7e9;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .leader-report pre {
+      margin-top: 8px;
+      max-height: 150px;
+      overflow: auto;
+    }
+    .leader-kv {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .leader-kv div {
+      display: grid;
+      grid-template-columns: 112px 1fr;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .leader-kv b {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .check-row {
+      display: grid;
+      grid-template-columns: 24px 1fr;
+      gap: 8px;
+      align-items: start;
+    }
+    .check-mark {
+      color: var(--muted);
+      font-weight: 700;
+      text-align: center;
+    }
+    .check-row.passed .check-mark { color: var(--ok); }
+    .check-row.failed .check-mark, .check-row.blocked .check-mark { color: var(--danger); }
+    .source-quality {
+      color: var(--accent-2);
+      font-size: 12px;
+    }
+    .brief-output {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      min-height: 130px;
+      background: #15191c;
+      color: #cbd4d8;
+      white-space: pre-wrap;
+    }
+    .empty {
+      color: var(--muted);
+      padding: 10px;
+      border: 1px dashed var(--line);
+      border-radius: 6px;
+    }
+    @media (max-width: 1180px) {
+      body { overflow: auto; }
+      .app { min-width: 1180px; min-height: 760px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <h1>Bridge Companion</h1>
+        <span>runtime view plus input proxy</span>
+      </div>
+      <div class="field">
+        <label for="repoSelect">Repo</label>
+        <select id="repoSelect" data-testid="repo-select"></select>
+      </div>
+      <div class="field">
+        <label for="runSelect">Run</label>
+        <select id="runSelect" data-testid="run-select"></select>
+      </div>
+      <div class="chips">
+        <div class="chip" id="phaseChip"><b>Phase</b><span>unknown</span></div>
+        <div class="chip" id="lifeChip"><b>State</b><span>unknown</span></div>
+        <div class="chip" id="streamChip"><b>Live</b><span>off</span></div>
+        <button id="latestButton" data-testid="latest-button">Latest</button>
+        <button id="liveButton" data-testid="live-button">Live</button>
+      </div>
+    </header>
+
+    <section class="layout">
+      <aside class="left-stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Main Task</h2>
+            <span class="meta" id="summaryMeta">no run</span>
+          </div>
+          <div class="panel-body">
+            <div class="summary-grid">
+              <div class="summary-card"><div class="label">Repo</div><div class="value" id="repoValue">none</div></div>
+              <div class="summary-card"><div class="label">Run</div><div class="value" id="runValue">none</div></div>
+              <div class="summary-card"><div class="label">Events</div><div class="value" id="eventCountValue">0</div></div>
+              <div class="summary-card"><div class="label">Trajectory</div><div class="value" id="trajectoryCountValue">0</div></div>
+            </div>
+            <div class="subtext" id="taskValue">No task packet recorded.</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Leader Input</h2>
+            <span class="meta" id="inputProxyMeta">proxy unknown</span>
+          </div>
+          <div class="panel-body">
+            <form class="leader-input" id="leaderInputForm">
+              <textarea id="leaderInputText" data-testid="leader-input-text" placeholder="Message to leader-orchestrator"></textarea>
+              <div class="input-row">
+                <select id="leaderInputKind" data-testid="leader-input-kind">
+                  <option value="user_prompt">Prompt</option>
+                  <option value="user_answer">Answer</option>
+                </select>
+                <select id="leaderRunMode" data-testid="leader-run-mode">
+                  <option value="host_default">New host run</option>
+                  <option value="selected_run">Continue selected run</option>
+                </select>
+                <button id="leaderSendButton" type="submit" data-testid="leader-send-button">Send</button>
+              </div>
+              <div class="subtext" id="leaderTargetStatus">Target run unknown.</div>
+              <div class="submit-status" id="leaderInputStatus">input proxy not checked</div>
+            </form>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Team</h2>
+            <span class="meta" id="teamMeta">0 teammates</span>
+          </div>
+          <div class="panel-body">
+            <div class="tree-list" id="teamTree" data-testid="team-tree"></div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="center-stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Main Leader View</h2>
+            <span class="meta" id="leaderReportMeta">no result</span>
+          </div>
+          <div class="panel-body">
+            <div class="leader-report-list" id="leaderReportList" data-testid="leader-report-list"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Detail Inspector</h2>
+            <span class="meta" id="detailMeta">rawRef</span>
+          </div>
+          <div>
+            <div class="tabs">
+              <button class="active" data-tab="raw">Raw</button>
+              <button data-tab="trajectory">Trajectory</button>
+              <button data-tab="brief">Model Brief</button>
+              <button data-tab="terminal">Terminal</button>
+            </div>
+            <div class="panel-body" id="detailBody" data-testid="detail-inspector"></div>
+          </div>
+        </section>
+      </section>
+
+      <aside class="right-stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Live Activity</h2>
+            <span class="meta" id="activityMeta">0 items</span>
+          </div>
+          <div class="panel-body">
+            <div class="lane-tabs" id="laneTabs" aria-label="activity filters">
+              <button class="active" data-lane="all">All</button>
+              <button data-lane="tools">Tools</button>
+              <button data-lane="discussion">Discussion</button>
+              <button data-lane="reports">Reports</button>
+              <button data-lane="processes">Processes</button>
+              <button data-lane="completion">Completion</button>
+              <button data-lane="failures">Failures</button>
+            </div>
+            <div class="activity-list" id="activityList" data-testid="activity-list"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Completion / Unknowns</h2>
+            <span class="meta">contract and gaps</span>
+          </div>
+          <div class="panel-body">
+            <div class="completion-list" id="completionList" data-testid="completion-list"></div>
+            <div style="height:10px"></div>
+            <div id="unknownsList" class="tree-list"></div>
+          </div>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      repos: [],
+      runs: [],
+      repoKey: "",
+      runId: "",
+      status: null,
+      events: new Map(),
+      rawLookups: new Map(),
+      discussionBuffers: new Map(),
+      toolInputBuffers: new Map(),
+      gatewayWarnings: [],
+      projection: null,
+      lastSeq: 0,
+      lastEventId: "",
+      sourceCursors: {},
+      source: null,
+      gatewayHealth: null,
+      leaderHostStatus: null,
+      inputPending: false,
+      inputStatus: "input proxy not checked",
+      inputStatusClass: "",
+      lastLeaderResponse: null,
+      selectedEventSeq: null,
+      selectedEventId: "",
+      selectedItemId: "",
+      selectedTab: "raw",
+      laneFilter: "all",
+      briefText: "No model brief requested.",
+      terminal: {
+        cwd: "",
+        command: "npm run debug -- --strict-live --events --event-limit 80",
+        timeoutMs: 30000,
+        pending: false,
+        status: "ready",
+        statusClass: "",
+        result: null
+      },
+      streamConnected: false,
+      streamStoppedByGateway: false
+    };
+
+    const laneLabels = {
+      all: "All",
+      tools: "Tools",
+      discussion: "Discussion",
+      reports: "Reports",
+      processes: "Processes",
+      completion: "Completion",
+      failures: "Failures"
+    };
+
+    const $ = id => document.getElementById(id);
+    const escapeHtml = value => String(value ?? "").replace(/[&<>'"]/g, char => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "'": "&#39;",
+      '"': "&quot;"
+    }[char]));
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, { cache: "no-store", ...options });
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      return response.json();
+    }
+
+    async function apiJson(path, options = {}) {
+      const response = await fetch(path, { cache: "no-store", ...options });
+      const text = await response.text();
+      let payload = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = { raw: text };
+      }
+      if (!response.ok) {
+        const error = new Error(payload.message || payload.error || `${response.status} ${response.statusText}`);
+        error.payload = payload;
+        error.status = response.status;
+        throw error;
+      }
+      return payload;
+    }
+
+    function setChip(id, text, mode = "") {
+      const node = $(id);
+      node.querySelector("span").textContent = text || "unknown";
+      node.classList.toggle("live", mode === "live");
+      node.classList.toggle("warn", mode === "warn");
+    }
+
+    function compact(value, max = 140) {
+      const source = value && typeof value === "object" ? JSON.stringify(value) : value;
+      const text = String(source ?? "").replace(/\s+/g, " ").trim();
+      return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+    }
+
+    function eventList() {
+      return [...state.events.values()].sort((a, b) => {
+        const at = Date.parse(a.ts || "") || 0;
+        const bt = Date.parse(b.ts || "") || 0;
+        if (at !== bt) return at - bt;
+        return String(a.eventId || a.seq).localeCompare(String(b.eventId || b.seq));
+      });
+    }
+
+    function tuiView() {
+      return state.projection?.tuiView || {
+        header: {
+          repoKey: state.repoKey || "unknown",
+          runId: state.runId || "unknown",
+          taskTitle: state.status?.taskTitle || "No task packet recorded.",
+          phase: state.status?.phase || "unknown",
+          lifecycleState: state.status?.lifecycleState || "unknown",
+          latestMeaningfulEvent: "No meaningful event captured.",
+          nextStep: "Read runtime facts when projection is available."
+        },
+        mainReport: null,
+        teamTree: [],
+        activityItems: [],
+        completion: { status: "unknown", items: [], rawRefs: [] },
+        unknowns: state.status?.unknowns || [],
+        inspectorIndex: {}
+      };
+    }
+
+    function projectionItems() {
+      const view = tuiView();
+      return [
+        ...(view.activityItems || []),
+        ...(view.teamTree || []),
+        view.mainReport,
+        view.completion
+      ].filter(Boolean);
+    }
+
+    function projectionItemById(id) {
+      const view = tuiView();
+      return projectionItems().find(item => item.id === id || item.eventId === id) ||
+        view.inspectorIndex?.[id] ||
+        null;
+    }
+
+    function isFailureLike(event) {
+      const kind = String(event?.kind || event?.streamEventType || "").toLowerCase();
+      const status = String(event?.status || "").toLowerCase();
+      return ["failed", "blocked", "rejected"].includes(status) || kind.includes("failed") || kind.includes("rejected") || kind.includes("error") || kind.includes("timeout");
+    }
+
+    function isMeaningfulSdkStreamEvent(event) {
+      if (!event || event.source !== "sdk_stream") return false;
+      if (isFailureLike(event)) return true;
+      if (event.textDelta || event.accumulatedText || event.toolInputDelta || event.accumulatedToolInput) return true;
+      if (event.sdkToolName || event.toolName || event.toolId) return true;
+      const kind = String(event.kind || "").toLowerCase();
+      if (["text_delta", "assistant_message", "sdk_tool_declared", "sdk_tool_result"].includes(kind)) return true;
+      const rawType = String(event.raw?.sdk_message_type || event.raw?.event_type || event.raw?.raw_stream_event_type || event.streamEventType || "").toLowerCase();
+      if (rawType === "resultmessage" || rawType === "sdk_stream_final_result") return true;
+      if (kind === "sdk_delta") return false;
+      const preview = String(event.messagePreview || "").trim();
+      if (!preview) return false;
+      return !["streamevent", "sdk_stream_started", "sdk_stream_final", "content_block_delta", "tool_use", "tool_result"].includes(preview.toLowerCase());
+    }
+
+    function isTransportNoise(event) {
+      if (!event || isFailureLike(event)) return false;
+      if (event.source === "sdk_stream") {
+        return !isMeaningfulSdkStreamEvent(event);
+      }
+      if (event.source === "outer_host") {
+        const eventKind = String(event.raw?.event_kind || event.kind || "");
+        return eventKind !== "outer_leader_result";
+      }
+      return false;
+    }
+
+    function activityEventList() {
+      return eventList().filter(event => !isTransportNoise(event));
+    }
+
+    function addEvents(events = []) {
+      for (const event of events) {
+        if (!event) continue;
+        accumulateStreamEvent(event);
+        const id = event.eventId || String(event.seq);
+        if (!state.events.has(id)) state.events.set(id, event);
+        if (typeof event.seq === "number") state.lastSeq = Math.max(state.lastSeq, event.seq);
+        if (event.eventId) state.lastEventId = event.eventId;
+        const sourceFile = event.rawRef?.sourceFile;
+        const sourceOffset = Number(event.rawRef?.sourceOffset || 0);
+        if (sourceFile && sourceOffset) {
+          state.sourceCursors[sourceFile] = Math.max(Number(state.sourceCursors[sourceFile] || 0), sourceOffset);
+        }
+      }
+      while (state.events.size > 900) {
+        const first = eventList()[0]?.eventId || eventList()[0]?.seq;
+        state.events.delete(first);
+      }
+    }
+
+    function mergeSourceCursors(cursors = {}) {
+      if (!cursors || typeof cursors !== "object") return;
+      for (const [sourceFile, sourceOffset] of Object.entries(cursors)) {
+        const offset = Number(sourceOffset || 0);
+        if (!sourceFile || !Number.isFinite(offset) || offset <= 0) continue;
+        state.sourceCursors[sourceFile] = Math.max(Number(state.sourceCursors[sourceFile] || 0), offset);
+      }
+    }
+
+    function streamKey(event, suffix = "text") {
+      return [
+        event.repoKey || state.repoKey,
+        event.runId || state.runId,
+        event.bridgeWindowId || "",
+        event.teamId || "",
+        event.taskId || "",
+        event.sessionId || "",
+        event.actor?.teammateId || event.actor?.displayName || event.actor?.role || "",
+        suffix
+      ].join("|");
+    }
+
+    function accumulateStreamEvent(event) {
+      if (event.source !== "sdk_stream") return;
+      if (event.textDelta) {
+        const key = streamKey(event, "discussion");
+        const next = `${state.discussionBuffers.get(key) || ""}${event.textDelta}`;
+        state.discussionBuffers.set(key, next);
+        event.accumulatedText = compact(next, 2000);
+      }
+      if (event.toolInputDelta) {
+        const key = streamKey(event, `tool:${event.toolId || event.sdkToolName || event.toolName || "unknown"}`);
+        const next = `${state.toolInputBuffers.get(key) || ""}${event.toolInputDelta}`;
+        state.toolInputBuffers.set(key, next);
+        event.accumulatedToolInput = compact(next, 2000);
+      }
+    }
+
+    async function loadRepos() {
+      const payload = await api("/api/repos");
+      state.repos = Array.isArray(payload.repos) ? payload.repos : [];
+      $("repoSelect").innerHTML = state.repos.length
+        ? state.repos.map(repo => {
+          const git = repo.git || {};
+          const branch = git.branch || git.current_branch || "";
+          const head = git.head_short || git.head || git.commit || "";
+          const meta = [
+            `${repo.activeRunIds?.length || 0} active`,
+            repo.latestRun?.runId ? `latest ${repo.latestRun.runId}` : "",
+            branch ? `branch ${branch}` : "",
+            head ? `@${String(head).slice(0, 8)}` : ""
+          ].filter(Boolean).join(" · ");
+          const label = `${repo.displayName || repo.repoKey} — ${repo.repoKey}${meta ? ` (${meta})` : ""}`;
+          return `<option value="${escapeHtml(repo.repoKey)}">${escapeHtml(label)}</option>`;
+        }).join("")
+        : `<option value="">No repos</option>`;
+      return state.repos;
+    }
+
+    async function selectRepo(repoKey) {
+      state.repoKey = repoKey || "";
+      $("repoSelect").value = state.repoKey;
+      stopStream();
+      state.events.clear();
+      state.rawLookups.clear();
+      state.discussionBuffers.clear();
+      state.toolInputBuffers.clear();
+      state.gatewayWarnings = [];
+      state.projection = null;
+      state.lastSeq = 0;
+      state.lastEventId = "";
+      state.sourceCursors = {};
+      state.selectedItemId = "";
+      if (!state.repoKey) {
+        state.runs = [];
+        render();
+        return;
+      }
+      const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs`);
+      state.runs = Array.isArray(payload.runs) ? payload.runs : [];
+      $("runSelect").innerHTML = state.runs.length
+        ? state.runs.map(run => `<option value="${escapeHtml(run.runId)}">${escapeHtml(run.runId)}</option>`).join("")
+        : `<option value="">No runs</option>`;
+      let nextRun = state.runs[0]?.runId || "";
+      try {
+        const latest = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/latest`);
+        nextRun = latest.runId || nextRun;
+      } catch {}
+      await selectRun(nextRun);
+    }
+
+    async function selectLatestRun() {
+      if (!state.repoKey) return;
+      const latest = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/latest`);
+      await selectRun(latest.runId);
+    }
+
+    async function selectRun(runId) {
+      stopStream();
+      state.runId = runId || "";
+      $("runSelect").value = state.runId;
+      state.status = null;
+      state.events.clear();
+      state.rawLookups.clear();
+      state.discussionBuffers.clear();
+      state.toolInputBuffers.clear();
+      state.gatewayWarnings = [];
+      state.lastSeq = 0;
+      state.lastEventId = "";
+      state.sourceCursors = {};
+      state.selectedEventSeq = null;
+      state.selectedEventId = "";
+      state.selectedItemId = "";
+      if (!state.repoKey || !state.runId) {
+        await refreshGatewayHealth();
+        render();
+        return;
+      }
+      state.status = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`);
+      const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500&tail=1`);
+      addEvents(payload.events || []);
+      mergeSourceCursors(payload.sourceCursors || {});
+      await refreshProjection();
+      await refreshGatewayHealth();
+      render();
+      startStream();
+    }
+
+    async function refreshGatewayHealth() {
+      try {
+        state.gatewayHealth = await api("/api/health");
+        state.leaderHostStatus = state.gatewayHealth?.outerHost || null;
+        state.inputStatus = state.gatewayHealth?.inputProxy === "outer_sdk_host"
+          ? "input proxy connected"
+          : "input proxy disabled";
+        state.inputStatusClass = state.gatewayHealth?.inputProxy === "outer_sdk_host" && state.leaderHostStatus?.ok !== false ? "ok" : "warn";
+      } catch (error) {
+        state.gatewayHealth = null;
+        state.leaderHostStatus = null;
+        state.inputStatus = `gateway health failed: ${error.message}`;
+        state.inputStatusClass = "failed";
+      }
+    }
+
+    async function refreshProjection() {
+      if (!state.repoKey || !state.runId) {
+        state.projection = null;
+        return;
+      }
+      try {
+        state.projection = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/projection`);
+      } catch (error) {
+        state.projection = null;
+        state.gatewayWarnings.push({ message: `projection refresh failed: ${error.message}` });
+        state.gatewayWarnings = state.gatewayWarnings.slice(-20);
+      }
+    }
+
+    function startStream() {
+      if (!state.repoKey || !state.runId || typeof EventSource === "undefined") return;
+      stopStream();
+      state.streamStoppedByGateway = false;
+      setChip("streamChip", "connecting", "warn");
+      const cursor = encodeURIComponent(JSON.stringify(state.sourceCursors || {}));
+      const url = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/stream?afterCursor=${cursor}&afterId=${encodeURIComponent(state.lastEventId || "")}`;
+      state.source = new EventSource(url);
+      state.source.addEventListener("open", () => {
+        state.streamConnected = true;
+        setChip("streamChip", "SSE", "live");
+      });
+      state.source.addEventListener("companion_event", event => {
+        try {
+          const parsed = JSON.parse(event.data);
+          addEvents([parsed]);
+          refreshProjection().finally(render);
+        } catch {
+          setChip("streamChip", "parse error", "warn");
+        }
+      });
+      state.source.addEventListener("gateway_error", event => {
+        setChip("streamChip", "gateway error", "warn");
+        console.warn(event.data);
+      });
+      state.source.addEventListener("gateway_warning", event => {
+        setChip("streamChip", "gateway warning", "warn");
+        try {
+          state.gatewayWarnings.push(JSON.parse(event.data));
+          state.gatewayWarnings = state.gatewayWarnings.slice(-20);
+          renderUnknowns();
+        } catch {
+          state.gatewayWarnings.push({ message: event.data || "gateway warning" });
+        }
+      });
+      state.source.addEventListener("gateway_shutdown", event => {
+        state.streamStoppedByGateway = true;
+        try {
+          state.gatewayWarnings.push(JSON.parse(event.data));
+        } catch {
+          state.gatewayWarnings.push({ message: event.data || "gateway shutdown" });
+        }
+        state.gatewayWarnings = state.gatewayWarnings.slice(-20);
+        stopStream("server stopped");
+        render();
+      });
+      state.source.onerror = () => {
+        if (state.streamStoppedByGateway) return;
+        state.streamConnected = false;
+        setChip("streamChip", "reconnecting", "warn");
+      };
+    }
+
+    function stopStream(label = "off") {
+      if (state.source) {
+        state.source.close();
+        state.source = null;
+      }
+      state.streamConnected = false;
+      setChip("streamChip", label);
+      $("liveButton")?.classList.toggle("active", false);
+    }
+
+    function statusClass(status) {
+      const value = String(status || "").toLowerCase();
+      if (value === "running" || value === "started" || value === "active" || value === "waiting") return "running";
+      if (value === "failed" || value === "blocked" || value === "rejected") return "failed";
+      if (value === "completed" || value === "succeeded" || value === "success" || value === "satisfied" || value === "passed" || value === "reported") return "completed";
+      return "";
+    }
+
+    function displayRole(actor = {}) {
+      return actor.displayName || actor.teammateId || actor.role || "runtime";
+    }
+
+    function trajectoryActorLabel(actor) {
+      if (!actor || typeof actor !== "object") return actor || "runtime";
+      return actor.display_name || actor.teammate_id || actor.agent_type || actor.role || actor.session_id || compact(actor, 80);
+    }
+
+    function trajectoryActionLabel(step = {}) {
+      const action = step.action;
+      if (action && typeof action === "object") {
+        return [action.kind, action.tool_name, action.safe_input_preview].filter(Boolean).join(" ") || compact(action, 80);
+      }
+      return action || step.event_type || step.kind || "trajectory";
+    }
+
+    function trajectoryObservationLabel(step = {}) {
+      const observation = step.observation;
+      if (observation && typeof observation === "object") {
+        return [observation.status, observation.exit_code !== undefined ? `exit=${observation.exit_code}` : "", observation.stdout_tail || observation.stderr_tail].filter(Boolean).join(" ");
+      }
+      return observation || step.state_delta || step.summary || "";
+    }
+
+    function trajectoryStepView(step = {}) {
+      const action = step.action && typeof step.action === "object" ? step.action : {};
+      const observation = step.observation && typeof step.observation === "object" ? step.observation : {};
+      return {
+        step_index: step.step_index ?? step.step ?? null,
+        actor: step.actor || step.role || null,
+        intent_local_goal: step.intent?.local_goal || step.local_goal || null,
+        action: {
+          kind: action.kind || step.action_kind || null,
+          tool_name: action.tool_name || step.tool_name || null,
+          safe_input_preview: action.safe_input_preview || step.safe_input_preview || (typeof step.action === "string" ? step.action : null)
+        },
+        observation: {
+          status: observation.status || step.status || null,
+          exit_code: observation.exit_code ?? step.exit_code ?? null,
+          stdout_tail: observation.stdout_tail || step.stdout_tail || null,
+          stderr_tail: observation.stderr_tail || step.stderr_tail || null
+        },
+        state_delta: step.state_delta || null,
+        evidence_refs: step.evidence_refs || step.evidenceRefs || [],
+        raw_refs: step.raw_refs || step.rawRefs || step.rawRef || null
+      };
+    }
+
+    function displayTitle(event) {
+      if (!event) return "No event selected";
+      if (event.source === "hook_tool_event") {
+        const verb = event.kind === "tool_started" ? "started" : event.kind === "tool_failed" ? "failed" : "completed";
+        return `${event.toolName || "tool"} ${verb}`;
+      }
+      if (event.kind === "sdk_tool_declared") return `SDK tool declared: ${event.sdkToolName || event.toolName || "tool"}`;
+      if (event.kind === "sdk_tool_result") return `SDK tool result: ${event.sdkToolName || event.toolName || "tool"}`;
+      if (event.kind === "sdk_delta") return "SDK stream delta";
+      if (event.kind === "assignment_sent") return "assignment sent";
+      if (event.kind === "report_received") return event.source === "artifact" ? "artifact recorded" : "report received";
+      if (event.kind === "completion_passed") return "completion passed";
+      if (event.kind === "completion_rejected") return "completion rejected";
+      if (event.kind === "lifecycle_transition") return "lifecycle transition";
+      if (event.kind === "text_delta") return "text delta";
+      return event.kind || event.source || "event";
+    }
+
+    function displaySummary(event) {
+      if (!event) return "";
+      if (event.source === "process_event") return processSummary(event);
+      const target = event.target ? ` target=${event.target}` : "";
+      const delta = event.accumulatedText || event.textDelta ? `${event.accumulatedText || event.textDelta} ` : "";
+      const inputDelta = event.accumulatedToolInput || event.toolInputDelta ? ` input_delta=${event.accumulatedToolInput || event.toolInputDelta}` : "";
+      return compact(`${delta}${event.messagePreview || ""}${target}${inputDelta}`, 260);
+    }
+
+    function processSummary(event) {
+      const raw = event.raw || {};
+      const ts = Date.parse(raw.heartbeat_at || raw.timestamp || event.ts || "");
+      const heartbeatAge = Number.isFinite(ts) && ts > 0
+        ? `${Math.max(0, Math.round((Date.now() - ts) / 1000))}s`
+        : "unknown";
+      return compact([
+        raw.process_ref || raw.processRef ? `process_ref=${raw.process_ref || raw.processRef}` : "",
+        raw.pid ? `pid=${raw.pid}` : "",
+        raw.state || raw.status ? `state=${raw.state || raw.status}` : "",
+        `heartbeat_age=${heartbeatAge}`,
+        raw.log_path ? `log=${raw.log_path}` : "",
+        raw.terminal_status ? `terminal=${raw.terminal_status}` : "",
+        Array.isArray(raw.artifact_refs) && raw.artifact_refs.length ? `artifacts=${raw.artifact_refs.join(",")}` : ""
+      ].filter(Boolean).join(" "), 300);
+    }
+
+    function eventLane(event) {
+      if (!event) return "all";
+      const kind = String(event.kind || "").toLowerCase();
+      if (isFailureLike(event)) return "failures";
+      return event.lane || (
+        event.source === "hook_tool_event" ? "tools" :
+        event.source === "sdk_stream" || event.source === "agent_message" || event.source === "outer_host" ? "discussion" :
+        event.source === "teammate_report" || event.source === "artifact" ? "reports" :
+        event.source === "process_event" ? "processes" :
+        event.source === "completion_check" ? "completion" :
+        "all"
+      );
+    }
+
+    function eventMatchesLane(event, lane) {
+      if (lane === "all") return true;
+      if (event?.lane && event.source === undefined) {
+        if (lane === "tools") return event.lane === "tools" || event.kind === "tool";
+        if (lane === "discussion") return event.lane === "discussion" || event.kind === "discussion" || event.kind === "assignment";
+        if (lane === "reports") return event.lane === "reports" || event.kind === "teammate_report" || event.kind === "artifact";
+        if (lane === "processes") return event.lane === "processes" || event.kind === "process";
+        if (lane === "completion") return event.lane === "completion" || event.kind === "completion_check";
+        if (lane === "failures") return isFailureLike(event) || ["failed", "blocked", "rejected"].includes(String(event.status || "").toLowerCase());
+        return false;
+      }
+      if (lane === "tools") return event?.source === "hook_tool_event";
+      if (lane === "discussion") return event?.source === "sdk_stream" || event?.source === "agent_message" || event?.source === "outer_host";
+      if (lane === "reports") return event?.source === "teammate_report" || event?.source === "artifact";
+      if (lane === "processes") return event?.source === "process_event";
+      if (lane === "completion") return event?.source === "completion_check";
+      if (lane === "failures") return isFailureLike(event);
+      return false;
+    }
+
+    function isDiscussionEvent(event) {
+      if (!event) return false;
+      if (isTransportNoise(event)) return false;
+      if (event.source === "agent_message") return true;
+      if (event.source === "outer_host") return true;
+      if (event.source !== "sdk_stream") return false;
+      return ["text_delta", "assistant_message", "sdk_delta", "sdk_tool_declared", "sdk_tool_result"].includes(event.kind);
+    }
+
+    function buildMembersFromEvents() {
+      const source = new Map();
+      const baseMembers = Array.isArray(state.status?.teammates) ? state.status.teammates : [];
+      for (const member of baseMembers) {
+        source.set(member.id || member.displayName || member.role, { ...member });
+      }
+      for (const event of eventList().filter(item => !isTransportNoise(item))) {
+        const key = event.actor?.teammateId || event.actor?.displayName || event.actor?.role || event.sessionId || "runtime";
+        const member = source.get(key) || {
+          id: key,
+          role: event.actor?.role || key,
+          displayName: displayRole(event.actor),
+          status: "idle",
+          activeTool: null,
+          lastCompletedTool: null,
+          reports: 0,
+          lastDiscussion: null,
+          lastReport: null,
+          currentBlocker: null
+        };
+        if (event.source === "hook_tool_event") {
+          const tool = {
+            eventId: event.eventId,
+            toolName: event.toolName,
+            status: event.status,
+            target: event.target,
+            messagePreview: event.messagePreview,
+            exitCode: event.raw?.exit_code,
+            rawRef: event.rawRef
+          };
+          if (event.kind === "tool_started") {
+            member.status = "running";
+            member.activeTool = tool;
+          } else {
+            member.status = event.kind === "tool_failed" ? "failed" : "idle";
+            member.activeTool = null;
+            member.lastCompletedTool = tool;
+          }
+        }
+        if (isDiscussionEvent(event)) {
+          member.lastDiscussion = {
+            eventId: event.eventId,
+            kind: event.kind,
+            text: event.accumulatedText || event.textDelta || event.messagePreview,
+            rawRef: event.rawRef
+          };
+        }
+        if (event.source === "teammate_report") {
+          member.reports = (member.reports || 0) + 1;
+          member.lastReport = {
+            eventId: event.eventId,
+            text: event.messagePreview || "report received",
+            rawRef: event.rawRef
+          };
+        }
+        const failureKind = String(event.kind || "").toLowerCase();
+        if (event.status === "failed" || event.status === "blocked" || failureKind.includes("failed") || failureKind.includes("rejected")) {
+          member.currentBlocker = {
+            eventId: event.eventId,
+            text: event.messagePreview || event.kind || event.status,
+            rawRef: event.rawRef
+          };
+        }
+        source.set(key, member);
+      }
+      return [...source.values()];
+    }
+
+    function renderSummary() {
+      const view = tuiView();
+      const header = view.header || {};
+      $("repoValue").textContent = state.repoKey || "none";
+      $("runValue").textContent = state.runId || "none";
+      $("eventCountValue").textContent = String(view.debugSummary?.sourceDedupedEventCount ?? state.events.size);
+      $("trajectoryCountValue").textContent = String(state.status?.trajectory?.length || 0);
+      $("taskValue").textContent = header.taskTitle || "No task packet recorded.";
+      $("summaryMeta").textContent = state.status?.gateway?.state || "not connected";
+      setChip("phaseChip", header.phase || "unknown");
+      setChip("lifeChip", header.lifecycleState || "unknown");
+    }
+
+    function renderLeaderInput() {
+      const host = state.leaderHostStatus || {};
+      $("inputProxyMeta").textContent = host.defaultRunId
+        ? `host run ${compact(host.defaultRunId, 32)}`
+        : state.gatewayHealth?.inputProxy || "unknown";
+      const status = $("leaderInputStatus");
+      status.textContent = state.inputStatus || "";
+      status.className = `submit-status ${state.inputStatusClass || ""}`.trim();
+      const runMode = $("leaderRunMode").value || "host_default";
+      $("leaderTargetStatus").textContent = runMode === "selected_run"
+        ? `Target: continue selected run ${state.runId || "none selected"}`
+        : `Target: host default run ${host.defaultRunId || "pending host status"}; restarts create a new default run.`;
+      $("leaderSendButton").disabled = Boolean(state.inputPending);
+      $("leaderInputText").disabled = Boolean(state.inputPending);
+      $("leaderInputKind").disabled = Boolean(state.inputPending);
+      $("leaderRunMode").disabled = Boolean(state.inputPending);
+    }
+
+    function leaderReportEvents() {
+      const allEvents = eventList();
+      const outerResults = allEvents.filter(event =>
+        event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result"
+      );
+      const sdkResults = allEvents.filter(event => {
+        if (event.source === "sdk_stream") {
+          const type = String(event.raw?.sdk_message_type || event.raw?.event_type || "");
+          return type === "ResultMessage" || type === "sdk_stream_final_result";
+        }
+        return false;
+      });
+      return dedupeLeaderReports([...outerResults, ...sdkResults]).slice(-12).reverse();
+    }
+
+    function leaderReportDedupeKey(event) {
+      return leaderReportCardKey(leaderReportFromEvent(event));
+    }
+
+    function leaderReportCardKey(report) {
+      return [
+        report.status,
+        compact(report.summary, 260).toLowerCase()
+      ].join("|");
+    }
+
+    function dedupeLeaderReports(events) {
+      const byKey = new Map();
+      for (const event of events.sort((a, b) => (Date.parse(a.ts || "") || 0) - (Date.parse(b.ts || "") || 0))) {
+        const key = leaderReportDedupeKey(event);
+        const report = leaderReportFromEvent(event);
+        const existing = byKey.get(key);
+        if (!existing || String(report.summary || "").length > String(existing.report.summary || "").length) {
+          byKey.set(key, { event, report });
+        }
+      }
+      return [...byKey.values()]
+        .map(item => item.event)
+        .sort((a, b) => (Date.parse(a.ts || "") || 0) - (Date.parse(b.ts || "") || 0));
+    }
+
+    function leaderReportFromEvent(event) {
+      const raw = event.raw || {};
+      const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+      const leaderResult = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : null;
+      const report = Array.isArray(leaderResult?.reports) ? leaderResult.reports[0] : null;
+      return {
+        eventId: event.eventId,
+        rawRef: event.rawRef,
+        ts: event.ts,
+        status: leaderResult?.status || raw.status || event.status || "unknown",
+        handledBy: leaderResult?.handled_by || raw.handled_by || raw.source || "leader-orchestrator",
+        summary: report?.summary || raw.result || event.messagePreview || "leader result recorded",
+        error: leaderResult?.error_or_null || raw.error_or_null || null,
+        evidence: leaderResult?.evidence || raw.evidence || null
+      };
+    }
+
+    function projectedLeaderReportCards() {
+      return (state.projection?.leaderReportCards || []).map(card => ({
+        eventId: card.eventId || `${card.rawRef?.sourceFile || "projection"}:${card.rawRef?.sourceOffset || card.ts || "leader-report"}`,
+        rawRef: card.rawRef || null,
+        ts: card.ts,
+        status: card.reportStatus || card.status || "unknown",
+        handledBy: card.handledBy || "leader-orchestrator",
+        summary: card.summary || "leader result recorded",
+        error: card.error || null,
+        evidence: card.evidence || null,
+        projected: true
+      }));
+    }
+
+    function projectedLeaderReportEvent(id) {
+      const card = projectedLeaderReportCards().find(item => item.eventId === id);
+      if (!card) return null;
+      return {
+        seq: null,
+        eventId: card.eventId,
+        ts: card.ts,
+        source: "projection",
+        kind: "leader_report_projection",
+        lane: "reports",
+        status: card.status,
+        messagePreview: compact(card.summary, 700),
+        rawRef: card.rawRef,
+        raw: { projection: "leaderReportCards", card }
+      };
+    }
+
+    function dedupeLeaderReportCards(cards) {
+      const byKey = new Map();
+      for (const card of [...cards].sort((a, b) => (Date.parse(b.ts || "") || 0) - (Date.parse(a.ts || "") || 0))) {
+        const key = leaderReportCardKey(card);
+        const existing = byKey.get(key);
+        if (!existing || String(card.summary || "").length > String(existing.summary || "").length) {
+          byKey.set(key, card);
+        }
+      }
+      return [...byKey.values()].sort((a, b) => (Date.parse(b.ts || "") || 0) - (Date.parse(a.ts || "") || 0));
+    }
+
+    function renderLeaderReports() {
+      const view = tuiView();
+      const report = view.mainReport || {};
+      $("leaderReportMeta").textContent = report.status ? report.status : "no result";
+      const response = state.lastLeaderResponse?.leader_result ? {
+        eventId: "latest-response",
+        id: "latest-response",
+        ts: new Date().toISOString(),
+        status: state.lastLeaderResponse.leader_result.status || "unknown",
+        handledBy: state.lastLeaderResponse.leader_result.handled_by || state.lastLeaderResponse.host?.adapter || "outer host",
+        summary: state.lastLeaderResponse.leader_result.reports?.[0]?.summary || state.lastLeaderResponse.leader_result.error_or_null?.message || "latest submit response",
+        error: state.lastLeaderResponse.leader_result.error_or_null || null,
+        evidence: state.lastLeaderResponse.leader_result.evidence || null
+      } : null;
+      const cards = [response, report && report.summary ? {
+        id: report.id,
+        eventId: report.id,
+        status: report.status || "unknown",
+        handledBy: report.handledBy || "runtime",
+        summary: report.summary,
+        task: report.task,
+        currentState: report.currentState,
+        nextStep: report.nextStep,
+        rawRefs: report.rawRefs || []
+      } : null].filter(Boolean);
+      $("leaderReportList").innerHTML = cards.length ? cards.map((card, index) => `
+        <article class="leader-report selectable ${index === 0 ? "primary" : ""}" data-item-id="${escapeHtml(card.id || card.eventId || "")}">
+          <div class="member-head">
+            <div class="name">${escapeHtml(card.handledBy)}</div>
+            <span class="badge ${escapeHtml(statusClass(card.status))}">${escapeHtml(card.status)}</span>
+          </div>
+          <div class="leader-summary">${escapeHtml(card.summary || "leader result recorded")}</div>
+          <div class="leader-kv">
+            ${card.task ? `<div><b>Task</b><span>${escapeHtml(compact(card.task, 260))}</span></div>` : ""}
+            ${card.currentState ? `<div><b>State</b><span>${escapeHtml(card.currentState)}</span></div>` : ""}
+            ${card.nextStep ? `<div><b>Next</b><span>${escapeHtml(card.nextStep)}</span></div>` : ""}
+          </div>
+          ${card.error ? `<div class="subtext">${escapeHtml(card.error.message || card.error.type || "error recorded")}</div>` : ""}
+        </article>`).join("") : `<div class="empty">No leader result captured yet.</div>`;
+      document.querySelectorAll("#leaderReportList [data-item-id]").forEach(node => {
+        node.addEventListener("click", event => {
+          event.stopPropagation();
+          openInspectorItem(node.dataset.itemId);
+        });
+      });
+    }
+
+    function renderTeam() {
+      const members = buildMembersFromEvents();
+      $("teamTree").innerHTML = members.length ? members.map(member => {
+        const active = member.activeTool;
+        const last = member.lastCompletedTool;
+        const status = active ? "running" : member.status || "idle";
+        const activeText = active
+          ? `${active.toolName || "tool"} running${active.target ? `: ${compact(active.target, 70)}` : ""}`
+          : "no running tool captured";
+        const lastText = last
+          ? `${last.toolName || "tool"} ${last.status || "completed"}${last.exitCode !== undefined ? ` exit=${last.exitCode}` : ""}`
+          : "no completed tool captured";
+        const discussionText = member.lastDiscussion?.text
+          ? `discussion: ${compact(member.lastDiscussion.text, 110)}`
+          : "no discussion text captured";
+        const reportText = member.lastReport?.text
+          ? `last report: ${compact(member.lastReport.text, 110)}`
+          : "no report captured";
+        const blockerText = member.currentBlocker
+          ? `<div class="subtext">blocker: ${escapeHtml(compact(member.currentBlocker.text, 110))}</div>`
+          : "";
+        const rawButtons = [
+          active?.eventId ? `<button class="raw-link" data-member-raw="${escapeHtml(active.eventId)}">active rawRef</button>` : "",
+          last?.eventId ? `<button class="raw-link" data-member-raw="${escapeHtml(last.eventId)}">last tool rawRef</button>` : "",
+          member.lastDiscussion?.eventId ? `<button class="raw-link" data-member-raw="${escapeHtml(member.lastDiscussion.eventId)}">discussion rawRef</button>` : "",
+          member.lastReport?.eventId ? `<button class="raw-link" data-member-raw="${escapeHtml(member.lastReport.eventId)}">report rawRef</button>` : "",
+          member.currentBlocker?.eventId ? `<button class="raw-link" data-member-raw="${escapeHtml(member.currentBlocker.eventId)}">blocker rawRef</button>` : ""
+        ].filter(Boolean).join(" ");
+        return `
+          <article class="member ${escapeHtml(statusClass(status))}">
+            <div class="member-head">
+              <div class="name">${escapeHtml(member.displayName || member.role || member.id)}</div>
+              <span class="badge ${escapeHtml(statusClass(status))}">${escapeHtml(status)}</span>
+            </div>
+            <div class="subtext">role: ${escapeHtml(member.role || "unknown")} · session: ${escapeHtml(member.sessionId || "unknown")}</div>
+            <div class="subtext">${escapeHtml(activeText)}</div>
+            <div class="subtext">${escapeHtml(lastText)}</div>
+            <div class="subtext">${escapeHtml(discussionText)}</div>
+            <div class="subtext">${escapeHtml(reportText)}</div>
+            ${blockerText}
+            ${rawButtons ? `<div class="event-meta">${rawButtons}</div>` : ""}
+            ${member.reports ? `<div class="subtext">${escapeHtml(member.reports)} report event(s)</div>` : ""}
+          </article>`;
+      }).join("") : `<div class="empty">No team/session binding captured.</div>`;
+      document.querySelectorAll("[data-member-raw]").forEach(node => {
+        node.addEventListener("click", event => {
+          event.stopPropagation();
+          openRawRef(node.dataset.memberRaw);
+        });
+      });
+    }
+
+    function renderTeamProjection() {
+      const members = tuiView().teamTree || [];
+      $("teamMeta").textContent = `${members.length} teammate(s)`;
+      $("teamTree").innerHTML = members.length ? members.map(member => {
+        const status = member.state || "unknown";
+        const actionText = member.currentAction || (member.currentTool ? `${member.currentTool} ${member.currentTarget || ""}` : "unknown");
+        const lastText = member.lastCompletedTool
+          ? `${member.lastCompletedTool.toolName || "tool"} ${member.lastCompletedTool.status || "completed"}${member.lastCompletedTool.target ? ` ${member.lastCompletedTool.target}` : ""}`
+          : "no completed tool captured";
+        const textPreview = member.lastTextPreview
+          ? `live text: ${compact(member.lastTextPreview, 120)}`
+          : "live text: not captured";
+        const reportText = member.lastReportSummary
+          ? `last report: ${compact(member.lastReportSummary, 120)}`
+          : "no report captured";
+        const unknownText = Array.isArray(member.unknowns) && member.unknowns.length
+          ? `<div class="subtext">${escapeHtml(member.unknowns.join("; "))}</div>`
+          : "";
+        return `
+          <article class="member selectable ${escapeHtml(statusClass(status))} ${state.selectedItemId === member.id ? "selected" : ""}" data-item-id="${escapeHtml(member.id)}">
+            <div class="member-head">
+              <div class="name">${escapeHtml(member.teammateId || member.role || member.id)}</div>
+              <span class="badge ${escapeHtml(statusClass(status))}">${escapeHtml(status)}</span>
+            </div>
+            <div class="subtext">role: ${escapeHtml(member.role || "unknown")}</div>
+            <div class="subtext">current: ${escapeHtml(compact(actionText, 130))}</div>
+            <div class="subtext">${escapeHtml(lastText)}</div>
+            <div class="subtext">${escapeHtml(textPreview)}</div>
+            <div class="subtext">${escapeHtml(reportText)}</div>
+            <div class="source-quality">source: ${escapeHtml(member.sourceQuality || "unknown")}</div>
+            ${unknownText}
+          </article>`;
+      }).join("") : `<div class="empty">No team/session binding captured.</div>`;
+      document.querySelectorAll("#teamTree [data-item-id]").forEach(node => {
+        node.addEventListener("click", event => {
+          event.stopPropagation();
+          openInspectorItem(node.dataset.itemId);
+        });
+      });
+    }
+
+    function selectEvent(seq, tab = "raw") {
+      state.selectedEventSeq = seq;
+      const event = [...state.events.values()].find(item => item.seq === seq || item.eventId === seq);
+      state.selectedEventId = event?.eventId || String(seq || "");
+      state.selectedTab = tab;
+      render();
+    }
+
+    async function openRawRef(id) {
+      const event = state.events.get(id) || [...state.events.values()].find(item => item.seq === id || item.eventId === id) || projectedLeaderReportEvent(id);
+      state.selectedEventSeq = event?.seq ?? null;
+      state.selectedEventId = event?.eventId || String(id || "");
+      state.selectedItemId = "";
+      state.selectedTab = "raw";
+      render();
+      if (!event?.rawRef || state.rawLookups.has(state.selectedEventId)) return;
+      try {
+        const file = encodeURIComponent(event.rawRef.sourceFile);
+        const offset = encodeURIComponent(event.rawRef.sourceOffset);
+        const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/raw?file=${file}&offset=${offset}`);
+        state.rawLookups.set(state.selectedEventId, payload);
+      } catch (error) {
+        state.rawLookups.set(state.selectedEventId, { error: error.message, rawRef: event.rawRef });
+      }
+      renderDetail();
+    }
+
+    async function openInspectorItem(id) {
+      state.selectedItemId = id || "";
+      state.selectedEventId = "";
+      state.selectedEventSeq = null;
+      state.selectedTab = "raw";
+      render();
+      const payload = projectionItemById(id);
+      const rawRefs = payload?.rawRefs || payload?.inspector?.rawRefs || [];
+      if (!rawRefs.length || state.rawLookups.has(id)) return;
+      const rawRecords = [];
+      for (const ref of rawRefs.slice(0, 12)) {
+        if (!ref?.sourceFile || !ref?.sourceOffset) continue;
+        try {
+          const file = encodeURIComponent(ref.sourceFile);
+          const offset = encodeURIComponent(ref.sourceOffset);
+          rawRecords.push(await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/raw?file=${file}&offset=${offset}`));
+        } catch (error) {
+          rawRecords.push({ error: error.message, rawRef: ref });
+        }
+      }
+      state.rawLookups.set(id, { rawRecords, rawRefs });
+      renderDetail();
+    }
+
+    function defaultTabForEvent(event) {
+      if (["completion_check", "process_event", "artifact"].includes(event?.source)) return "trajectory";
+      return state.selectedTab;
+    }
+
+    function laneCounts() {
+      const visibleEvents = activityEventList();
+      const counts = { all: visibleEvents.length, tools: 0, discussion: 0, reports: 0, processes: 0, completion: 0, failures: 0 };
+      for (const event of visibleEvents) {
+        for (const lane of Object.keys(counts)) {
+          if (lane !== "all" && eventMatchesLane(event, lane)) counts[lane] += 1;
+        }
+      }
+      return counts;
+    }
+
+    function renderActivity() {
+      const lane = state.laneFilter || "all";
+      const counts = laneCounts();
+      const events = activityEventList()
+        .filter(event => eventMatchesLane(event, lane))
+        .slice(-250)
+        .reverse();
+      $("activityMeta").textContent = `${events.length} visible / latest seq ${state.lastSeq}`;
+      document.querySelectorAll("#laneTabs button").forEach(button => {
+        button.classList.toggle("active", button.dataset.lane === lane);
+        const label = laneLabels[button.dataset.lane] || button.dataset.lane;
+        button.textContent = `${label} ${counts[button.dataset.lane] || 0}`;
+      });
+      $("activityList").innerHTML = events.length ? events.map(event => {
+        const eventId = event.eventId || String(event.seq);
+        const selected = eventId === state.selectedEventId || event.seq === state.selectedEventSeq ? " selected" : "";
+        const badgeClass = statusClass(event.status);
+        const files = Array.isArray(event.fileRefs) ? event.fileRefs.slice(0, 3) : [];
+        return `
+          <article class="event${selected}" data-event-id="${escapeHtml(eventId)}" data-seq="${event.seq}">
+            <div class="event-head">
+              <div class="event-title">${escapeHtml(displayTitle(event))}</div>
+              <span class="badge ${escapeHtml(badgeClass)}">#${event.seq}</span>
+            </div>
+            <div class="subtext">${escapeHtml(displaySummary(event) || "recorded")}</div>
+            <div class="event-meta">
+              <span class="badge">${escapeHtml(displayRole(event.actor))}</span>
+              <span class="badge">${escapeHtml(event.source)}</span>
+              <span class="badge">${escapeHtml(event.kind)}</span>
+              <span class="badge">${escapeHtml(eventLane(event))}</span>
+              ${files.map(file => `<span class="badge">${escapeHtml(compact(file, 48))}</span>`).join("")}
+              <button class="raw-link" data-raw="${escapeHtml(eventId)}">rawRef</button>
+            </div>
+          </article>`;
+      }).join("") : `<div class="empty">No ${escapeHtml(laneLabels[lane] || lane)} events for this run.</div>`;
+      document.querySelectorAll(".event").forEach(node => {
+        node.addEventListener("click", event => {
+          const eventId = node.dataset.eventId;
+          const selected = state.events.get(eventId);
+          if (event.target?.dataset?.raw) {
+            openRawRef(eventId);
+          } else {
+            selectEvent(eventId, defaultTabForEvent(selected));
+          }
+        });
+      });
+    }
+
+    function projectionLaneCounts() {
+      const items = tuiView().activityItems || [];
+      const counts = { all: items.length, tools: 0, discussion: 0, reports: 0, processes: 0, completion: 0, failures: 0 };
+      for (const item of items) {
+        for (const lane of Object.keys(counts)) {
+          if (lane !== "all" && eventMatchesLane(item, lane)) counts[lane] += 1;
+        }
+      }
+      return counts;
+    }
+
+    function renderActivityProjection() {
+      const lane = state.laneFilter || "all";
+      const counts = projectionLaneCounts();
+      const items = (tuiView().activityItems || []).filter(item => eventMatchesLane(item, lane));
+      $("activityMeta").textContent = `${items.length} visible`;
+      document.querySelectorAll("#laneTabs button").forEach(button => {
+        button.classList.toggle("active", button.dataset.lane === lane);
+        const label = laneLabels[button.dataset.lane] || button.dataset.lane;
+        button.textContent = `${label} ${counts[button.dataset.lane] || 0}`;
+      });
+      $("activityList").innerHTML = items.length ? items.map(item => {
+        const selected = item.id === state.selectedItemId ? " selected" : "";
+        const files = Array.isArray(item.fileRefs) ? item.fileRefs.slice(0, 3) : [];
+        const stats = item.kind === "teammate_report"
+          ? `<span class="badge">done ${item.completedCount || 0}</span><span class="badge">open ${item.openCount || 0}</span><span class="badge">blocked ${item.blockedCount || 0}</span>`
+          : "";
+        return `
+          <article class="event${selected}" data-item-id="${escapeHtml(item.id)}">
+            <div class="event-head">
+              <div class="event-title">${escapeHtml(item.title || item.kind || "activity")}</div>
+              <span class="badge ${escapeHtml(statusClass(item.status))}">${escapeHtml(item.status || "recorded")}</span>
+            </div>
+            <div class="subtext">${escapeHtml(item.body || "recorded")}</div>
+            <div class="event-meta">
+              ${item.actor ? `<span class="badge">${escapeHtml(compact(item.actor, 64))}</span>` : ""}
+              ${stats}
+              ${files.map(file => `<span class="badge">${escapeHtml(compact(file, 48))}</span>`).join("")}
+            </div>
+          </article>`;
+      }).join("") : `<div class="empty">No ${escapeHtml(laneLabels[lane] || lane)} projected items for this run.</div>`;
+      document.querySelectorAll("#activityList [data-item-id]").forEach(node => {
+        node.addEventListener("click", () => openInspectorItem(node.dataset.itemId));
+      });
+    }
+
+    function relatedTrajectory(event) {
+      const steps = Array.isArray(state.status?.trajectory) ? state.status.trajectory : [];
+      if (!event || !steps.length) return [];
+      const tokens = [
+        event.bridgeWindowId,
+        event.teamId,
+        event.taskId,
+        event.sessionId,
+        event.rawRef?.sourceFile && event.rawRef?.sourceOffset ? `${event.rawRef.sourceFile}:${event.rawRef.sourceOffset}` : "",
+        event.rawRef?.sourceSequence,
+        ...(event.evidenceRefs || [])
+      ].filter(Boolean).map(String);
+      if (!tokens.length) return steps.slice(-20);
+      return steps.filter(step => {
+        const text = JSON.stringify(step);
+        return tokens.some(token => text.includes(token));
+      }).slice(-40);
+    }
+
+    function relatedTrajectoryForInspector(selected, inspector) {
+      const events = Array.isArray(inspector?.normalizedEvents) ? inspector.normalizedEvents : [];
+      if (events.length) {
+        const merged = [];
+        const seen = new Set();
+        for (const event of events) {
+          for (const step of relatedTrajectory(event)) {
+            const key = step.trajectory_id || step.step_index || JSON.stringify(step).slice(0, 160);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            merged.push(step);
+          }
+        }
+        if (merged.length) return merged.slice(-40);
+      }
+      const steps = Array.isArray(state.status?.trajectory) ? state.status.trajectory : [];
+      const rawRefs = selected?.rawRefs || inspector?.rawRefs || [];
+      const evidenceRefs = selected?.evidenceRefs || inspector?.evidenceRefs || [];
+      const tokens = [
+        selected?.displayKey,
+        ...(rawRefs || []).map(ref => ref.sourceFile && ref.sourceOffset ? `${ref.sourceFile}:${ref.sourceOffset}` : ""),
+        ...(evidenceRefs || [])
+      ].filter(Boolean).map(String);
+      if (!tokens.length) return [];
+      return steps.filter(step => {
+        const text = JSON.stringify(step);
+        return tokens.some(token => text.includes(token));
+      }).slice(-40);
+    }
+
+    function detailBlock(title, value) {
+      return `
+        <section class="detail-block">
+          <h3>${escapeHtml(title)}</h3>
+          <pre>${escapeHtml(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</pre>
+        </section>`;
+    }
+
+    function renderTerminal() {
+      const term = state.terminal;
+      $("detailMeta").textContent = "gateway terminal";
+      const result = term.result;
+      const resultSummary = result
+        ? {
+          ok: result.ok,
+          exitCode: result.exitCode,
+          signal: result.signal,
+          timedOut: result.timedOut,
+          durationMs: result.durationMs,
+          cwd: result.cwd,
+          shell: result.shell,
+          error: result.error,
+          message: result.message
+        }
+        : null;
+      $("detailBody").innerHTML = `
+        <form class="terminal-box" id="terminalForm">
+          <div class="input-row terminal-row">
+            <input id="terminalCwd" data-testid="terminal-cwd" placeholder="cwd blank = gateway process cwd" value="${escapeHtml(term.cwd)}" ${term.pending ? "disabled" : ""} />
+            <input id="terminalTimeout" data-testid="terminal-timeout" type="number" min="1000" max="120000" step="1000" value="${escapeHtml(term.timeoutMs)}" ${term.pending ? "disabled" : ""} />
+          </div>
+          <textarea id="terminalCommand" data-testid="terminal-command" spellcheck="false" ${term.pending ? "disabled" : ""}></textarea>
+          <div class="input-row terminal-actions">
+            <div class="submit-status ${escapeHtml(term.statusClass)}">${escapeHtml(term.status)}</div>
+            <button type="button" id="terminalDebugDefault" ${term.pending ? "disabled" : ""}>Debug</button>
+            <button type="submit" id="terminalRunButton" ${term.pending ? "disabled" : ""}>Run</button>
+          </div>
+        </form>
+        <div class="terminal-output">
+          ${resultSummary ? detailBlock("Command Result", resultSummary) : ""}
+          ${result?.stdout ? detailBlock("stdout", result.stdout) : ""}
+          ${result?.stderr ? detailBlock("stderr", result.stderr) : ""}
+        </div>`;
+      $("terminalCommand").value = term.command;
+      $("terminalForm").addEventListener("submit", submitTerminalCommand);
+      $("terminalDebugDefault").addEventListener("click", () => {
+        state.terminal.command = "npm run debug -- --strict-live --events --event-limit 80";
+        renderDetail();
+      });
+      $("terminalCwd").addEventListener("input", event => { state.terminal.cwd = event.target.value; });
+      $("terminalTimeout").addEventListener("input", event => { state.terminal.timeoutMs = Number(event.target.value) || 30000; });
+      $("terminalCommand").addEventListener("input", event => { state.terminal.command = event.target.value; });
+    }
+
+    function renderProjectionDetail() {
+      const selected = projectionItemById(state.selectedItemId);
+      const inspector = tuiView().inspectorIndex?.[state.selectedItemId] || selected?.inspector || {};
+      if (!selected && !state.selectedItemId) {
+        $("detailMeta").textContent = "inspector";
+        $("detailBody").innerHTML = `<div class="empty">Select a team card, activity item, report, or completion item to inspect raw runtime data.</div>`;
+        return true;
+      }
+      if (!selected) return false;
+      $("detailMeta").textContent = selected.rawRefs?.length
+        ? `${selected.rawRefs.length} raw ref(s)`
+        : "projection";
+      if (state.selectedTab === "trajectory") {
+        const steps = relatedTrajectoryForInspector(selected, inspector);
+        $("detailBody").innerHTML = steps.length ? `
+          <div class="trajectory-list">
+            ${steps.map(step => `
+              <article class="step">
+                <div class="step-head">
+                  <div class="step-title">step ${escapeHtml(step.step_index ?? step.step ?? "?")}: ${escapeHtml(compact(trajectoryActionLabel(step), 100))}</div>
+                  <span class="badge">${escapeHtml(trajectoryActorLabel(step.actor || step.role))}</span>
+                </div>
+                <div class="subtext">${escapeHtml(compact(trajectoryObservationLabel(step), 260))}</div>
+                <pre>${escapeHtml(JSON.stringify(trajectoryStepView(step), null, 2))}</pre>
+              </article>`).join("")}
+          </div>` : `<div class="empty">No trajectory steps matched this selection.</div>`;
+        return true;
+      }
+      const rawLookup = state.rawLookups.get(state.selectedItemId);
+      const rawValue = rawLookup?.rawRecords?.length
+        ? rawLookup.rawRecords.map(item => ({
+          rawRef: item.rawRef,
+          record: item.record,
+          rawLine: item.rawLine,
+          parseError: item.parseError,
+          error: item.error
+        }))
+        : "Click an item to read its source JSON / JSONL records.";
+      $("detailBody").innerHTML = `<div class="detail-sections">
+        ${detailBlock("Raw JSON", rawValue)}
+        ${detailBlock("Projected Item", selected)}
+        ${detailBlock("Normalized Event", inspector.normalizedEvents || [])}
+        ${detailBlock("Related Trajectory", relatedTrajectoryForInspector(selected, inspector))}
+        ${detailBlock("Related Source Cursor", {
+          rawRefs: selected.rawRefs || inspector.rawRefs || [],
+          sourceCursors: inspector.sourceCursors || [],
+          evidenceRefs: selected.evidenceRefs || inspector.evidenceRefs || []
+        })}
+      </div>`;
+      return true;
+    }
+
+    function renderDetail() {
+      document.querySelectorAll(".tabs button").forEach(button => {
+        button.classList.toggle("active", button.dataset.tab === state.selectedTab);
+      });
+      if (state.selectedTab === "terminal") {
+        renderTerminal();
+        return;
+      }
+      if (!state.selectedEventId && state.selectedTab !== "brief" && renderProjectionDetail()) return;
+      if (state.selectedItemId && state.selectedTab !== "brief" && renderProjectionDetail()) return;
+      const selected =
+        state.events.get(state.selectedEventId) ||
+        [...state.events.values()].find(event => event.seq === state.selectedEventSeq) ||
+        projectedLeaderReportEvent(state.selectedEventId) ||
+        eventList().at(-1) ||
+        null;
+      $("detailMeta").textContent = selected?.rawRef
+        ? `${selected.rawRef.sourceFile}:${selected.rawRef.sourceOffset}`
+        : "rawRef";
+      if (state.selectedTab === "brief") {
+        $("detailBody").innerHTML = `
+          <div class="brief-box">
+            <button id="briefButton">Generate Brief</button>
+            <div class="brief-output">${escapeHtml(state.briefText)}</div>
+          </div>`;
+        $("briefButton").addEventListener("click", generateBrief);
+        return;
+      }
+      if (state.selectedTab === "trajectory") {
+        const steps = selected ? relatedTrajectory(selected) : (state.status?.trajectory || []);
+        $("detailBody").innerHTML = steps.length ? `
+          <div class="trajectory-list">
+            ${steps.map(step => `
+              <article class="step">
+                <div class="step-head">
+                  <div class="step-title">step ${escapeHtml(step.step_index ?? step.step ?? "?")}: ${escapeHtml(compact(trajectoryActionLabel(step), 100))}</div>
+                  <span class="badge">${escapeHtml(trajectoryActorLabel(step.actor || step.role))}</span>
+                </div>
+                <div class="subtext">${escapeHtml(compact(trajectoryObservationLabel(step), 260))}</div>
+                <pre>${escapeHtml(JSON.stringify(trajectoryStepView(step), null, 2))}</pre>
+              </article>`).join("")}
+          </div>` : `<div class="empty">No trajectory steps matched this selection.</div>`;
+        return;
+      }
+      const rawLookup = selected ? state.rawLookups.get(selected.eventId || String(selected.seq)) : null;
+      const rawValue = rawLookup
+        ? {
+          rawRef: rawLookup.rawRef,
+          record: rawLookup.record,
+          rawLine: rawLookup.rawLine,
+          parseError: rawLookup.parseError
+        }
+        : "Click rawRef to read the source JSONL line.";
+      $("detailBody").innerHTML = selected
+        ? `<div class="detail-sections">
+            ${detailBlock("Raw JSON", rawValue)}
+            ${detailBlock("Normalized Event", selected)}
+            ${detailBlock("Related Trajectory", relatedTrajectory(selected))}
+            ${detailBlock("Related Source Cursor", {
+              eventId: selected.eventId,
+              cursor: selected.cursor,
+              rawRef: selected.rawRef,
+              sourceCursorForFile: state.sourceCursors[selected.rawRef?.sourceFile] || null
+            })}
+          </div>`
+        : `<div class="empty">Select an activity item to inspect raw runtime data.</div>`;
+    }
+
+    function renderUnknowns() {
+      const unknowns = Array.isArray(tuiView().unknowns) ? tuiView().unknowns : [];
+      const warnings = state.gatewayWarnings || [];
+      const items = [
+        ...unknowns.map(item => ({ label: "unknown", text: item })),
+        ...warnings.map(item => ({ label: "gateway warning", text: item.message || JSON.stringify(item) }))
+      ];
+      $("unknownsList").innerHTML = items.length
+        ? items.map(item => `<div class="member"><div class="member-head"><div class="name">${escapeHtml(item.label)}</div></div><div class="subtext">${escapeHtml(item.text)}</div></div>`).join("")
+        : `<div class="empty">No unknowns recorded.</div>`;
+    }
+
+    function checkMark(status) {
+      const value = String(status || "").toLowerCase();
+      if (["passed", "pass", "satisfied", "completed"].includes(value)) return "✓";
+      if (["failed", "fail", "rejected", "blocked"].includes(value)) return "!";
+      return "";
+    }
+
+    function renderCompletion() {
+      const completion = tuiView().completion || { items: [] };
+      const items = Array.isArray(completion.items) ? completion.items : [];
+      const summary = `
+        <article class="member selectable ${state.selectedItemId === completion.id ? "selected" : ""}" data-item-id="${escapeHtml(completion.id || "")}">
+          <div class="member-head">
+            <div class="name">Completion contract</div>
+            <span class="badge ${escapeHtml(statusClass(completion.status))}">${escapeHtml(completion.status || "unknown")}</span>
+          </div>
+          ${completion.validatedBy ? `<div class="subtext">validated by ${escapeHtml(completion.validatedBy)}</div>` : ""}
+        </article>`;
+      $("completionList").innerHTML = `${summary}${items.length ? items.map(item => `
+        <article class="check-row ${escapeHtml(item.status || "unknown")}">
+          <div class="check-mark">${escapeHtml(checkMark(item.status))}</div>
+          <div>
+            <div class="name">${escapeHtml(item.label || item.name || "completion item")}</div>
+            <div class="subtext">${escapeHtml(item.message || item.status || "unknown")}</div>
+          </div>
+        </article>`).join("") : `<div class="empty">No completion checklist recorded.</div>`}`;
+      document.querySelectorAll("#completionList [data-item-id]").forEach(node => {
+        node.addEventListener("click", () => openInspectorItem(node.dataset.itemId));
+      });
+    }
+
+    function render() {
+      renderSummary();
+      renderLeaderInput();
+      renderLeaderReports();
+      renderTeamProjection();
+      renderActivityProjection();
+      renderCompletion();
+      renderDetail();
+      renderUnknowns();
+    }
+
+    async function generateBrief() {
+      state.briefText = "Generating brief from normalized facts...";
+      renderDetail();
+      try {
+        const payload = await api("/api/brief", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            status: state.status,
+            events: eventList().slice(-120),
+            unknowns: state.status?.unknowns || []
+          })
+        });
+        state.briefText = payload.text || "No brief returned.";
+      } catch (error) {
+        state.briefText = `Model brief failed. Main UI state is unchanged.\n\nUnknowns:\n${(state.status?.unknowns || ["none recorded"]).map(item => `- ${item}`).join("\n")}`;
+      }
+      renderDetail();
+    }
+
+    async function submitTerminalCommand(event) {
+      event.preventDefault();
+      state.terminal.cwd = $("terminalCwd").value.trim();
+      state.terminal.timeoutMs = Number($("terminalTimeout").value) || 30000;
+      state.terminal.command = $("terminalCommand").value;
+      if (!state.terminal.command.trim()) {
+        state.terminal.status = "command is empty";
+        state.terminal.statusClass = "warn";
+        renderDetail();
+        return;
+      }
+      state.terminal.pending = true;
+      state.terminal.status = "running in gateway process...";
+      state.terminal.statusClass = "warn";
+      renderDetail();
+      try {
+        const result = await apiJson("/api/debug/terminal", {
+          method: "POST",
+          headers: { "content-type": "application/json; charset=utf-8" },
+          body: JSON.stringify({
+            command: state.terminal.command,
+            cwd: state.terminal.cwd || undefined,
+            timeoutMs: state.terminal.timeoutMs
+          })
+        });
+        state.terminal.result = result;
+        state.terminal.status = result.ok
+          ? `exit 0 in ${result.durationMs ?? "?"}ms`
+          : `${result.error || "failed"}${result.exitCode !== undefined ? ` exit=${result.exitCode}` : ""}`;
+        state.terminal.statusClass = result.ok ? "ok" : "failed";
+      } catch (error) {
+        state.terminal.result = error.payload || { ok: false, error: "request_failed", message: error.message };
+        state.terminal.status = error.message || "terminal request failed";
+        state.terminal.statusClass = "failed";
+      } finally {
+        state.terminal.pending = false;
+        renderDetail();
+      }
+    }
+
+    async function submitLeaderMessage(event) {
+      event.preventDefault();
+      const text = $("leaderInputText").value.trim();
+      if (!text) {
+        state.inputStatus = "message is empty";
+        state.inputStatusClass = "warn";
+        renderLeaderInput();
+        return;
+      }
+      state.inputPending = true;
+      state.inputStatus = "sending to outer host...";
+      state.inputStatusClass = "warn";
+      renderLeaderInput();
+      try {
+        const runMode = $("leaderRunMode").value || "host_default";
+        if (runMode === "selected_run" && !state.runId) {
+          throw new Error("continue selected run requires a selected run");
+        }
+        const payload = {
+          text,
+          input_kind: $("leaderInputKind").value || "user_prompt",
+          repo_key: state.repoKey || undefined,
+          run_id: runMode === "selected_run" ? state.runId || undefined : undefined
+        };
+        const response = await apiJson("/api/leader/input", {
+          method: "POST",
+          headers: { "content-type": "application/json; charset=utf-8" },
+          body: JSON.stringify(payload)
+        });
+        state.lastLeaderResponse = response;
+        state.inputStatus = `accepted by ${response.host?.adapter || "outer host"} / ${response.leader_result?.status || "recorded"}`;
+        state.inputStatusClass = response.leader_result?.status === "succeeded" ? "ok" : "warn";
+        $("leaderInputText").value = "";
+        const nextRepo = response.host?.repo_key || state.repoKey;
+        const nextRun = response.host?.run_id || state.runId;
+        if (nextRepo && nextRepo !== state.repoKey) {
+          await loadRepos();
+          await selectRepo(nextRepo);
+        } else if (nextRun && nextRun !== state.runId) {
+          await selectRun(nextRun);
+        } else if (state.repoKey && state.runId) {
+          state.status = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`);
+          const events = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500&tail=1`);
+          addEvents(events.events || []);
+          mergeSourceCursors(events.sourceCursors || {});
+          await refreshProjection();
+          render();
+        }
+      } catch (error) {
+        state.lastLeaderResponse = error.payload || null;
+        state.inputStatus = error.message || "leader input failed";
+        state.inputStatusClass = "failed";
+        render();
+      } finally {
+        state.inputPending = false;
+        render();
+      }
+    }
+
+    $("repoSelect").addEventListener("change", event => {
+      selectRepo(event.target.value).catch(error => {
+        console.error(error);
+        setChip("streamChip", "repo error", "warn");
+      });
+    });
+    $("runSelect").addEventListener("change", event => {
+      selectRun(event.target.value).catch(error => {
+        console.error(error);
+        setChip("streamChip", "run error", "warn");
+      });
+    });
+    $("leaderRunMode").addEventListener("change", renderLeaderInput);
+    $("latestButton").addEventListener("click", () => {
+      selectLatestRun().catch(error => {
+        console.error(error);
+        setChip("streamChip", "latest error", "warn");
+      });
+    });
+    $("liveButton").addEventListener("click", () => {
+      if (state.source) stopStream();
+      else startStream();
+      $("liveButton").classList.toggle("active", Boolean(state.source));
+    });
+    document.querySelectorAll(".tabs button").forEach(button => {
+      button.addEventListener("click", () => {
+        state.selectedTab = button.dataset.tab;
+        renderDetail();
+      });
+    });
+    document.querySelectorAll("#laneTabs button").forEach(button => {
+      button.addEventListener("click", () => {
+        state.laneFilter = button.dataset.lane || "all";
+        renderActivityProjection();
+      });
+    });
+    $("leaderInputForm").addEventListener("submit", submitLeaderMessage);
+
+    (async function init() {
+      try {
+        await refreshGatewayHealth();
+        await loadRepos();
+        const firstRepo = state.repos[0]?.repoKey || "";
+        await selectRepo(firstRepo);
+      } catch (error) {
+        console.error(error);
+        setChip("streamChip", "gateway error", "warn");
+        $("activityList").innerHTML = `<div class="empty">Gateway is not readable.</div>`;
+      }
+      render();
+    })();
+  </script>
+</body>
+</html>
