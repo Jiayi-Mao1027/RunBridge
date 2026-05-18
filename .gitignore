@@ -4,6 +4,9 @@
 __pycache__/
 *.py[cod]
 
+# Local agent working notes
+AGENTS.md
+
 # Local secrets
 bridge-companion/key.json
 bridge-companion/*secret*.json
