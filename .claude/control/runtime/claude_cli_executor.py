@@ -373,6 +373,18 @@ def claude_cli_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
         payload_or_error["evidence"]["prompt_file"] = str(prompt_path)
         payload_or_error["evidence"]["agent_models"] = agent_models
         payload_or_error["evidence"]["cmd_preview"] = _redact_cmd(cmd)
+        fallback = _run_runtime_owned_teammate_fallback(
+            packet=packet,
+            execution_input=execution_input,
+            project_root=project_root,
+            agent_models=agent_models,
+            bridge_model=bridge_model,
+            prompt_path=prompt_path,
+            original_result=payload_or_error,
+            transport="cli_parse_or_guardrail_error",
+        )
+        if fallback is not None:
+            return fallback
         return payload_or_error
 
     payload = payload_or_error["payload"]
@@ -771,7 +783,6 @@ def _run_runtime_owned_teammate_fallback(
     reports: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     attempts: list[dict[str, Any]] = []
-    stop_remaining_teammates = False
     for teammate_name in teammate_names:
         max_attempts = _runtime_owned_teammate_retry_attempts()
         final_failure: dict[str, Any] | None = None
@@ -838,15 +849,12 @@ def _run_runtime_owned_teammate_fallback(
                         "error_type": (final_failure.get("error_or_null") or {}).get("type")
                         if isinstance(final_failure.get("error_or_null"), dict)
                         else None,
-                        "stop_remaining_teammates": blocked_now,
+                        "continue_remaining_teammates": True,
+                        "blocked_report_recorded": blocked_now,
                     }
                 )
-                if blocked_now:
-                    stop_remaining_teammates = True
             else:
                 failures.append(final_failure)
-        if stop_remaining_teammates:
-            break
 
     if failures:
         provider_transport_error = _first_provider_transport_error(failures)
@@ -913,7 +921,12 @@ def _runtime_owned_teammate_fallback_allowed(packet: dict[str, Any], result: dic
             or _is_bridge_leader_cli_unavailable(result)
             or _is_provider_transport_result(result)
         )
-    if phase in {"l2_advisory", "l4_implement", "l4_anomaly"}:
+    if phase == "l4_anomaly":
+        return (
+            _is_agent_dispatch_contract_violation(result)
+            or _is_bridge_leader_cli_unavailable(result)
+        )
+    if phase == "l2_advisory":
         return _is_bridge_leader_cli_unavailable(result)
     return False
 
@@ -1418,6 +1431,18 @@ def _runtime_owned_teammate_prompt(
         for k in ["run_id", "main_session_id", "sub_session_id", "bridge_window_id", "team_id", "task_id"]
         if k in execution_input
     }
+    l4_execute_direct_fallback_note = ""
+    if str(packet.get("target_phase") or "") == "l4_execute" and teammate_name == "executor":
+        l4_execute_direct_fallback_note = (
+            "L4 execute direct-fallback wait note:\n"
+            "This runtime-owned direct fallback is still a waitable L4 execute surface. If the packet has "
+            "wait_until_process_complete or executor_hard_timeout_disabled, expected long runtime alone is not "
+            "a user-decision blocker and is not a reason to refuse launch. When the formal stage is approved and "
+            "tools/resources are available, launch the approved command in a foreground or otherwise waitable "
+            "mode and keep working until terminal logs/artifacts are available. Return blocked only for concrete "
+            "missing approval, missing tools, resource unavailability, semantic mismatch, or an exhausted bounded "
+            "OOM adaptation policy.\n\n"
+        )
     return (
         "Runtime-owned teammate dispatch fallback. The bridge-leader Agent tool dispatch violated the "
         "runtime dispatch contract, so the runtime is launching this exact teammate directly.\n\n"
@@ -1427,6 +1452,7 @@ def _runtime_owned_teammate_prompt(
         "8787, leader-orchestrator, or bridge-leader. The team and task already exist; do not ask to recreate "
         "them. Complete your assigned teammate work and return the required teammate report. Mark work blocked "
         "only for concrete missing evidence, unavailable tools, or runtime/project constraints.\n\n"
+        f"{l4_execute_direct_fallback_note}"
         f"Project root boundary:\n{project_root}\n"
         "Stay inside this repository boundary and the BridgePacket scope. Do not call Agent.\n\n"
         f"Runtime binding:\n{json.dumps(binding, ensure_ascii=False, indent=2)}\n\n"
@@ -1458,6 +1484,13 @@ def _runtime_owned_teammate_allowed_tools(packet: dict[str, Any], teammate_name:
         configured = ["Read", "Grep", "Glob", "LS"]
     read_only_scope = _runtime_owned_read_only_scope(packet)
     phase = str(packet.get("target_phase") or "").strip()
+    teammate_role = str(teammate_spec.get("role") or "").strip()
+    allow_l3_documentation_tools = (
+        phase == "l3_bridge"
+        and not read_only_scope
+        and teammate_name in {"curator", "refresher"}
+        and teammate_role in {"artifact_curation", "documentation_refresh"}
+    )
     allow_l4_implementation_tools = phase == "l4_implement" and not read_only_scope
     allow_l4_execute_tools = phase == "l4_execute" and not read_only_scope
     allow_bash = (teammate_name == "curator" and not read_only_scope) or allow_l4_implementation_tools or allow_l4_execute_tools
@@ -1469,7 +1502,7 @@ def _runtime_owned_teammate_allowed_tools(packet: dict[str, Any], teammate_name:
         if tool in RUNTIME_OWNED_TEAMMATE_MUTATING_TOOLS:
             if allow_l4_execute_tools and teammate_name == "executor" and tool == "Write":
                 pass
-            elif not allow_l4_implementation_tools:
+            elif not (allow_l4_implementation_tools or allow_l3_documentation_tools):
                 continue
         if tool == "Bash" and not allow_bash:
             continue
@@ -1835,21 +1868,10 @@ def _parse_teammate_report_from_text(text: str) -> dict[str, Any] | None:
     parsed = _extract_teammate_report_payload(_parse_json_object_text(text))
     if parsed is not None:
         return parsed
-    s = str(text or "").strip()
-    starts = [match.start() for match in re.finditer(r"\{", s)]
-    ends = [match.start() + 1 for match in re.finditer(r"\}", s)]
-    for start in reversed(starts):
-        for end in reversed(ends):
-            if end <= start:
-                continue
-            for normalized in _json_text_variants(s[start:end]):
-                try:
-                    candidate = json.loads(normalized)
-                except json.JSONDecodeError:
-                    continue
-                parsed = _extract_teammate_report_payload(candidate)
-                if parsed is not None:
-                    return parsed
+    for candidate in _iter_bounded_json_objects_from_text(text):
+        parsed = _extract_teammate_report_payload(candidate)
+        if parsed is not None:
+            return parsed
     return None
 
 
@@ -4938,16 +4960,16 @@ def _claude_command_prefix(project_root: Path | None = None) -> list[str]:
         #   BRIDGE_CLAUDE_COMMAND="C:\path\to\claude.cmd"
         #   BRIDGE_CLAUDE_COMMAND="claude --some-wrapper-arg"
         #   BRIDGE_CLAUDE_COMMAND="HOME=/data03/liang/mjy claude --mcp-config /data03/liang/mjy/.claude/mcp.json"
-        return configured_parts
+        return _claude_prefix_for_command_parts(configured_parts, env=configured_env)
     if configured_env:
-        return ["claude"]
+        return _claude_prefix_for_executable("claude", env=configured_env)
 
     if os.environ.get("BRIDGE_DISABLE_CLAUDE_MJY_AUTO", "").strip().lower() not in {"1", "true", "yes"}:
         preferred = shutil.which("claude_mjy")
         if preferred:
             return _claude_prefix_for_resolved(preferred)
 
-    resolved = shutil.which("claude")
+    resolved = _resolve_claude_cli_path("claude")
     if not resolved:
         return ["claude"]
 
@@ -4959,12 +4981,12 @@ def _claude_tty_command_prefix(project_root: Path | None = None) -> list[str]:
     if configured_cli and configured_cli.strip():
         return _claude_prefix_for_executable(configured_cli.strip())
 
-    _configured_env, configured_parts = _configured_claude_command(project_root)
+    configured_env, configured_parts = _configured_claude_command(project_root)
     if configured_parts:
         stripped = _strip_claude_mcp_args(configured_parts)
-        return stripped or ["claude"]
+        return _claude_prefix_for_command_parts(stripped or ["claude"], env=configured_env)
 
-    resolved = shutil.which("claude")
+    resolved = _resolve_claude_cli_path("claude")
     return _claude_prefix_for_resolved(resolved) if resolved else ["claude"]
 
 
@@ -4995,11 +5017,45 @@ def should_use_tmux_bridge_executor(project_root: Path | None = None) -> bool:
     return _is_custom_anthropic_base_url(_effective_anthropic_base_url(project_root=project_root))
 
 
-def _claude_prefix_for_executable(value: str) -> list[str]:
+def _claude_prefix_for_command_parts(parts: list[str], *, env: dict[str, str] | None = None) -> list[str]:
+    if not parts:
+        return []
+    return [*_claude_prefix_for_executable(parts[0], env=env), *parts[1:]]
+
+
+def _claude_prefix_for_executable(value: str, *, env: dict[str, str] | None = None) -> list[str]:
+    resolved = _resolve_claude_cli_path(value, env=env)
+    return _claude_prefix_for_resolved(resolved)
+
+
+def _resolve_claude_cli_path(value: str, env: dict[str, str] | None = None) -> str:
     expanded = Path(value).expanduser()
     if expanded.is_absolute() or any(sep in value for sep in ("/", "\\")):
-        return _claude_prefix_for_resolved(str(expanded))
-    return _claude_prefix_for_resolved(shutil.which(value) or value)
+        return str(expanded)
+    if value == "claude":
+        env_home = (env or {}).get("HOME")
+        if env_home:
+            resolved = _resolve_claude_from_home(env_home)
+            if resolved:
+                return resolved
+    resolved = shutil.which(value)
+    if resolved:
+        return resolved
+    if value == "claude":
+        process_home = os.environ.get("HOME")
+        if process_home and process_home != (env or {}).get("HOME"):
+            resolved = _resolve_claude_from_home(process_home)
+            if resolved:
+                return resolved
+    return value
+
+
+def _resolve_claude_from_home(home: str) -> str | None:
+    for relative in (".local/bin/claude", ".npm-global/bin/claude"):
+        candidate = Path(home).expanduser() / relative
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def _configured_claude_command(project_root: Path | None = None) -> tuple[dict[str, str], list[str]]:
@@ -5544,22 +5600,9 @@ def _parse_bridge_json_from_text(text: str) -> dict[str, Any] | None:
     if _has_structured_bridge_payload(parsed):
         return parsed
 
-    s = text.strip()
-    if not s:
-        return None
-    starts = [match.start() for match in re.finditer(r"\{", s)]
-    ends = [match.start() + 1 for match in re.finditer(r"\}", s)]
-    for start in reversed(starts):
-        for end in reversed(ends):
-            if end <= start:
-                continue
-            for normalized in _json_text_variants(s[start:end]):
-                try:
-                    candidate = json.loads(normalized)
-                except json.JSONDecodeError:
-                    continue
-                if _has_structured_bridge_payload(candidate):
-                    return candidate
+    for candidate in _iter_bounded_json_objects_from_text(text):
+        if _has_structured_bridge_payload(candidate):
+            return candidate
     return None
 
 
@@ -5569,6 +5612,48 @@ def _json_text_variants(text: str) -> list[str]:
     if flattened != text:
         variants.append(flattened)
     return variants
+
+
+def _iter_bounded_json_objects_from_text(text: str) -> list[dict[str, Any]]:
+    s = str(text or "").strip()
+    if not s:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def append_candidate(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        try:
+            key = json.dumps(value, sort_keys=True, ensure_ascii=False)[:2000]
+        except Exception:
+            key = repr(value)[:2000]
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(value)
+
+    for match in reversed(list(re.finditer(r"```(?:json)?\s*(.*?)```", s, flags=re.IGNORECASE | re.DOTALL))[-20:]):
+        parsed = _parse_json_object_text(match.group(1))
+        append_candidate(parsed)
+
+    max_chars = int(os.environ.get("BRIDGE_JSON_SCAN_MAX_CHARS", "200000") or "200000")
+    max_starts = int(os.environ.get("BRIDGE_JSON_SCAN_MAX_STARTS", "500") or "500")
+    scan = s[-max_chars:] if max_chars > 0 and len(s) > max_chars else s
+    starts = [match.start() for match in re.finditer(r"\{", scan)]
+    starts = starts[-max_starts:] if max_starts > 0 and len(starts) > max_starts else starts
+    decoder = json.JSONDecoder()
+
+    for variant in _json_text_variants(scan):
+        for start in reversed(starts):
+            try:
+                parsed, _ = decoder.raw_decode(variant, start)
+            except json.JSONDecodeError:
+                continue
+            append_candidate(parsed)
+
+    return candidates
 
 
 def _normalize_bridge_payload(payload: dict[str, Any], stdout: str, stderr: str) -> dict[str, Any]:
