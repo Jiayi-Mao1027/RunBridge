@@ -2276,13 +2276,80 @@ def _teammate_report_payload_from_record(record: dict[str, Any]) -> dict[str, An
 def _runtime_owned_artifact_refs(reports: list[dict[str, Any]]) -> list[Any]:
     artifact_refs: list[Any] = []
     for report in reports:
-        for key in ("artifact_refs", "file_refs"):
-            values = report.get(key)
-            if isinstance(values, list):
-                for item in values:
-                    if item not in artifact_refs:
-                        artifact_refs.append(item)
+        for key in ("artifact_refs", "file_refs", "artifact_manifests"):
+            _runtime_owned_append_artifact_refs(artifact_refs, report.get(key), artifact_like_only=False)
+        _runtime_owned_append_artifact_refs(artifact_refs, report.get("evidence_refs"), artifact_like_only=True)
+        evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+        for key in ("artifact_refs", "file_refs", "artifact_manifests", "produced_artifacts"):
+            _runtime_owned_append_artifact_refs(artifact_refs, evidence.get(key), artifact_like_only=False)
+        _runtime_owned_append_artifact_refs(artifact_refs, evidence.get("evidence_refs"), artifact_like_only=True)
+        artifacts = evidence.get("artifacts")
+        if isinstance(artifacts, list):
+            for item in artifacts:
+                if isinstance(item, dict) and item.get("path"):
+                    ref = {
+                        key: item.get(key)
+                        for key in ("path", "sha256", "safe_preview", "ref_type", "id")
+                        if item.get(key)
+                    }
+                    _runtime_owned_append_artifact_refs(artifact_refs, ref, artifact_like_only=False)
+                else:
+                    _runtime_owned_append_artifact_refs(artifact_refs, item, artifact_like_only=True)
     return artifact_refs
+
+
+def _runtime_owned_append_artifact_refs(out: list[Any], value: Any, *, artifact_like_only: bool) -> None:
+    for item in _runtime_owned_artifact_ref_values(value, artifact_like_only=artifact_like_only):
+        if item not in out:
+            out.append(item)
+
+
+def _runtime_owned_artifact_ref_values(value: Any, *, artifact_like_only: bool) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        path = str(value.get("path") or value.get("file") or value.get("ref") or "").strip()
+        if path and (not artifact_like_only or _runtime_owned_text_looks_like_artifact_ref(path)):
+            return [value if value.get("path") else path]
+        return []
+    if isinstance(value, list):
+        refs: list[Any] = []
+        for item in value:
+            refs.extend(_runtime_owned_artifact_ref_values(item, artifact_like_only=artifact_like_only))
+        return refs
+    text = str(value).strip()
+    if not text:
+        return []
+    if artifact_like_only and not _runtime_owned_text_looks_like_artifact_ref(text):
+        return []
+    return [text]
+
+
+def _runtime_owned_text_looks_like_artifact_ref(text: str) -> bool:
+    normalized = str(text or "").strip().replace("\\", "/")
+    if not normalized or normalized.startswith(("event:", "runtime_owned_teammate:")):
+        return False
+    lower = normalized.casefold()
+    if "manifest" in lower or "artifact" in lower:
+        return True
+    if "/" not in normalized and "\\" not in str(text or ""):
+        return False
+    artifact_suffixes = (
+        ".json",
+        ".jsonl",
+        ".log",
+        ".txt",
+        ".md",
+        ".csv",
+        ".tsv",
+        ".parquet",
+        ".yaml",
+        ".yml",
+        ".pt",
+        ".bin",
+        ".safetensors",
+    )
+    return lower.endswith(artifact_suffixes)
 
 
 def _compact_original_error(result: dict[str, Any]) -> dict[str, Any]:

@@ -64,7 +64,7 @@ def validate_bridge_completion(
     if execution.get("validation_passed") is False:
         checks.append(_check("contract_validation", BLOCK, "validation_passed", message="executor explicitly reported validation_passed=false"))
     for requirement in validation_requirements:
-        checks.append(_validation_requirement_check(str(requirement), execution, artifact_validation))
+        checks.append(_validation_requirement_check(str(requirement), execution, artifact_validation, base_dir=base_dir, contract=contract))
 
     checks.extend(_coverage_checks(task_spec, reports))
     checks.extend(_report_contract_checks(report_contract, reports))
@@ -165,13 +165,32 @@ def _failure_disposition_checks(execution: dict[str, Any]) -> list[dict[str, Any
     return [_check("failure_disposition", PASS, status or "unknown")]
 
 
-def _validation_requirement_check(requirement: str, execution: dict[str, Any], artifact_validation: dict[str, Any]) -> dict[str, Any]:
+def _validation_requirement_check(
+    requirement: str,
+    execution: dict[str, Any],
+    artifact_validation: dict[str, Any],
+    *,
+    base_dir: str | Path | None = None,
+    contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     lowered = requirement.casefold()
     refs = artifact_validation.get("normalized_refs", []) if isinstance(artifact_validation.get("normalized_refs"), list) else []
     if "manifest" in lowered:
         if any("manifest" in json.dumps(ref, ensure_ascii=False, default=str).casefold() for ref in refs):
             if "field" in lowered:
-                return _check("manifest_validation", PASS if _manifest_field_evidence_present(execution) else BLOCK, requirement, message="" if _manifest_field_evidence_present(execution) else "manifest required-field evidence missing")
+                required_fields = []
+                if isinstance(contract, dict) and isinstance(contract.get("manifest_required_fields"), list):
+                    required_fields = [str(item) for item in contract["manifest_required_fields"] if str(item)]
+                manifest_ok, missing = _manifest_field_evidence_present(
+                    execution,
+                    refs=refs,
+                    base_dir=base_dir,
+                    required_fields=required_fields,
+                )
+                message = "" if manifest_ok else "manifest required-field evidence missing"
+                if missing:
+                    message = f"{message}: {', '.join(missing[:12])}"
+                return _check("manifest_validation", PASS if manifest_ok else BLOCK, requirement, message=message)
             return _check("manifest_validation", PASS, requirement)
         return _check("manifest_validation", BLOCK, requirement, message="manifest artifact ref missing")
     if execution.get("validation_passed") is False:
@@ -179,10 +198,83 @@ def _validation_requirement_check(requirement: str, execution: dict[str, Any], a
     return _check("contract_validation", PASS, requirement)
 
 
-def _manifest_field_evidence_present(execution: dict[str, Any]) -> bool:
+def _manifest_field_evidence_present(
+    execution: dict[str, Any],
+    *,
+    refs: list[dict[str, Any]] | None = None,
+    base_dir: str | Path | None = None,
+    required_fields: list[str] | None = None,
+) -> tuple[bool, list[str]]:
+    ref_missing = _manifest_missing_fields_from_refs(refs or [], base_dir=base_dir, required_fields=required_fields or [])
+    if ref_missing is not None:
+        return (not ref_missing, ref_missing)
     text = json.dumps({"reports": execution.get("reports"), "evidence": execution.get("evidence")}, ensure_ascii=False, default=str).casefold()
     required_markers = ["run_id", "bridge_window_id", "task_id", "command", "cwd", "batchbasis", "gpu", "memory", "model", "dataset", "method"]
-    return all(marker in text for marker in required_markers)
+    missing = [marker for marker in required_markers if marker not in text]
+    return (not missing, missing)
+
+
+def _manifest_missing_fields_from_refs(
+    refs: list[dict[str, Any]],
+    *,
+    base_dir: str | Path | None,
+    required_fields: list[str],
+) -> list[str] | None:
+    manifests: list[dict[str, Any]] = []
+    for ref in refs:
+        if not _ref_looks_like_log_manifest(ref):
+            continue
+        payload = _load_manifest_ref_payload(ref, base_dir=base_dir)
+        if isinstance(payload, dict):
+            manifests.append(payload)
+    if not manifests:
+        return None
+    fields = required_fields or ["run_id", "bridge_window_id", "task_id", "command", "cwd", "batchbasis", "gpu_id_or_device_ids", "smoke_memory_observed", "warmup_memory_observed", "model_or_model_family", "dataset_name_split_source", "method_or_objective"]
+    missing: list[str] = []
+    for field in fields:
+        if not any(field in manifest and not _empty_manifest_value(manifest.get(field)) for manifest in manifests):
+            missing.append(field)
+    return missing
+
+
+def _ref_looks_like_log_manifest(ref: dict[str, Any]) -> bool:
+    haystack = json.dumps(
+        {
+            "ref_type": ref.get("ref_type"),
+            "id": ref.get("id"),
+            "path": ref.get("path"),
+            "safe_preview": ref.get("safe_preview"),
+        },
+        ensure_ascii=False,
+        default=str,
+    ).casefold().replace("\\", "/")
+    return "manifest" in haystack and ("log" in haystack or str(ref.get("ref_type") or "").casefold() == "log_manifest")
+
+
+def _load_manifest_ref_payload(ref: dict[str, Any], *, base_dir: str | Path | None) -> dict[str, Any] | None:
+    path_text = ref.get("path")
+    if not path_text:
+        return None
+    path = Path(str(path_text)).expanduser()
+    if not path.is_absolute() and base_dir is not None:
+        path = Path(base_dir).expanduser().resolve() / path
+    try:
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _empty_manifest_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict, tuple, set)):
+        return len(value) == 0
+    return False
 
 
 def _merged_coverage(reports: list[dict[str, Any]]) -> dict[str, Any]:
@@ -207,10 +299,16 @@ def _coverage_disposition(value: Any) -> str:
 
 def _fuzzy_coverage_disposition(item: str, coverage: dict[str, Any]) -> str:
     target = _coverage_match_key(item)
+    target_tokens = _coverage_match_tokens(target)
     for key, value in coverage.items():
         key_text = _coverage_match_key(key)
         if target and (target in key_text or key_text in target):
             return _coverage_disposition(value)
+        if _coverage_tokens_match(target_tokens, _coverage_match_tokens(key_text)):
+            return _coverage_disposition(value)
+    compound_disposition = _compound_negative_coverage_disposition(target, coverage)
+    if compound_disposition:
+        return compound_disposition
     return ""
 
 
@@ -219,6 +317,84 @@ def _coverage_match_key(value: Any) -> str:
     text = re.sub(r"\s+([,.;:!?/)\]\}])", r"\1", text)
     text = re.sub(r"([(/])\s+", r"\1", text)
     return text.strip()
+
+
+def _coverage_match_tokens(text: str) -> set[str]:
+    tokens = re.findall(r"[a-z0-9_]+", text.casefold())
+    stopwords = {"a", "an", "the"}
+    normalized: set[str] = set()
+    for token in tokens:
+        if token in stopwords:
+            continue
+        if len(token) > 4 and token.endswith("s"):
+            token = token[:-1]
+        normalized.add(token)
+    return normalized
+
+
+def _coverage_tokens_match(target: set[str], candidate: set[str]) -> bool:
+    if len(target) < 4 or len(candidate) < 4:
+        return False
+    shared = target & candidate
+    if len(shared) < max(3, int(0.6 * min(len(target), len(candidate)))):
+        return False
+    score = (2 * len(shared)) / (len(target) + len(candidate))
+    return score >= 0.72
+
+
+def _compound_negative_coverage_disposition(target: str, coverage: dict[str, Any]) -> str:
+    if target.count("do not") < 2 and "don't" not in target:
+        return ""
+    clauses = [
+        clause.strip(" ,;")
+        for clause in re.split(r"(?:[,;]\s*|\s+and\s+)(?=(?:do not|don't)\b)", target)
+        if clause.strip(" ,;")
+    ]
+    if len(clauses) < 2:
+        return ""
+
+    accepted_dispositions = {"completed", "deferred", "blocked", "escalated"}
+    accepted_entries: list[tuple[set[str], str]] = []
+    for key, value in coverage.items():
+        disposition = _coverage_disposition(value)
+        if disposition not in accepted_dispositions:
+            continue
+        tokens = _coverage_match_tokens(_coverage_match_key(key))
+        if len(tokens) >= 3:
+            accepted_entries.append((tokens, disposition))
+    if not accepted_entries:
+        return ""
+
+    dispositions: list[str] = []
+    for clause in clauses:
+        clause_tokens = _coverage_match_tokens(clause)
+        if len(clause_tokens) < 3:
+            continue
+        matched = ""
+        for entry_tokens, disposition in accepted_entries:
+            if _coverage_clause_tokens_match(clause_tokens, entry_tokens):
+                matched = disposition
+                break
+        if not matched:
+            return ""
+        dispositions.append(matched)
+
+    if not dispositions:
+        return ""
+    if all(disposition == "completed" for disposition in dispositions):
+        return "completed"
+    if any(disposition == "blocked" for disposition in dispositions):
+        return "blocked"
+    if any(disposition == "escalated" for disposition in dispositions):
+        return "escalated"
+    return "deferred"
+
+
+def _coverage_clause_tokens_match(target: set[str], candidate: set[str]) -> bool:
+    shared = target & candidate
+    if len(shared) < max(3, int(0.55 * min(len(target), len(candidate)))):
+        return False
+    return len(shared) / len(target) >= 0.55
 
 
 def _process_ref_looks_running(ref: Any) -> bool:
