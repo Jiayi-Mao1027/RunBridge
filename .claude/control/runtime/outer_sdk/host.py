@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,12 @@ class OuterSdkHost:
         self._activate_default_run("outer_host_started")
 
     def handle_user_input(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request, runtime_result = self.accept_user_input(payload)
+        leader_result = self._leader_result_for_request(request, runtime_result)
+        self._write_outer_leader_result(request, runtime_result, leader_result)
+        return self._build_user_input_response(request, runtime_result, leader_result)
+
+    def accept_user_input(self, payload: dict[str, Any]):
         request = self._normalize_input(payload)
         self._write_host_event("user_input_received", request)
         runtime_result = self._dispatch_input_event(request)
@@ -80,32 +87,53 @@ class OuterSdkHost:
         self._write_sdk_stream_event("outer_user_input", request, runtime_result=runtime_result)
         if runtime_result.ok:
             self._write_outer_host_context(request)
-            leader_result = self.adapter.handle_user_input(
-                dict(request),
-                event_sink=lambda event_type, payload, status="streaming", sequence=None: self.emit_sdk_observed_event(
-                    request,
-                    event_type,
-                    payload,
-                    status=status,
-                    sequence=sequence,
-                ),
-            )
-            leader_result = self._maybe_auto_bridge_after_outer_leader(request, leader_result)
-        else:
+        return request, runtime_result
+
+    def handle_accepted_user_input(self, request: dict[str, Any], runtime_result: Any) -> dict[str, Any]:
+        try:
+            leader_result = self._leader_result_for_request(request, runtime_result)
+        except Exception as exc:
+            leader_result = _outer_leader_exception_result(request, runtime_result, exc)
+        self._write_outer_leader_result(request, runtime_result, leader_result)
+        return leader_result
+
+    def build_user_input_ack(self, request: dict[str, Any], runtime_result: Any) -> dict[str, Any]:
+        if runtime_result.ok:
             leader_result = {
-                "status": "blocked",
-                "handled_by": "outer_sdk_host",
+                "status": "queued",
+                "handled_by": "outer_sdk_host_async",
                 "reports": [],
                 "artifact_refs": [],
                 "evidence": {"runtime_event_id": runtime_result.event_id, "event_kind": runtime_result.event_kind},
-                "error_or_null": {
-                    "type": "OuterHostRuntimeEventRejected",
-                    "message": "Runtime rejected the outer user input event; leader SDK execution was not started.",
-                },
+                "error_or_null": None,
                 "cleanup_required": False,
             }
+        else:
+            leader_result = _runtime_rejected_leader_result(runtime_result)
+        response = self._build_user_input_response(request, runtime_result, leader_result)
+        response["async"] = bool(runtime_result.ok)
+        return response
+
+    def _leader_result_for_request(self, request: dict[str, Any], runtime_result: Any) -> dict[str, Any]:
+        if not runtime_result.ok:
+            return _runtime_rejected_leader_result(runtime_result)
+        leader_result = self.adapter.handle_user_input(
+            dict(request),
+            event_sink=lambda event_type, payload, status="streaming", sequence=None: self.emit_sdk_observed_event(
+                request,
+                event_type,
+                payload,
+                status=status,
+                sequence=sequence,
+            ),
+        )
+        return self._maybe_auto_bridge_after_outer_leader(request, leader_result)
+
+    def _write_outer_leader_result(self, request: dict[str, Any], runtime_result: Any, leader_result: dict[str, Any]) -> None:
         self._write_host_event("outer_leader_result", {"request": request, "leader_result": leader_result})
         self._write_sdk_stream_event("outer_leader_result", {"request": request, "leader_result": leader_result}, runtime_result=runtime_result)
+
+    def _build_user_input_response(self, request: dict[str, Any], runtime_result: Any, leader_result: dict[str, Any]) -> dict[str, Any]:
         return {
             "schema_version": "outer_sdk_host_response.v1",
             "accepted": bool(runtime_result.ok),
@@ -346,7 +374,7 @@ class OuterSdkHost:
         ).strip()
         input_kind = str(payload.get("input_kind") or payload.get("kind") or "user_prompt").strip()
         event_kind = "user_answer_received" if input_kind in {"user_answer", "clarification_answer"} else "user_prompt_submitted"
-        target_phase = payload.get("target_phase") or payload.get("targetPhase")
+        target_phase = payload.get("target_phase") or payload.get("targetPhase") or _infer_target_phase(text)
         dispatch_intent = _dispatch_intent(payload, text=text, input_kind=input_kind, target_phase=target_phase)
         now = _now_iso()
         return {
@@ -570,6 +598,47 @@ class OuterSdkHost:
         ]
 
 
+def _runtime_rejected_leader_result(runtime_result: Any) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "handled_by": "outer_sdk_host",
+        "reports": [],
+        "artifact_refs": [],
+        "evidence": {"runtime_event_id": runtime_result.event_id, "event_kind": runtime_result.event_kind},
+        "error_or_null": {
+            "type": "OuterHostRuntimeEventRejected",
+            "message": "Runtime rejected the outer user input event; leader SDK execution was not started.",
+        },
+        "cleanup_required": False,
+    }
+
+
+def _outer_leader_exception_result(request: dict[str, Any], runtime_result: Any, exc: Exception) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "handled_by": "outer_sdk_host_async",
+        "reports": [
+            {
+                "summary": f"Outer leader background execution failed: {exc}",
+                "source": "outer_sdk_host",
+            }
+        ],
+        "artifact_refs": [],
+        "evidence": {
+            "repo_key": request.get("repo_key"),
+            "run_id": request.get("run_id"),
+            "input_id": request.get("input_id"),
+            "runtime_event_id": runtime_result.event_id,
+            "event_kind": runtime_result.event_kind,
+        },
+        "error_or_null": {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        },
+        "cleanup_required": False,
+    }
+
+
 def _write_last_bridge_packet(runs_root: Path, run_id: str, packet: dict[str, Any]) -> None:
     atomic_write_json(runs_root / run_id / ".last_bridge_packet.json", packet)
 
@@ -683,6 +752,7 @@ def _outer_leader_failure_allows_auto_bridge(error_type: str) -> bool:
         "OuterLeaderContractViolation",
         "OuterLeaderTmuxTerminalApiError",
         "OuterLeaderTmuxNoAssistantText",
+        "OuterLeaderTmuxStartupFailed",
         "OuterLeaderTransportApiFailure",
         "OuterLeaderApiError",
     }
@@ -824,6 +894,22 @@ def _dispatch_intent(payload: dict[str, Any], *, text: str, input_kind: str, tar
     if any(marker in lowered for marker in advance_markers):
         return "advance_or_continue"
     return "inspect_only"
+
+
+def _infer_target_phase(text: str) -> str | None:
+    lowered = str(text or "").strip().lower()
+    compact = re.sub(r"[\s_-]+", "", lowered)
+    if re.search(r"(?<![a-z0-9])l2(?![a-z0-9])", lowered) or "l2advisory" in compact:
+        return "l2_advisory"
+    if re.search(r"(?<![a-z0-9])l3(?![a-z0-9])", lowered) or "l3bridge" in compact:
+        return "l3_bridge"
+    if "l4anomaly" in compact or re.search(r"\banomaly\b", lowered):
+        return "l4_anomaly"
+    if "l4implement" in compact or re.search(r"\bimplement\b", lowered):
+        return "l4_implement"
+    if "l4execute" in compact or re.search(r"\bexecute\b", lowered):
+        return "l4_execute"
+    return None
 
 
 def _payload_dict(payload: dict[str, Any], *keys: str) -> dict[str, Any]:

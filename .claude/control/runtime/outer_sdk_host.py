@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import threading
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -143,6 +144,18 @@ def serve(host: OuterSdkHost, *, bind_host: str, port: int) -> None:
                 return
             try:
                 payload = self._read_json_body()
+                query = parse_qs(parsed.query)
+                if _truthy(_first(query, "async") or _first(query, "background")):
+                    request, runtime_result = host.accept_user_input(payload)
+                    response = host.build_user_input_ack(request, runtime_result)
+                    if runtime_result.ok:
+                        threading.Thread(
+                            target=_run_accepted_input_background,
+                            args=(host, request, runtime_result),
+                            daemon=True,
+                        ).start()
+                    self._json(202 if runtime_result.ok else 409, response)
+                    return
                 self._json(200, host.handle_user_input(payload))
             except Exception as exc:
                 self._json(400, {"error": "bad_request", "message": str(exc)})
@@ -188,6 +201,14 @@ def serve(host: OuterSdkHost, *, bind_host: str, port: int) -> None:
 def _first(query: dict[str, list[str]], key: str) -> str | None:
     values = query.get(key)
     return values[0] if values else None
+
+
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _run_accepted_input_background(host: OuterSdkHost, request: dict[str, Any], runtime_result: Any) -> None:
+    host.handle_accepted_user_input(request, runtime_result)
 
 
 def _decode_request_body(raw: bytes) -> str:

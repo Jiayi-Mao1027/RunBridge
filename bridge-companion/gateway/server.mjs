@@ -19,6 +19,50 @@ const HOST = process.env.BRIDGE_COMPANION_HOST || "127.0.0.1";
 const STREAM_INTERVAL_MS = Number(process.env.BRIDGE_COMPANION_STREAM_INTERVAL_MS || 750);
 const MAX_EVENT_LIMIT = 1000;
 const DEFAULT_EVENT_LIMIT = 500;
+const REQUEST_JSON_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.BRIDGE_COMPANION_REQUEST_JSON_TIMEOUT_MS || 5000)
+);
+const LEADER_INPUT_TIMEOUT_MS = Math.max(
+  10000,
+  Number(process.env.BRIDGE_COMPANION_LEADER_INPUT_TIMEOUT_MS || 15 * 60 * 1000)
+);
+const LEADER_INPUT_ACK_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.BRIDGE_COMPANION_LEADER_INPUT_ACK_TIMEOUT_MS || REQUEST_JSON_TIMEOUT_MS)
+);
+const BRIEF_REQUEST_TIMEOUT_MS = Math.max(
+  5000,
+  Number(process.env.BRIDGE_COMPANION_BRIEF_REQUEST_TIMEOUT_MS || 30000)
+);
+const JSONL_TAIL_MAX_BYTES = Math.max(
+  64 * 1024,
+  Number(process.env.BRIDGE_COMPANION_JSONL_TAIL_MAX_BYTES || 256 * 1024)
+);
+const JSONL_TAIL_MAX_LINES = Math.max(
+  100,
+  Number(process.env.BRIDGE_COMPANION_JSONL_TAIL_MAX_LINES || 1000)
+);
+const COMPANION_RUN_LEDGER_MAX_BYTES = Math.max(
+  1024,
+  Number(process.env.BRIDGE_COMPANION_RUN_LEDGER_MAX_BYTES || 2 * 1024 * 1024)
+);
+const PROJECTION_EVENT_WINDOW = Math.max(
+  100,
+  Number(process.env.BRIDGE_COMPANION_PROJECTION_EVENT_WINDOW || 1000)
+);
+const STATUS_ACTIVITY_EVENT_LIMIT = Math.max(
+  20,
+  Number(process.env.BRIDGE_COMPANION_STATUS_ACTIVITY_EVENT_LIMIT || 80)
+);
+const STATUS_TRAJECTORY_LIMIT = Math.max(
+  20,
+  Number(process.env.BRIDGE_COMPANION_STATUS_TRAJECTORY_LIMIT || 120)
+);
+const RUN_LIST_JSON_MAX_BYTES = Math.max(
+  16 * 1024,
+  Number(process.env.BRIDGE_COMPANION_RUN_LIST_JSON_MAX_BYTES || 512 * 1024)
+);
 const RESPONSE_TEXT_LIMIT = 8000;
 const REPORT_RESPONSE_TEXT_LIMIT = Number(process.env.BRIDGE_COMPANION_REPORT_TEXT_LIMIT || 50000);
 const TERMINAL_TEXT_LIMIT = Number(process.env.BRIDGE_COMPANION_TERMINAL_TEXT_LIMIT || 120000);
@@ -268,24 +312,68 @@ async function exists(filePath) {
   }
 }
 
-async function readJsonIfExists(filePath, fallback = null) {
+async function readJsonIfExists(filePath, fallback = null, options = {}) {
   try {
+    const maxBytes = Number(options.maxBytes || 0);
+    if (maxBytes > 0) {
+      const stats = await stat(filePath).catch(() => null);
+      if (!stats || stats.size > maxBytes) return fallback;
+    }
     return JSON.parse(await readFile(filePath, "utf8"));
   } catch {
     return fallback;
   }
 }
 
-async function readJsonlWithMeta(filePath, sourceFile) {
-  let text = "";
+async function readJsonlText(filePath) {
+  const stats = await stat(filePath).catch(() => null);
+  if (!stats) return null;
+  if (stats.size <= JSONL_TAIL_MAX_BYTES) {
+    return {
+      text: await readFile(filePath, "utf8"),
+      baseByteOffset: 0
+    };
+  }
+
+  const start = Math.max(0, stats.size - JSONL_TAIL_MAX_BYTES);
+  const length = stats.size - start;
+  const buffer = Buffer.alloc(length);
+  const handle = await open(filePath, "r");
   try {
-    text = await readFile(filePath, "utf8");
-  } catch {
+    await handle.read(buffer, 0, length, start);
+  } finally {
+    await handle.close();
+  }
+
+  let text = buffer.toString("utf8");
+  let baseByteOffset = start;
+  const firstNewline = text.indexOf("\n");
+  if (firstNewline >= 0) {
+    const prefix = text.slice(0, firstNewline + 1);
+    baseByteOffset += Buffer.byteLength(prefix);
+    text = text.slice(firstNewline + 1);
+  }
+
+  const lines = text.split(/\r?\n/);
+  if (lines.length > JSONL_TAIL_MAX_LINES) {
+    const keepFrom = lines.length - JSONL_TAIL_MAX_LINES;
+    const dropped = lines.slice(0, keepFrom).join("\n");
+    if (dropped) baseByteOffset += Buffer.byteLength(`${dropped}\n`);
+    text = lines.slice(keepFrom).join("\n");
+  }
+
+  return { text, baseByteOffset };
+}
+
+async function readJsonlWithMeta(filePath, sourceFile) {
+  const loaded = await readJsonlText(filePath).catch(() => null);
+  if (!loaded) {
     return [];
   }
+  const text = loaded.text;
   const records = [];
   const lines = text.split(/\r?\n/);
-  let sourceByteOffset = 0;
+  let sourceByteOffset = loaded.baseByteOffset || 0;
   let charOffset = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -391,10 +479,15 @@ async function listRepos() {
   const registry = await loadRegistry();
   if (!(await exists(PROJECTS_ROOT)) && !registry.repos.length) return [];
   const byKey = new Map();
+  const runsCache = new Map();
+  const cachedRuns = async repoKey => {
+    if (!runsCache.has(repoKey)) runsCache.set(repoKey, await listRuns(repoKey));
+    return runsCache.get(repoKey);
+  };
 
   for (const item of registry.repos) {
     const repoKey = item.repoKey;
-    const runs = await listRuns(repoKey);
+    const runs = await cachedRuns(repoKey);
     const active = registry.activeRuns.get(repoKey) || {};
     const latestRun =
       runs.find(run => run.runId === active.latestRunId) ||
@@ -423,7 +516,7 @@ async function listRepos() {
     if (!entry.isDirectory()) continue;
     const repoKey = entry.name;
     const repoPath = path.join(PROJECTS_ROOT, repoKey);
-    const runs = await listRuns(repoKey);
+    const runs = await cachedRuns(repoKey);
     const latestRun = runs[0] || null;
     const stats = await stat(repoPath).catch(() => null);
     const existing = byKey.get(repoKey) || {};
@@ -500,8 +593,12 @@ async function listRuns(repoKey) {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const runPath = path.join(runsRoot, entry.name);
-    const snapshot = await readJsonIfExists(path.join(runPath, "runtime_snapshot.json"), null);
-    const ledger = snapshot ? null : await readJsonIfExists(path.join(runPath, "run_ledger.json"), null);
+    const snapshot = await readJsonIfExists(path.join(runPath, "runtime_snapshot.json"), null, {
+      maxBytes: RUN_LIST_JSON_MAX_BYTES
+    });
+    const ledger = snapshot ? null : await readJsonIfExists(path.join(runPath, "run_ledger.json"), null, {
+      maxBytes: RUN_LIST_JSON_MAX_BYTES
+    });
     const stats = await stat(runPath).catch(() => null);
     runs.push({
       repoKey,
@@ -531,6 +628,21 @@ async function listRuns(repoKey) {
 
 function latestLifecycleState(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return "unknown";
+  const readable = value => {
+    if (!value || typeof value !== "object") return value || "";
+    const raw = value.raw && typeof value.raw === "object" ? value.raw : {};
+    const payload = value.payload && typeof value.payload === "object" ? value.payload : {};
+    return (
+      value.to_status ||
+      value.status ||
+      raw.to_status ||
+      raw.status ||
+      payload.to_status ||
+      payload.status ||
+      value.run_status ||
+      ""
+    );
+  };
   const lifecycle = snapshot.lifecycle || {};
   const open = Array.isArray(lifecycle.open_bridge_window_ids)
     ? lifecycle.open_bridge_window_ids
@@ -540,10 +652,11 @@ function latestLifecycleState(snapshot) {
       ? lifecycle.status_index
       : {};
   for (const windowId of open) {
-    if (statusIndex[windowId]) return statusIndex[windowId];
+    const status = readable(statusIndex[windowId]);
+    if (status) return status;
   }
   const entries = Object.entries(statusIndex);
-  if (entries.length) return entries.at(-1)[1] || "unknown";
+  if (entries.length) return readable(entries.at(-1)[1]) || "unknown";
   return snapshot.last_bridge_result?.status || snapshot.run_status || "unknown";
 }
 
@@ -596,6 +709,145 @@ function compactText(value, fallback = "") {
       : value ?? fallback ?? "";
   const text = String(source).replace(/\s+/g, " ").trim();
   return text.length > 700 ? `${text.slice(0, 697)}...` : text;
+}
+
+function compactRawRef(rawRef) {
+  if (!rawRef || typeof rawRef !== "object") return rawRef || null;
+  return {
+    sourceFile: rawRef.sourceFile,
+    sourceOffset: rawRef.sourceOffset,
+    sourceSequence: rawRef.sourceSequence,
+    sourceByteOffset: rawRef.sourceByteOffset ?? undefined
+  };
+}
+
+function compactReport(report) {
+  if (!report || typeof report !== "object") return report || null;
+  return {
+    teammate_id: report.teammate_id || report.teammateId || undefined,
+    agent_type: report.agent_type || report.agentType || undefined,
+    status: report.status || undefined,
+    summary: report.summary ? compactText(report.summary) : undefined,
+    decision: report.decision ? compactText(report.decision) : undefined,
+    artifact_refs: Array.isArray(report.artifact_refs) ? report.artifact_refs.slice(0, 12) : undefined,
+    evidence_refs: Array.isArray(report.evidence_refs) ? report.evidence_refs.slice(0, 12) : undefined
+  };
+}
+
+function compactLeaderResult(result) {
+  if (!result || typeof result !== "object") return result || null;
+  return {
+    status: result.status || undefined,
+    bridge_window_id: result.bridge_window_id || result.bridgeWindowId || undefined,
+    team_id: result.team_id || result.teamId || undefined,
+    task_id: result.task_id || result.taskId || undefined,
+    error_or_null: result.error_or_null ? compactText(result.error_or_null) : undefined,
+    reports: Array.isArray(result.reports) ? result.reports.slice(0, 12).map(compactReport) : undefined
+  };
+}
+
+function compactRawForResponse(raw) {
+  if (!raw || typeof raw !== "object") return raw || null;
+  const out = {};
+  for (const key of [
+    "event_kind",
+    "event_type",
+    "sdk_message_type",
+    "raw_stream_event_type",
+    "type",
+    "status",
+    "state",
+    "tool_name",
+    "tool_id",
+    "tool_use_id",
+    "exit_code",
+    "bridge_window_id",
+    "team_id",
+    "task_id",
+    "session_id",
+    "teammate_id",
+    "agent_type"
+  ]) {
+    if (raw[key] !== undefined && raw[key] !== null) out[key] = raw[key];
+  }
+  for (const key of ["message_preview", "summary", "title", "result", "safe_preview", "command_preview", "error"]) {
+    if (raw[key] !== undefined && raw[key] !== null) out[key] = compactText(raw[key]);
+  }
+  if (raw.report) out.report = compactReport(raw.report);
+  if (raw.leader_result) out.leader_result = compactLeaderResult(raw.leader_result);
+  if (raw.payload?.leader_result) {
+    out.payload = { leader_result: compactLeaderResult(raw.payload.leader_result) };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function compactRuntimeEventForResponse(runtimeEvent) {
+  if (!runtimeEvent || typeof runtimeEvent !== "object") return undefined;
+  return {
+    event_id: runtimeEvent.event_id || runtimeEvent.eventId || undefined,
+    authority: runtimeEvent.authority || undefined,
+    created_at: runtimeEvent.created_at || runtimeEvent.createdAt || undefined
+  };
+}
+
+function compactEventForResponse(event, options = {}) {
+  if (!event || typeof event !== "object") return event || null;
+  const includeRaw = Boolean(options.includeRaw);
+  const compact = {
+    seq: event.seq,
+    eventId: event.eventId,
+    cursor: compactRawRef(event.cursor),
+    ts: event.ts,
+    repoKey: event.repoKey,
+    runId: event.runId,
+    bridgeWindowId: event.bridgeWindowId,
+    teamId: event.teamId,
+    taskId: event.taskId,
+    sessionId: event.sessionId,
+    source: event.source,
+    kind: event.kind,
+    lane: event.lane,
+    streamEventType: event.streamEventType,
+    actor: event.actor,
+    textDelta: event.textDelta ? compactText(event.textDelta) : undefined,
+    toolInputDelta: event.toolInputDelta ? compactText(event.toolInputDelta) : undefined,
+    messagePreview: event.messagePreview ? compactText(event.messagePreview) : undefined,
+    toolName: event.toolName,
+    sdkToolName: event.sdkToolName,
+    toolId: event.toolId,
+    status: event.status,
+    target: event.target ? compactText(event.target) : undefined,
+    fileRefs: Array.isArray(event.fileRefs) ? event.fileRefs.slice(0, 12) : [],
+    evidenceRefs: Array.isArray(event.evidenceRefs) ? event.evidenceRefs.slice(0, 12) : [],
+    rawRef: compactRawRef(event.rawRef),
+    parseError: event.parseError || undefined,
+    runtimeEvent: compactRuntimeEventForResponse(event.runtimeEvent)
+  };
+  if (includeRaw) {
+    compact.raw = event.raw;
+    compact.rawLine = event.rawLine;
+  } else {
+    compact.raw = compactRawForResponse(event.raw);
+  }
+  return compact;
+}
+
+function compactTrajectoryForResponse(step) {
+  if (!step || typeof step !== "object") return step || null;
+  return {
+    step_index: step.step_index ?? step.step ?? undefined,
+    step: step.step ?? step.step_index ?? undefined,
+    ts: step.timestamp || step.created_at || step.completed_at || undefined,
+    actor: step.actor || step.role || undefined,
+    role: step.role || undefined,
+    event_type: step.event_type || undefined,
+    kind: step.kind || undefined,
+    status: step.status || undefined,
+    action: step.action ? compactText(step.action) : undefined,
+    observation: step.observation ? compactText(step.observation) : undefined,
+    message: step.message ? compactText(step.message) : undefined,
+    rawRef: compactRawRef(step.rawRef)
+  };
 }
 
 function fileRefs(record) {
@@ -999,8 +1251,9 @@ function filterEvents(events, query) {
   } else {
     filtered = events.filter(event => event.seq > after).slice(0, limit);
   }
+  const includeRaw = ["1", "true", "yes"].includes(String(query.get("raw") || query.get("include_raw") || "").toLowerCase());
   return {
-    events: filtered,
+    events: filtered.map(event => compactEventForResponse(event, { includeRaw })),
     latestSeq: events.reduce((max, event) => Math.max(max, event.seq), after),
     latestEventId: events.at(-1)?.eventId || null,
     sourceCursors: sourceCursorsFor(events),
@@ -1012,7 +1265,9 @@ async function loadCompanionData(repoKey, runId) {
   const dir = runDir(repoKey, runId);
   if (!dir) return null;
   const snapshot = await readJsonIfExists(path.join(dir, "runtime_snapshot.json"), null);
-  const runLedger = await readJsonIfExists(path.join(dir, "run_ledger.json"), null);
+  const runLedger = await readJsonIfExists(path.join(dir, "run_ledger.json"), null, {
+    maxBytes: COMPANION_RUN_LEDGER_MAX_BYTES
+  });
   const activeOperations = await readJsonIfExists(path.join(dir, "active_operations.json"), null);
   const sessionBindings = (await readJsonlWithMeta(path.join(dir, "session_bindings.jsonl"), "session_bindings.jsonl")).map(item => ({
     ...item.record,
@@ -1140,7 +1395,7 @@ function teamFrom(data) {
       teamId: binding.team_id,
       taskId: binding.task_id
     });
-    member.rawRefs.push({ sourceFile: "session_bindings.jsonl" });
+    if (member.rawRefs.length < 50) member.rawRefs.push({ sourceFile: "session_bindings.jsonl" });
   }
 
   const activeTeam = Array.isArray(data.activeOperations?.teammates)
@@ -1197,7 +1452,7 @@ function teamFrom(data) {
       }
     }
     if (event.source === "teammate_report") member.reports += 1;
-    member.rawRefs.push(event.rawRef);
+    if (member.rawRefs.length < 50) member.rawRefs.push(compactRawRef(event.rawRef));
   }
 
   if (!members.size) {
@@ -1206,7 +1461,14 @@ function teamFrom(data) {
       displayName: "No bound sessions yet"
     });
   }
-  return [...members.values()].sort((a, b) => String(a.displayName).localeCompare(String(b.displayName)));
+  return [...members.values()]
+    .map(member => ({
+      ...member,
+      activeTool: member.activeTool ? compactToolForMember(member.activeTool) : null,
+      lastCompletedTool: member.lastCompletedTool ? compactToolForMember(member.lastCompletedTool) : null,
+      rawRefs: member.rawRefs.slice(-50).map(compactRawRef)
+    }))
+    .sort((a, b) => String(a.displayName).localeCompare(String(b.displayName)));
 }
 
 function unknownsFor(data) {
@@ -1230,13 +1492,33 @@ function unknownsFor(data) {
   return [...new Set(unknowns)];
 }
 
-async function buildStatus(repoKey, runId) {
+async function buildStatus(repoKey, runId, options = {}) {
   const data = await loadCompanionData(repoKey, runId);
   if (!data) return null;
   const packetSummary = packetSummaryFrom(data.snapshot, data.runLedger, data.events);
   const lifecycleState = latestLifecycleState(data.snapshot || data.runLedger);
-  const latestEvent = data.events.at(-1) || null;
+  const latestEvent = compactEventForResponse(data.events.at(-1) || null);
   const team = teamFrom(data);
+  const includeDetail = Boolean(options.includeDetail);
+  const activityFeed = data.events
+    .slice(-STATUS_ACTIVITY_EVENT_LIMIT)
+    .map(event => compactEventForResponse(event));
+  const trajectory = data.trajectory
+    .slice(-STATUS_TRAJECTORY_LIMIT)
+    .map(step => compactTrajectoryForResponse(step));
+  const compactDetail = {
+    snapshotRefs: data.snapshot?.snapshot_refs || {},
+    snapshotUpdatedAt: data.snapshot?.updated_at || null,
+    runLedgerLoaded: Boolean(data.runLedger),
+    activeOperationKeys: data.activeOperations && typeof data.activeOperations === "object"
+      ? Object.keys(data.activeOperations).slice(0, 80)
+      : [],
+    sessionBindingCount: data.sessionBindings.length,
+    eventCount: data.events.length,
+    trajectoryCount: data.trajectory.length,
+    displayedActivityCount: activityFeed.length,
+    displayedTrajectoryCount: trajectory.length
+  };
   return {
     repoKey,
     runId,
@@ -1252,17 +1534,24 @@ async function buildStatus(repoKey, runId) {
     },
     packetSummary,
     teammates: team,
-    activityFeed: data.events.slice(-200),
-    trajectory: data.trajectory,
+    activityFeed,
+    trajectory,
+    eventCount: data.events.length,
+    trajectoryCount: data.trajectory.length,
     unknowns: unknownsFor(data),
-    detail: {
+    detail: includeDetail ? {
+      ...compactDetail,
       snapshot: data.snapshot,
       runLedger: data.runLedger,
       activeOperations: data.activeOperations,
-      sessionBindings: data.sessionBindings,
-      events: data.events.slice(-500),
-      trajectory: data.trajectory
-    },
+      sessionBindings: data.sessionBindings.map(item => ({
+        ...item,
+        rawRef: compactRawRef(item.rawRef),
+        rawLine: undefined
+      })),
+      events: data.events.slice(-STATUS_ACTIVITY_EVENT_LIMIT).map(event => compactEventForResponse(event)),
+      trajectory
+    } : compactDetail,
     streamContract: {
       transport: "sse",
       primarySources: ["sdk_stream_events.jsonl", "tool_events.jsonl"],
@@ -1272,20 +1561,57 @@ async function buildStatus(repoKey, runId) {
   };
 }
 
+function compactTuiViewForProjection(view) {
+  if (!view || typeof view !== "object") return view;
+  const compactRefs = (items, limit = 10) => Array.isArray(items) ? items.filter(Boolean).slice(-limit) : [];
+  const compactDisplayItem = item => {
+    if (!item || typeof item !== "object") return item;
+    const { inspector, ...rest } = item;
+    return {
+      ...rest,
+      rawRefs: compactRefs(item.rawRefs),
+      evidenceRefs: compactRefs(item.evidenceRefs),
+      fileRefs: compactRefs(item.fileRefs)
+    };
+  };
+  const inspectorIndex = {};
+  for (const [id, payload] of Object.entries(view.inspectorIndex || {}).slice(0, 80)) {
+    inspectorIndex[id] = {
+      id: payload.id || id,
+      displayKey: payload.displayKey,
+      kind: payload.kind,
+      title: payload.title,
+      rawRefs: compactRefs(payload.rawRefs, 8),
+      sourceCursors: compactRefs(payload.sourceCursors, 8),
+      evidenceRefs: compactRefs(payload.evidenceRefs, 8),
+      snapshotRefs: payload.snapshotRefs || {}
+    };
+  }
+  return {
+    ...view,
+    mainReport: compactDisplayItem(view.mainReport),
+    teamTree: Array.isArray(view.teamTree) ? view.teamTree.map(compactDisplayItem) : [],
+    activityItems: Array.isArray(view.activityItems) ? view.activityItems.map(compactDisplayItem) : [],
+    completion: compactDisplayItem(view.completion),
+    inspectorIndex
+  };
+}
+
 async function buildProjection(repoKey, runId) {
   const data = await loadCompanionData(repoKey, runId);
   if (!data) return null;
   const packetSummary = packetSummaryFrom(data.snapshot, data.runLedger, data.events);
   const events = data.events || [];
+  const projectionEvents = events.slice(-PROJECTION_EVENT_WINDOW);
   const unknowns = unknownsFor(data);
-  const tuiView = reduceToTuiView(events, data.snapshot, data.activeOperations, {
+  const tuiView = compactTuiViewForProjection(reduceToTuiView(projectionEvents, data.snapshot, data.activeOperations, {
     repoKey,
     runId,
     packetSummary,
     runLedger: data.runLedger,
     sessionBindings: data.sessionBindings,
     unknowns
-  });
+  }));
   return {
     schemaVersion: "companion_projection.v1",
     authority: "projection",
@@ -1310,15 +1636,15 @@ async function buildProjection(repoKey, runId) {
       completionSummary: packetSummary.completionSummary,
       reportSummary: packetSummary.reportSummary
     },
-    timeline: events.slice(-300).map(projectTimelineEvent),
-    liveToolCards: events.filter(event => event.source === "hook_tool_event").slice(-80).map(projectToolCard),
-    agentMessageCards: events.filter(event => event.source === "agent_message" || event.source === "sdk_stream" || event.source === "outer_host").slice(-120).map(projectMessageCard),
-    artifactCards: events.filter(event => event.source === "artifact" || event.evidenceRefs?.length).slice(-120).map(projectArtifactCard),
+    timeline: projectionEvents.slice(-100).map(projectTimelineEvent),
+    liveToolCards: projectionEvents.filter(event => event.source === "hook_tool_event").slice(-30).map(projectToolCard),
+    agentMessageCards: projectionEvents.filter(event => event.source === "agent_message" || event.source === "sdk_stream" || event.source === "outer_host").slice(-40).map(projectMessageCard),
+    artifactCards: projectionEvents.filter(event => event.source === "artifact" || event.evidenceRefs?.length).slice(-40).map(projectArtifactCard),
     completionChecklist: projectCompletionChecklist(events),
-    leaderReportCards: projectLeaderReportCards(events),
-    failureRetryLane: events.filter(event => event.lane === "failures" || ["failed", "blocked", "rejected"].includes(String(event.status || ""))).slice(-80).map(projectTimelineEvent),
-    semanticCoverageMatrix: projectSemanticCoverage(events),
-    rawJsonRefs: events.slice(-300).map(event => ({ eventId: event.eventId, rawRef: event.rawRef, sourceAuthority: event.runtimeEvent?.authority || "observed" })),
+    leaderReportCards: projectLeaderReportCards(events).slice(-20),
+    failureRetryLane: projectionEvents.filter(event => event.lane === "failures" || ["failed", "blocked", "rejected"].includes(String(event.status || ""))).slice(-40).map(projectTimelineEvent),
+    semanticCoverageMatrix: projectSemanticCoverage(events).slice(-80),
+    rawJsonRefs: projectionEvents.slice(-100).map(event => ({ eventId: event.eventId, rawRef: event.rawRef, sourceAuthority: event.runtimeEvent?.authority || "observed" })),
     unknowns,
     tuiView
   };
@@ -1540,11 +1866,18 @@ async function loadBriefSecret() {
   };
 }
 
-function requestJson(url, payload = null, headers = {}, method = "POST") {
+function requestJson(url, payload = null, headers = {}, method = "POST", options = {}) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const body = payload === null || payload === undefined ? "" : JSON.stringify(payload);
     const transport = target.protocol === "http:" ? http : https;
+    const timeoutMs = Math.max(1000, Number(options.timeoutMs || REQUEST_JSON_TIMEOUT_MS));
+    let settled = false;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
     const req = transport.request({
       method,
       hostname: target.hostname,
@@ -1561,21 +1894,46 @@ function requestJson(url, payload = null, headers = {}, method = "POST") {
       res.on("end", () => {
         try {
           const parsed = data ? JSON.parse(data) : {};
-          if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
-          else reject(new Error(`brief api http ${res.statusCode}: ${data.slice(0, 500)}`));
+          if (res.statusCode >= 200 && res.statusCode < 300) settle(resolve, parsed);
+          else settle(reject, new Error(`brief api http ${res.statusCode}: ${data.slice(0, 500)}`));
         } catch (error) {
-          reject(error);
+          settle(reject, error);
         }
       });
     });
-    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`request_json_timeout ${timeoutMs}ms ${target.pathname}`));
+    });
+    req.on("error", error => settle(reject, error));
     if (body) req.write(body);
     req.end();
   });
 }
 
 function httpsJson(url, payload, headers = {}) {
-  return requestJson(url, payload, headers);
+  return requestJson(url, payload, headers, "POST", { timeoutMs: BRIEF_REQUEST_TIMEOUT_MS });
+}
+
+function normalizeLeaderInput(input) {
+  const payload = input && typeof input === "object" ? { ...input } : {};
+  const text = String(payload.text || payload.message || "");
+  const targetPhase = payload.target_phase || payload.targetPhase || inferLeaderTargetPhase(text);
+  if (targetPhase) payload.target_phase = targetPhase;
+  if (!payload.dispatch_intent && !payload.dispatchIntent && targetPhase) {
+    payload.dispatch_intent = "advance_or_continue";
+  }
+  return payload;
+}
+
+function inferLeaderTargetPhase(text) {
+  const normalized = String(text || "").toLowerCase();
+  const compact = normalized.replace(/[\s_-]+/g, "");
+  if (/(?<![a-z0-9])l2(?![a-z0-9])/.test(normalized) || compact.includes("l2advisory")) return "l2_advisory";
+  if (/(?<![a-z0-9])l3(?![a-z0-9])/.test(normalized) || compact.includes("l3bridge")) return "l3_bridge";
+  if (compact.includes("l4anomaly") || /\banomaly\b/.test(normalized)) return "l4_anomaly";
+  if (compact.includes("l4implement") || /\bimplement\b/.test(normalized)) return "l4_implement";
+  if (compact.includes("l4execute") || /\bexecute\b/.test(normalized)) return "l4_execute";
+  return "";
 }
 
 async function submitLeaderInput(input) {
@@ -1588,7 +1946,37 @@ async function submitLeaderInput(input) {
   }
   const endpoint = new URL("/v1/input", OUTER_HOST_URL).toString();
   const headers = OUTER_HOST_TOKEN ? { "x-bridge-outer-host-token": OUTER_HOST_TOKEN } : {};
-  return requestJson(endpoint, { ...input, source: "bridge_companion_gateway" }, headers);
+  return requestJson(endpoint, { ...normalizeLeaderInput(input), source: "bridge_companion_gateway" }, headers, "POST", {
+    timeoutMs: LEADER_INPUT_TIMEOUT_MS
+  });
+}
+
+async function submitLeaderInputAsync(input) {
+  if (!OUTER_HOST_URL) {
+    return {
+      accepted: false,
+      error: "outer_host_not_configured",
+      message: "Set BRIDGE_OUTER_HOST_URL to enable UI-to-host user input forwarding."
+    };
+  }
+  const endpoint = new URL("/v1/input", OUTER_HOST_URL);
+  endpoint.searchParams.set("async", "1");
+  const headers = OUTER_HOST_TOKEN ? { "x-bridge-outer-host-token": OUTER_HOST_TOKEN } : {};
+  return requestJson(endpoint.toString(), { ...normalizeLeaderInput(input), source: "bridge_companion_gateway" }, headers, "POST", {
+    timeoutMs: LEADER_INPUT_ACK_TIMEOUT_MS
+  });
+}
+
+function leaderInputWaitsForResult(input, searchParams) {
+  if (truthy(searchParams?.get("wait")) || String(searchParams?.get("mode") || "").toLowerCase() === "sync") {
+    return true;
+  }
+  const payload = input && typeof input === "object" ? input : {};
+  return truthy(payload.wait_for_result || payload.waitForResult || payload.sync);
+}
+
+function truthy(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 }
 
 async function outerHostStatus() {
@@ -1601,7 +1989,7 @@ async function outerHostStatus() {
   }
   const endpoint = new URL("/v1/status", OUTER_HOST_URL).toString();
   const headers = OUTER_HOST_TOKEN ? { "x-bridge-outer-host-token": OUTER_HOST_TOKEN } : {};
-  return requestJson(endpoint, null, headers, "GET");
+  return requestJson(endpoint, null, headers, "GET", { timeoutMs: REQUEST_JSON_TIMEOUT_MS });
 }
 
 function selectedDebugEnv() {
@@ -2106,7 +2494,7 @@ async function streamRun(req, res, repoKey, runId, query) {
       lastSeq = Math.max(lastSeq, event.seq);
       lastEventId = event.eventId;
       emitted.add(event.eventId);
-      writeSseEvent(res, "companion_event", event, event.eventId);
+      writeSseEvent(res, "companion_event", compactEventForResponse(event), event.eventId);
     }
     sourceCursor = { ...(sourceCursor || {}), ...sourceCursorsFor(next) };
     return next.length;
@@ -2169,7 +2557,7 @@ async function streamSessionObserver(req, res, query) {
       lastSeq = Math.max(lastSeq, event.seq);
       lastEventId = event.eventId;
       emitted.add(event.eventId);
-      writeSseEvent(res, "companion_event", event, event.eventId);
+      writeSseEvent(res, "companion_event", compactEventForResponse(event), event.eventId);
     }
     sourceCursor = { ...(sourceCursor || {}), ...sourceCursorsFor(next) };
     return next.length;
@@ -2317,7 +2705,8 @@ async function handleApi(req, res, url) {
         return;
       }
       if (action === "status") {
-        const status = await buildStatus(repoKey, runId);
+        const includeDetail = ["1", "true", "yes"].includes(String(url.searchParams.get("detail") || "").toLowerCase());
+        const status = await buildStatus(repoKey, runId, { includeDetail });
         sendJson(res, status ? 200 : 404, status || { error: "status unavailable", repoKey, runId });
         return;
       }
@@ -2362,8 +2751,9 @@ async function handleApi(req, res, url) {
     }
     const input = await parseBody(req);
     try {
-      const response = await submitLeaderInput(input);
-      sendJson(res, response?.accepted === false ? 503 : 200, response);
+      const waitForResult = leaderInputWaitsForResult(input, url.searchParams);
+      const response = waitForResult ? await submitLeaderInput(input) : await submitLeaderInputAsync(input);
+      sendJson(res, response?.accepted === false ? 503 : waitForResult ? 200 : 202, response);
     } catch (error) {
       sendJson(res, 502, { error: "outer_host_forward_failed", message: error.message });
     }
@@ -2523,5 +2913,6 @@ export {
   requestHandler,
   runTerminalCommand,
   startServer,
-  submitLeaderInput
+  submitLeaderInput,
+  submitLeaderInputAsync
 };
