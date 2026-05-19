@@ -81,6 +81,25 @@ class OuterSdkHost:
 
     def accept_user_input(self, payload: dict[str, Any]):
         request = self._normalize_input(payload)
+        return self._accept_normalized_user_input(request)
+
+    def queue_user_input(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request = self._normalize_input(payload)
+        self._write_host_event("user_input_queued", request)
+        return request
+
+    def handle_queued_user_input(self, request: dict[str, Any]) -> dict[str, Any]:
+        try:
+            runtime_result = self._accept_normalized_user_input(request)
+            leader_result = self._leader_result_for_request(request, runtime_result)
+            self._write_outer_leader_result(request, runtime_result, leader_result)
+            return leader_result
+        except Exception as exc:
+            leader_result = _outer_leader_exception_result(request, None, exc)
+            self._write_host_event("outer_leader_result", {"request": request, "leader_result": leader_result})
+            return leader_result
+
+    def _accept_normalized_user_input(self, request: dict[str, Any]):
         self._write_host_event("user_input_received", request)
         runtime_result = self._dispatch_input_event(request)
         request["runtime_event_id"] = runtime_result.event_id
@@ -113,6 +132,41 @@ class OuterSdkHost:
         response = self._build_user_input_response(request, runtime_result, leader_result)
         response["async"] = bool(runtime_result.ok)
         return response
+
+    def build_queued_input_ack(self, request: dict[str, Any]) -> dict[str, Any]:
+        leader_result = {
+            "status": "queued",
+            "handled_by": "outer_sdk_host_async",
+            "reports": [],
+            "artifact_refs": [],
+            "evidence": {"input_id": request.get("input_id"), "event_kind": request.get("event_kind")},
+            "error_or_null": None,
+            "cleanup_required": False,
+        }
+        return {
+            "schema_version": "outer_sdk_host_response.v1",
+            "accepted": True,
+            "async": True,
+            "host": {
+                "mode": "outer_sdk_host",
+                "adapter": self.adapter.name,
+                "run_id": request["run_id"],
+                "default_run_id": self.default_run_id,
+                "host_instance_id": self.host_instance_id,
+                "repo_key": request["repo_key"],
+                "main_session_id": request["main_session_id"],
+                "input_kind": request["input_kind"],
+            },
+            "runtime": {
+                "ok": None,
+                "queued": True,
+                "event_id": None,
+                "event_kind": request["event_kind"],
+                "input_id": request["input_id"],
+                "snapshot_ref": None,
+            },
+            "leader_result": leader_result,
+        }
 
     def _leader_result_for_request(self, request: dict[str, Any], runtime_result: Any) -> dict[str, Any]:
         if not runtime_result.ok:
@@ -628,8 +682,8 @@ def _outer_leader_exception_result(request: dict[str, Any], runtime_result: Any,
             "repo_key": request.get("repo_key"),
             "run_id": request.get("run_id"),
             "input_id": request.get("input_id"),
-            "runtime_event_id": runtime_result.event_id,
-            "event_kind": runtime_result.event_kind,
+            "runtime_event_id": getattr(runtime_result, "event_id", None),
+            "event_kind": getattr(runtime_result, "event_kind", request.get("event_kind")),
         },
         "error_or_null": {
             "type": type(exc).__name__,
