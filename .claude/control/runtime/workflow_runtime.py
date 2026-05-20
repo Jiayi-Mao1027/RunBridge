@@ -2750,9 +2750,6 @@ def _validate_packet_policy_fields(packet: dict[str, Any], snapshot: dict[str, A
             manifest_fields = completion.get("manifest_required_fields")
             if not isinstance(manifest_fields, list) or not {"run_id", "bridge_window_id", "task_id", "command", "cwd", "terminal_status"}.issubset({str(item) for item in manifest_fields}):
                 reasons.append("bridge_packet_execute_manifest_schema_missing")
-            execution_policy = completion.get("execution_policy")
-            if not isinstance(execution_policy, dict) or not execution_policy:
-                reasons.append("bridge_packet_execute_policy_missing")
     if packet.get("approval_requirements") not in (None, []):
         reasons.append("bridge_packet_approval_requirements_not_runtime_owned")
     if packet.get("expires_at") is not None:

@@ -38,7 +38,6 @@
         "formal_log_manifest_required_fields": {"type": "array", "items": {"type": "string"}}
       }
     },
-    "execution_policy": {"type": "object"},
     "base_report_contract": {"type": "object"},
     "base_completion_contract": {"type": "object"},
     "team_planner": {
@@ -65,7 +64,6 @@
               "writable_scopes": {"type": "array", "items": {"type": "string"}}
             }
           },
-          "active_surface_policy": {"type": "array", "items": {"type": "string"}},
           "timeout_policy": {"type": "object"},
           "teammates": {
             "type": "array",
@@ -80,8 +78,6 @@
               }
             }
           },
-          "assignment_instructions": {"type": "array", "items": {"type": "string"}},
-          "teammate_assignment_instructions": {"type": "object"},
           "completion_contract_additions": {"type": "object"},
           "report_contract_additions": {"type": "object"}
         }

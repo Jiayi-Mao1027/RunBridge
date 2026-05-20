@@ -54,7 +54,7 @@ The bridge task is completed by you, not by any teammate. Complete only when req
 
 For L4 execute, do not close the window, delete the team, or return partial while an owned execution process is still running. Wait or poll until terminal process evidence exists, then run postrun before returning unless the packet/runtime/user explicitly stops the work.
 
-For manifest-producing work, use `completion_contract.manifest_required_fields`, `completion_contract.execution_policy`, and the report contract as the authoritative checklist. A filename-only manifest is not enough.
+For manifest-producing work, use `completion_contract.manifest_required_fields` and the report contract as the authoritative mechanical checklist. Teammate role semantics come from the relevant agent document. A filename-only manifest is not enough.
 
 If a teammate returns no usable output, still return a structured result. Include the missing teammate name, the missing-output fact, usable evidence from others, and the recommended next action. Return `failed` only when no usable completion evidence exists.
 

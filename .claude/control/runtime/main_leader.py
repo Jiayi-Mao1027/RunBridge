@@ -40,22 +40,7 @@ DEFAULT_FORBIDDEN_ACTIONS = [
     "implementation content edits during L3 artifact curation unless the file is human-facing documentation already in L3 doc scope",
     "physical deletion of user/project artifacts unless the item is clearly regenerable trash, an empty duplicate, or explicitly approved",
 ]
-PHASE_ACTIVE_SURFACE_POLICIES = {
-    "l3_bridge": [
-        "Before curation, identify the current step, the prior completed work, and the artifacts that are actually needed for the next downstream phase.",
-        "Keep the active code, log, checkpoint, data, document, and script surfaces minimum viable: anything not needed for current understanding or next execution should leave the active surface.",
-        "Prefer archive/move-out over retention-with-labeling for material that is clearly unused. Archive is the default for ambiguous or stale project artifacts; active retention requires a concrete next-phase reason.",
-        "Logs are cleanup targets but may be reusable evidence or expensive generated output. Retain logs with a concrete current-step, audit, comparison, or reuse reason; archive only logs that are clearly obsolete, duplicate, superseded, or unrelated.",
-        "Physical deletion is exceptional and must be limited to clearly regenerable trash, empty duplicates, or explicitly approved removals.",
-        "L3 may archive or organize files, but must not implement code behavior changes; code/config content changes belong to L4 implement.",
-    ],
-    "l4_implement": [
-        "Preserve the minimum viable repository surface while implementing: edit existing files when practical, use temporary scripts for one-off work, and create long-lived files only when there is a durable need.",
-        "Do not leave exploratory logs, checkpoints, data extracts, scratch code, or one-off scripts active unless they are required for the next phase.",
-        "Archive or remove from active reach any implementation byproducts that would confuse rungater, executor, or later readers.",
-        "Report every new long-lived file with its reason to remain active.",
-    ],
-}
+PHASE_ACTIVE_SURFACE_POLICIES: dict[str, list[str]] = {}
 PHASE_OWNERSHIP_DEFAULTS = {
     "l2_advisory": {"readable_scopes": ["."], "writable_scopes": []},
     "l3_bridge": {"readable_scopes": ["."], "writable_scopes": ["."]},
@@ -99,8 +84,8 @@ PHASE_TEAM_DEFAULTS = {
         ("rungater", "implementation_gate", READ_CHECK_TOOLS, "judge post-implementation readiness and recommend proceed, repair, reroute, or stop"),
     ],
     "l4_execute": [
-        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow under the phase execution_policy, adapt runtime parameters only within packet and policy bounds, and record exact execution evidence"),
-        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, environment evidence, resource-policy evidence, terminal status, outcome classification, and recommend anomaly routing when needed"),
+        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow and record exact execution evidence"),
+        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, terminal status, outcome classification, and recommend anomaly routing when needed"),
     ],
     "l4_anomaly": [
         ("anomaly-analyst-a", "anomaly_analysis", ANOMALY_TOOLS, "perform a complete independent anomaly diagnosis before peer review: inspect local evidence, answer-level/result samples when relevant, causal alternatives, missing evidence, and discriminative next checks"),
@@ -340,14 +325,13 @@ def _default_ownership_boundary(target_phase: str, phase_contracts: dict[str, An
     config = _phase_config(phase_contracts, target_phase)
     configured = config.get("ownership_boundary") if isinstance(config, dict) else None
     scopes = configured if isinstance(configured, dict) else PHASE_OWNERSHIP_DEFAULTS.get(target_phase, {"readable_scopes": ["."], "writable_scopes": []})
-    active_surface = config.get("active_surface_policy") if isinstance(config, dict) else None
     forbidden = _contracts_list(phase_contracts, "default_forbidden_actions") or list(DEFAULT_FORBIDDEN_ACTIONS)
     return {
         "readable_scopes": list(scopes.get("readable_scopes", ["."])),
         "writable_scopes": list(scopes.get("writable_scopes", [])),
         "process_ownership_rules": ["only manage processes launched inside this bridge window"],
         "forbidden_actions": forbidden,
-        "active_surface_policy": list(active_surface if isinstance(active_surface, list) else PHASE_ACTIVE_SURFACE_POLICIES.get(target_phase, [])),
+        "active_surface_policy": list(PHASE_ACTIVE_SURFACE_POLICIES.get(target_phase, [])),
     }
 
 
@@ -462,7 +446,6 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
                 f"Readable scopes: {_json_list(ownership.get('readable_scopes'))}",
                 f"Writable scopes: {_json_list(ownership.get('writable_scopes'))}",
                 f"Forbidden actions: {_json_list(ownership.get('forbidden_actions'))}",
-                f"Active surface policy: {_json_list(ownership.get('active_surface_policy'))}",
                 f"Completion contract: {_json_dict(task_spec.get('completion_contract'))}",
                 f"Report contract: {_json_dict(task_spec.get('report_contract'))}",
                 *_phase_assignment_instructions(str(task_spec.get("target_phase") or ""), name, phase_contracts),
@@ -488,113 +471,15 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
 
 
 def _phase_assignment_instructions(target_phase: str, teammate_name: str, phase_contracts: dict[str, Any] | None = None) -> list[str]:
-    config = _phase_config(phase_contracts, target_phase)
-    if isinstance(config, dict) and config:
-        result = []
-        base = config.get("assignment_instructions")
-        if isinstance(base, list):
-            result.extend(str(item) for item in base if str(item))
-        teammate_rules = config.get("teammate_assignment_instructions")
-        if isinstance(teammate_rules, dict):
-            specific = teammate_rules.get(teammate_name)
-            if isinstance(specific, list):
-                result.extend(str(item) for item in specific if str(item))
-        if target_phase == "l4_execute":
-            manifest_fields = (
-                phase_contracts.get("manifest_contracts", {}).get("formal_log_manifest_required_fields", [])
-                if isinstance(phase_contracts, dict) and isinstance(phase_contracts.get("manifest_contracts"), dict)
-                else []
-            )
-            execution_policy = phase_contracts.get("execution_policy", {}) if isinstance(phase_contracts, dict) else {}
-            if manifest_fields:
-                result.append(f"Formal log manifest required fields: {_json_list(manifest_fields)}")
-            if isinstance(execution_policy, dict) and execution_policy:
-                result.append(f"Execution policy: {_json_dict(execution_policy)}")
-        if result:
-            return result
-    if target_phase == "l2_advisory":
-        return [
-            "L2 three-seat review rule: treat chiefmate-a, chiefmate-b, and chiefmate-c as independent peers. Inspect peer conclusions when available, but do not accept them passively; challenge unsupported assumptions, missing alternatives, and weak evidence.",
-            "L2 factual confidence loop: ask, 'Do I have factual 100% confidence in this strategy?' If not, find every plausible flaw, missing assumption, brittle dependency, or evidence gap; propose appropriate repairs; then re-check the repaired strategy. Repeat until no material flaw remains or the remaining uncertainty is explicitly bounded with evidence.",
-            "L2 research rule: when a claim depends on current facts, external tool/library behavior, established methodology, or empirical support, use WebSearch/WebFetch where available. Prefer primary docs and directly relevant sources over secondary summaries, and distinguish sourced facts from inference.",
-            "L2 convergence rule: agreement across peers is not enough. State what would falsify the strategy, what peer claim you would reject or downgrade, and what evidence would change your recommendation.",
-            "L2 pseudocode rule: if your final advisory report proposes any new major technical plan or substantial architecture/algorithm change, include a pseudocode flow that shows the proposed control/data path. If no such new plan is proposed, state `pseudocode: not_applicable` with the reason.",
-        ]
-    if target_phase == "l3_bridge":
-        if teammate_name == "curator":
-            tool_rule = (
-                "L3 curator Bash curation rule: Bash is allowed only for non-executing filesystem curation inside packet writable scopes, such as PowerShell New-Item/Move-Item/Remove-Item for archive, move, or clearly disposable delete actions. "
-                "Do not run project code, tests, package managers, training, evaluation, network calls, or arbitrary shell exploration. "
-                "Prefer native PowerShell cmdlets with -LiteralPath; before recursive move/delete, resolve absolute paths and verify each source/target remains inside writable scope. "
-                "Archive by default; physical deletion requires clearly regenerable trash, empty duplicate material, or explicit approval, and every move/delete must be reported with source, destination or deletion basis, and reason."
-            )
-        else:
-            tool_rule = "L3 no-run-tools rule: do not run shell commands or other execution tools in L3. Use Read/Grep/Glob/LS for inspection and Edit/Write only for explicitly permitted documentation updates."
-        return [
-            tool_rule,
-            "L3 semantic identity rule: actively identify which model/method/checkpoint/dataset/prompt/config the user means. For comparisons such as DPO vs OPD, report the concrete ckpts or say exactly what is ambiguous.",
-            "L3 current-intent bridge rule: inspect current_user_intent_context before repo audit or curation. Confirm the user's active direction if evidence supports it, refine it if repo/docs make a narrower interpretation safer, or explicitly supersede it when L3 finds contradiction. The report must preserve the resulting intent so the next phase can route to L2, L3, L4 implement, L4 execute, or L4 anomaly without guessing.",
-            "L3 inheritance rule: when the user does not request a dataset, prompt, split, metric, or config change, inspect the active repo/docs enough to identify the current basis and explicitly recommend inheriting it.",
-            "L3 packet handoff rule: report the resolved semantic basis in a form L4 implement/execute can copy directly: model/method identity, ckpt paths/IDs, dataset/split, prompt/template, config files, and any unresolved field.",
-            "L3 log curation rule: keep the log surface minimum viable, but do not archive logs merely because they are old or bulky. Retain logs that may be reused for comparison, audit, avoiding expensive regeneration, or downstream interpretation; archive only logs that are clearly unused, duplicate, superseded, or unrelated, and report the reason.",
-            "L3 minimum-active-surface rule: first identify what this step is trying to do, what prior work is already done, and what files/artifacts are genuinely required for the next phase.",
-            "Archive-first curation rule: keep the active code, log, checkpoint, data, document, and script surfaces minimum viable. Archive or move out stale, duplicate, ambiguous, or non-current material instead of leaving it active with only a label.",
-            "Active-retention burden: every retained log/dataset/checkpoint/output/scratch script/document/code copy needs a concrete current-step or next-phase reason. If the reason is weak, archive it.",
-            "Deletion boundary: prefer archive over physical deletion. Delete only clearly regenerable trash, empty duplicates, or items explicitly approved for deletion; otherwise archive and report the archive path/reason.",
-            "L3 must not implement behavior changes in source/config code. If code or scripts are not active but may be historically useful, archive them; if code behavior must change, report it for L4 implement.",
-            "L3 documentation rule: explicitly decide whether CLAUDE.md, README.md, docs/, or other Markdown files need updates for this task.",
-            "If the task touches documentation, Markdown, repo-facing instructions, workflow rules, or agent behavior, make the smallest correct documentation update within writable scope; prioritize CLAUDE.md when it is relevant.",
-            "If no documentation update is made, report the inspected documentation files and the concrete reason no update was needed.",
-        ]
-    if target_phase == "l4_implement":
-        base = [
-            "Semantic basis rule: implement exactly against the resolved semantic identity in task_spec.semantic_resolution_contract and preserved context; do not silently swap checkpoint, dataset, prompt, metric, or objective identity.",
-            "Minimum-viable repository rule: keep the active project surface as small as practical while implementing.",
-            "Prefer modifying existing code/config over creating new long-lived files. For one-off analysis or migration, use temporary scripts and cleanly archive/remove them from the active surface before handoff.",
-            "New long-lived code, script, data, checkpoint, or document files need a concrete durable reason and must be reported explicitly.",
-            "Do not leave exploratory logs, debug outputs, scratch checkpoints, duplicate code copies, or stale data active for rungater to disambiguate.",
-        ]
-        if teammate_name == "rungater":
-            return [
-                *base,
-                "Gate the repository surface as part of readiness: flag active ambiguous logs, checkpoints, data, scripts, documents, or code copies that should have been archived before execution.",
-            ]
-        return base
-    if target_phase == "l4_execute" and teammate_name == "executor":
-        return [
-            "Semantic basis rule: execute exactly the resolved model/method, checkpoint, dataset, prompt/template, config, and metric basis. If any identity field is unresolved, stop and report blocked rather than guessing.",
-            "Execution environment rule: follow the phase execution_policy exactly when it names an environment, command wrapper, forbidden environment, resource target, or exception rule; record environment evidence either way.",
-            "Long-task ETA rule: before launching any long-running command, estimate expected wall-clock runtime as a range, state the basis for the estimate, and include that estimate in the execution report.",
-            "Smoke-shape rule: before formal execution, use bounded smoke evidence to choose formal parameters such as per-device batch size, microbatch size, gradient accumulation, sequence length, precision, and effective batch size. Record why formal settings differ from smoke settings.",
-            "Parameter/resource adaptation rule: do not copy user- or upstream-provided runtime parameters mechanically when actual resources make them unsuitable. Treat those values as intent and constraints; adapt only inside the frozen semantic boundary and phase execution_policy, preserving semantic equivalence when possible, and record requested value, observed capacity, adjusted value, and reason.",
-            "Multi-stage resource rule: if one execute task or session contains multiple formal stages, each formal stage must independently satisfy the phase execution_policy. Do not let an earlier stage's successful settings or low-resource fallback silently carry into a later stage; rerun or justify stage-specific evidence and record the target result per stage.",
-            "Log manifest rule: every generated formal log folder must contain a manifest file inside that folder, analogous to checkpoint manifests. Do not rely on folder/file names alone. The manifest must record run ID, bridge window ID, task ID, stage name, command, cwd, environment evidence, resolved input/config/output paths, parameters and adaptation basis required by execution_policy, process refs, log files, expected outputs, terminal status, timestamps, and reuse/dependency notes.",
-            "Natural-language manifest semantics rule: the manifest must include human-meaningful semantics in addition to concrete paths and commands: model or model family/name, checkpoint semantic label if different from the path, dataset name/split/source, dataset row/example count when known, method/objective such as SFT/DPO/OPD, early-stop behavior such as OPD early stop when relevant, metric/objective basis, prompt/template meaning, and inherited defaults. If a field is unknown or not applicable, write unknown/not_applicable with the reason rather than omitting it.",
-            "If runtime cannot be estimated, state that explicitly with the missing information and still record command, start time, owned process refs, logs, and expected outputs.",
-            "L4 execute terminality rule: run formal long jobs in a way the bridge can wait on or poll until terminal completion. Do not return a final or partial bridge report while an owned process is still running; emit progress evidence and keep waiting.",
-            "Resource target rule: apply any formal resource target from execution_policy. If no such policy is present, record observed resources without inventing a GPU-specific threshold.",
-            "Prelaunch resource shortfall rule: apply the phase execution_policy for shortfalls. If no policy permits adaptation, classify blocked or ask for direction rather than changing method, data, objective, or resource assumptions silently.",
-        ]
-    if target_phase == "l4_execute" and teammate_name == "postrun":
-        return [
-            "Semantic audit rule: verify the actual run used the resolved model/method, checkpoint, dataset, prompt/template, config, and metric basis; classify mismatches as execution deviations or defects.",
-            "Log manifest audit rule: verify each generated formal log folder has an internal manifest and that the manifest matches the command, environment, semantic basis, formal parameters/effective batch size, process refs, log files, artifact refs, and terminal status. Missing or stale manifests are execution deviations.",
-            "Audit ETA rule: compare actual runtime against the executor's estimate when available, and flag material deviation as execution evidence rather than treating it as chat context.",
-            "Postrun must run after the formal execution process has reached a terminal state or produced terminal failure evidence; do not audit a still-running process as complete.",
-            "Environment audit rule: verify formal execution followed the phase execution_policy environment requirements. Missing or contradictory environment evidence is an execution deviation.",
-            "Resource audit rule: verify observed resource usage against any phase execution_policy target. If no resource target is configured, report observed values without applying a project-specific threshold.",
-            "Prelaunch shortfall audit rule: verify the executor followed the phase execution_policy for resource shortfalls and did not stop or adapt for reasons outside the packet.",
-            "Multi-stage resource audit rule: when the task contains multiple formal stages, audit resource target satisfaction separately for each stage. A good earlier-stage record does not prove a later stage satisfied the target.",
-        ]
-    if target_phase == "l4_anomaly":
-        return [
-            "L4 anomaly three-seat review rule: treat anomaly-analyst-a, anomaly-analyst-b, and anomaly-analyst-c as independent peers. Inspect peer causal claims when available, but actively question them rather than merging them into consensus.",
-            "L4 anomaly no-preassigned-lane rule: do not give different analysts different causal lanes, favored hypotheses, or role-biased emphasis. Each analyst must first perform a complete independent diagnosis from the full packet context and available evidence; peer critique comes after that independent pass.",
-            "L4 anomaly factual cause-confidence loop: ask, 'Do I have factual 100% confidence in this cause or explanation?' If not, identify every plausible alternative cause, contradiction, missing artifact, log gap, data issue, implementation issue, execution issue, or environment issue; propose the smallest discriminative check; then re-rank causes. Repeat until material alternatives are excluded or residual uncertainty is explicitly bounded with evidence.",
-            "L4 anomaly answer-level inspection rule: when analyzing a result, metric change, or proposed cause, inspect the original answers, outputs, predictions, traces, or result samples behind the metric when available. Do not diagnose from metrics alone; derive how concrete answer-level phenomena could produce the observed result, and report newly observed patterns or missing evidence.",
-            "L4 anomaly research rule: when external methodology, known failure modes, library/runtime behavior, hardware behavior, or empirical claims could materially affect diagnosis, use WebSearch/WebFetch where available. Prefer primary docs, issue trackers, and direct evidence over summaries.",
-            "L4 anomaly convergence rule: peer agreement does not prove causality. State what would falsify the leading cause, what peer claim you would reject or downgrade, and what evidence would change your ranking.",
-        ]
+    if target_phase != "l4_execute":
+        return []
+    manifest_fields = (
+        phase_contracts.get("manifest_contracts", {}).get("formal_log_manifest_required_fields", [])
+        if isinstance(phase_contracts, dict) and isinstance(phase_contracts.get("manifest_contracts"), dict)
+        else []
+    )
+    if manifest_fields:
+        return [f"Formal log manifest required fields: {_json_list(manifest_fields)}"]
     return []
 
 
@@ -682,9 +567,6 @@ def _default_completion_contract(target_phase: str | None = None, phase_contract
         manifest_contracts = phase_contracts.get("manifest_contracts")
         if isinstance(manifest_contracts, dict) and isinstance(manifest_contracts.get("formal_log_manifest_required_fields"), list):
             contract["manifest_required_fields"] = [str(item) for item in manifest_contracts["formal_log_manifest_required_fields"] if str(item)]
-        execution_policy = phase_contracts.get("execution_policy")
-        if isinstance(execution_policy, dict) and execution_policy:
-            contract["execution_policy"] = deepcopy(execution_policy)
     return contract
 
 
@@ -734,9 +616,6 @@ def _default_report_contract(target_phase: str | None = None, phase_contracts: d
             manifest_fields = [str(item) for item in manifest_contracts["formal_log_manifest_required_fields"] if str(item)]
         if manifest_fields:
             contract.setdefault("manifest_required_fields", manifest_fields)
-        execution_policy = phase_contracts.get("execution_policy")
-        if isinstance(execution_policy, dict) and execution_policy:
-            contract.setdefault("execution_policy", deepcopy(execution_policy))
     return contract
 
 

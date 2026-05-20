@@ -328,7 +328,7 @@ def _manifest_required_fields_checklist(packet_payload: dict | None = None) -> d
         "run_id": "run_demo",
         "bridge_window_id": bridge_window_id or "present",
         "task_id": "task_demo",
-        "command": "conda run -n mjy python smoke.py",
+        "command": "conda run -n formal_env python smoke.py",
         "cwd": ".",
         "batchbasis": "smoke-derived batch basis",
         "gpu_id": "0",
@@ -1022,9 +1022,9 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
                     "run_id": "run_demo",
                     "bridge_window_id": manifest_packet["binding"]["bridge_window_id"],
                     "task_id": "task_demo",
-                    "command": "conda run -n mjy torchrun train.py --ckpt ckpt/demo --batch_size 8",
+                    "command": "conda run -n formal_env torchrun train.py --ckpt ckpt/demo --batch_size 4",
                     "cwd": ".",
-                    "batchbasis": "smoke-derived final batch 8",
+                    "batchbasis": "smoke-derived final batch 4",
                     "gpu_id": "0",
                     "memory observed": "smoke memory observed 12GB; warmup memory observed 72GB",
                     "model": "demo model",
@@ -1159,8 +1159,7 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     l3_boundary = hardened_l3["team_spec"]["ownership_boundary"]
     if set(l3_boundary.get("writable_scopes", [])) != {"."}:
         raise AssertionError(json.dumps(l3_boundary, ensure_ascii=False, indent=2))
-    l3_surface_policy = "\n".join(str(item) for item in l3_boundary.get("active_surface_policy", []))
-    if "minimum viable" not in l3_surface_policy or "Archive or move" not in l3_surface_policy:
+    if l3_boundary.get("active_surface_policy"):
         raise AssertionError(json.dumps(l3_boundary, ensure_ascii=False, indent=2))
     l3_assignments = "\n".join(
         str(item.get("assignment") or "")
@@ -1168,19 +1167,13 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         if isinstance(item, dict)
     )
     required_l3_assignment_markers = [
-        "CLAUDE.md",
-        "L3 curator Bash curation rule",
-        "Active surface policy",
-        "active code, log, checkpoint, data, document, and script surfaces minimum viable",
         "Instruction coverage checklist",
         "Semantic resolution contract",
         "Current user intent context",
-        "L3 current-intent bridge rule",
         "confirmed, refined, superseded, blocked, or escalated",
         "checkpoint",
         "dataset",
         "prompt",
-        "inherit the current active dataset/prompt/config basis",
         "do not mark the task complete until every checklist item is completed",
         "extra context must survive normalization",
     ]
@@ -1295,15 +1288,14 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         raise AssertionError(json.dumps(hardened_implement, ensure_ascii=False, indent=2))
     if not hardened_team["ownership_boundary"].get("writable_scopes"):
         raise AssertionError(json.dumps(hardened_team["ownership_boundary"], ensure_ascii=False, indent=2))
-    implement_surface_policy = "\n".join(str(item) for item in hardened_team["ownership_boundary"].get("active_surface_policy", []))
-    if "minimum viable repository surface" not in implement_surface_policy:
+    if hardened_team["ownership_boundary"].get("active_surface_policy"):
         raise AssertionError(json.dumps(hardened_team["ownership_boundary"], ensure_ascii=False, indent=2))
     implement_assignments = "\n".join(
         str(item.get("assignment") or "")
         for item in hardened_implement.get("task_team_mapping", {}).get("teammate_assignments", [])
         if isinstance(item, dict)
     )
-    if "Minimum-viable repository rule" not in implement_assignments or "Gate the repository surface" not in implement_assignments or "do not silently swap checkpoint, dataset, prompt" not in implement_assignments:
+    if "Instruction coverage checklist" not in implement_assignments or "Semantic resolution contract" not in implement_assignments:
         raise AssertionError(json.dumps(hardened_implement.get("task_team_mapping"), ensure_ascii=False, indent=2))
     hardened_bw = hardened_implement["binding"]["bridge_window_id"]
     hardened_sub = hardened_implement["binding"]["sub_session_id"]
@@ -1448,15 +1440,6 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         if isinstance(item, dict)
     )
     required_execute_assignment_markers = [
-        "estimated wall-clock runtime range",
-        "do not return final or partial while an owned process is still running",
-        "bounded smoke evidence",
-        "Each formal stage must independently satisfy batch/memory adaptation",
-        "Long-run launch rule",
-        "Minor OOM adaptation rule",
-        "Prelaunch memory shortfall rule",
-        "OOM attempt log rule",
-        "effective batch size",
         "Formal log manifest required fields",
         "batchbasis",
         "warmup_memory_observed",
@@ -1465,23 +1448,15 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     if any(marker not in execute_assignments for marker in required_execute_assignment_markers):
         raise AssertionError(json.dumps(execute_packet.get("task_team_mapping"), ensure_ascii=False, indent=2))
     execute_assignments = json.dumps(execute_packet["task_team_mapping"]["teammate_assignments"], ensure_ascii=False)
-    if (
-        "conda env mjy" not in execute_assignments
-        or "forbidden_formal_environments" not in execute_assignments
-        or "typical_80gb_gpu_min_observed_gb" not in execute_assignments
-        or "other_gpu_min_observed_fraction" not in execute_assignments
-        or "multi_stage_memory_evidence_required" not in execute_assignments
-        or "expected long runtime is not by itself a user-decision blocker" not in execute_assignments
-        or "oom_adaptation_policy" not in execute_assignments
-        or "minor_oom_is_execute_retryable" not in execute_assignments
-        or "same formal stage OOMs after the configured execute-owned retry ladder" not in execute_assignments
-        or "M1 OOM ladder rule" not in execute_assignments
-        or "Environment and GPU audit rule" not in execute_assignments
-        or "Prelaunch memory shortfall audit rule" not in execute_assignments
-        or "OOM adaptation audit rule" not in execute_assignments
-        or "Semantic audit rule" not in execute_assignments
-        or "Log manifest audit rule" not in execute_assignments
-    ):
+    forbidden_execute_assignment_markers = [
+        "execution_policy",
+        "formal_environment_policy",
+        "formal_resource_policy",
+        "oom_adaptation_policy",
+        "OOM retry ladder rule",
+        "M1 OOM ladder rule",
+    ]
+    if any(marker in execute_assignments for marker in forbidden_execute_assignment_markers):
         raise AssertionError(execute_assignments)
 
     bad_implement = packet("bw_bad_implement", "sub_bad_implement")
@@ -2375,7 +2350,7 @@ def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
         run_tool_events = _read_jsonl(runs_root / "run_demo" / "tool_events.jsonl")
         if not any(item.get("tool_name") == "Read" and item.get("teammate_id") == "executor" for item in run_tool_events):
             raise AssertionError(json.dumps(run_tool_events[-5:], ensure_ascii=False, indent=2))
-        formal_command = "conda run -n mjy torchrun train.py --per_device_train_batch_size 1"
+        formal_command = "conda run -n formal_env torchrun train.py --per_device_train_batch_size 1"
         formal_reminders = module.bash_execution_soft_reminders(
             "Bash",
             {"command": formal_command, "cwd": "."},
@@ -2387,7 +2362,7 @@ def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
             raise AssertionError(json.dumps(formal_reminders, ensure_ascii=False, indent=2))
         smoke_reminders = module.bash_execution_soft_reminders(
             "Bash",
-            {"command": "conda run -n mjy python train.py --smoke --max_steps=1", "cwd": "."},
+            {"command": "conda run -n formal_env python train.py --smoke --max_steps=1", "cwd": "."},
             binding,
             after=False,
         )
@@ -4330,7 +4305,7 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
             "task_id": "task",
             "command": "python train.py --formal",
             "cwd": ".",
-            "environment_evidence": {"conda_env": "mjy"},
+            "environment_evidence": {"conda_env": "formal_env"},
             "process_refs": [{"pid": 123}],
             "terminal_status": "completed",
             "batchbasis": {"per_device_train_batch_size": 1},
@@ -4742,11 +4717,11 @@ def run_event_artifact_completion_tests(control_root: Path, runs_root: Path) -> 
             "run_id": "run_demo",
             "bridge_window_id": "bw_event_artifact",
             "task_id": "task_event_artifact",
-            "command": "conda run -n mjy python train.py",
+            "command": "conda run -n formal_env python train.py",
             "cwd": ".",
-            "environment_evidence": {"conda_env": "mjy"},
+            "environment_evidence": {"conda_env": "formal_env"},
             "process_refs": [{"pid": 123, "status": "completed"}],
-            "batchbasis": "smoke selected batch 8",
+            "batchbasis": "smoke selected batch 4",
             "gpu_id": "0",
             "memory": "warmup memory observed 72GB",
             "model": "demo model",
