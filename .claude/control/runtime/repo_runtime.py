@@ -145,9 +145,9 @@ def list_runs(control_root: str | Path, repo_key: str) -> list[dict[str, Any]]:
             {
                 "repo_key": repo_key,
                 "run_id": run_dir.name,
-                "current_phase": source.get("current_phase"),
-                "run_status": source.get("run_status"),
-                "updated_at": source.get("updated_at"),
+                "current_phase": source.get("current_phase") or ledger.get("current_phase"),
+                "run_status": source.get("run_status") or ledger.get("run_status"),
+                "updated_at": source.get("updated_at") or ledger.get("updated_at"),
                 "snapshot_path": str(run_dir / "runtime_snapshot.json"),
             }
         )

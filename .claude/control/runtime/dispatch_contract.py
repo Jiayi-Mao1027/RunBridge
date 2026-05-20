@@ -89,9 +89,10 @@ def build_dispatch_contract(packet: dict[str, Any]) -> dict[str, Any]:
         "task_subject": task_spec.get("task_subject"),
         "allowed_agent_subagent_types": allowed_names,
         "agent_call_policy": {
-            "model_field": "must_be_absent",
+            "model_field": "must_be_absent_except_wrapper_schema_carrier",
             "model_source": ".claude/agents/<subagent_type>.md frontmatter",
             "allowed_input_keys": list(AGENT_INPUT_KEYS),
+            "model_schema_carriers_tolerated": sorted(AGENT_TOOL_MODEL_SCHEMA_CARRIERS),
             "wrapper_auto_keys_tolerated": sorted(AGENT_WRAPPER_AUTO_KEYS),
         },
         "teammates": teammates,
@@ -159,13 +160,9 @@ def validate_agent_call_against_dispatch_contract(
             reasons.append("agent_dispatch_model_override_forbidden")
 
     for key in sorted(allowed_keys):
-        if key == "prompt":
-            if _has_text(expected_dispatch.get("prompt")) and not _has_text(tool_input.get("prompt")):
-                reasons.append("agent_dispatch_prompt_empty")
-            continue
-        if key == "description":
-            if _has_text(expected_dispatch.get("description")) and not _has_text(tool_input.get("description")):
-                reasons.append("agent_dispatch_description_empty")
+        if key in {"prompt", "description"}:
+            if not _same_dispatch_text(tool_input.get(key), expected_dispatch.get(key)):
+                reasons.append(f"agent_dispatch_{key}_mismatch")
             continue
         if key == "subagent_type":
             if subagent_type != expected_dispatch.get(key):
@@ -223,6 +220,16 @@ def _canonical_subagent_type(value: str, teammates: dict[str, Any]) -> str:
 
 def _has_text(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _same_dispatch_text(actual: Any, expected: Any) -> bool:
+    return _normalize_dispatch_text(actual) == _normalize_dispatch_text(expected)
+
+
+def _normalize_dispatch_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
 
 
 def _generic_model_alias(value: Any) -> str | None:

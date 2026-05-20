@@ -12,7 +12,10 @@
         "phase_advanced",
         "route_rerouted",
         "retry_attempt_scheduled",
-        "enter_anomaly"
+        "enter_anomaly",
+        "run_completed",
+        "run_failed",
+        "run_aborted"
       ],
       "must_record_transition": true
     },

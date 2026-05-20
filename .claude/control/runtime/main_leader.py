@@ -99,8 +99,8 @@ PHASE_TEAM_DEFAULTS = {
         ("rungater", "implementation_gate", READ_CHECK_TOOLS, "judge post-implementation readiness and recommend proceed, repair, reroute, or stop"),
     ],
     "l4_execute": [
-        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow through conda env mjy, adapt batch size and memory-related settings to actual GPU capacity, target formal GPU runs above 70GB on typical 80GB GPUs or above 90% of selected GPU memory otherwise when applicable, but do not treat prelaunch free-memory shortfall as a hard stop when a smaller approved attempt can run; record exact execution evidence"),
-        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, conda env use, GPU memory utilization, lower-batch memory-shortfall handling, outcome classification, and recommend anomaly routing when needed"),
+        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow under the phase execution_policy, adapt runtime parameters only within packet and policy bounds, and record exact execution evidence"),
+        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, environment evidence, resource-policy evidence, terminal status, outcome classification, and recommend anomaly routing when needed"),
     ],
     "l4_anomaly": [
         ("anomaly-analyst-a", "anomaly_analysis", ANOMALY_TOOLS, "perform a complete independent anomaly diagnosis before peer review: inspect local evidence, answer-level/result samples when relevant, causal alternatives, missing evidence, and discriminative next checks"),
@@ -116,12 +116,17 @@ def read_runtime_snapshot(
     *,
     repo_key: str | None = None,
     runtime_runs_root: str | Path | None = None,
+    allow_synthetic: bool = False,
 ) -> dict[str, Any]:
     if repo_key and runtime_runs_root is None:
         runtime_runs_root = get_repo_runtime_root(control_root, repo_key)
     paths = ControlPaths.from_root(control_root, runtime_runs_root)
     run_ledger = load_json_file(paths.run_ledger_path(run_id), default={}) or {}
+    synthetic = False
     if not run_ledger:
+        if not allow_synthetic:
+            raise FileNotFoundError(f"runtime ledger not found for run_id={run_id}")
+        synthetic = True
         now = _now_iso()
         run_ledger = {
             "schema_version": SCHEMA_VERSION,
@@ -135,7 +140,11 @@ def read_runtime_snapshot(
             "updated_at": now,
             "closed_at": None,
         }
-    return build_runtime_snapshot(paths, run_ledger)
+    snapshot = build_runtime_snapshot(paths, run_ledger)
+    if synthetic:
+        snapshot["synthetic"] = True
+        snapshot["source"] = "fallback_no_ledger"
+    return snapshot
 
 
 def decide_next_bridge_packet(
@@ -554,18 +563,17 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str, phase_
     if target_phase == "l4_execute" and teammate_name == "executor":
         return [
             "Semantic basis rule: execute exactly the resolved model/method, checkpoint, dataset, prompt/template, config, and metric basis. If any identity field is unresolved, stop and report blocked rather than guessing.",
-            "Execution environment rule: all formal execute commands must use the conda environment named mjy. Prefer `conda run -n mjy ...` for auditable commands, or explicitly record an equivalent `conda activate mjy` shell context. Do not create or use venv.",
+            "Execution environment rule: follow the phase execution_policy exactly when it names an environment, command wrapper, forbidden environment, resource target, or exception rule; record environment evidence either way.",
             "Long-task ETA rule: before launching any long-running command, estimate expected wall-clock runtime as a range, state the basis for the estimate, and include that estimate in the execution report.",
             "Smoke-shape rule: before formal execution, use bounded smoke evidence to choose formal parameters such as per-device batch size, microbatch size, gradient accumulation, sequence length, precision, and effective batch size. Record why formal settings differ from smoke settings.",
-            "Batch/memory adaptation rule: do not copy user- or upstream-provided batch size, microbatch, gradient accumulation, sequence length, precision, or memory-saving settings mechanically when actual GPU memory makes them unsuitable. Treat those values as intent and constraints; adapt them inside the frozen semantic boundary to reach the formal GPU utilization target, preserving effective-batch semantics when possible, and record requested value, observed GPU capacity, adjusted value, and reason.",
-            "Multi-stage memory rule: if one execute task or session contains multiple formal stages such as train, value, generate, evaluate, or score, each formal stage must independently satisfy the batch/memory adaptation rule. Do not let an earlier stage's successful settings, smoke shape, or low-memory fallback silently carry into a later stage; rerun or justify stage-specific memory evidence and record the formal target result per stage.",
-            "Log manifest rule: every generated formal log folder must contain a manifest file inside that folder, analogous to checkpoint manifests. Do not rely on folder/file names alone. The manifest must record run ID, bridge window ID, task ID, stage name, command, cwd, environment, conda env evidence, checkpoint/config/prompt paths, batchbasis, requested/upstream batch settings, smoke-derived basis, final per-device batch, microbatch, gradient accumulation, sequence length, precision, effective batch size, adjustment reason, gpu_id/device IDs, selected GPU total/free memory, competing process summary when relevant, smoke memory observed when smoke ran, warmup memory observed when warmup ran, formal observed memory, process refs, log files, expected outputs/checkpoints, status, timestamps, and reuse/dependency notes.",
+            "Parameter/resource adaptation rule: do not copy user- or upstream-provided runtime parameters mechanically when actual resources make them unsuitable. Treat those values as intent and constraints; adapt only inside the frozen semantic boundary and phase execution_policy, preserving semantic equivalence when possible, and record requested value, observed capacity, adjusted value, and reason.",
+            "Multi-stage resource rule: if one execute task or session contains multiple formal stages, each formal stage must independently satisfy the phase execution_policy. Do not let an earlier stage's successful settings or low-resource fallback silently carry into a later stage; rerun or justify stage-specific evidence and record the target result per stage.",
+            "Log manifest rule: every generated formal log folder must contain a manifest file inside that folder, analogous to checkpoint manifests. Do not rely on folder/file names alone. The manifest must record run ID, bridge window ID, task ID, stage name, command, cwd, environment evidence, resolved input/config/output paths, parameters and adaptation basis required by execution_policy, process refs, log files, expected outputs, terminal status, timestamps, and reuse/dependency notes.",
             "Natural-language manifest semantics rule: the manifest must include human-meaningful semantics in addition to concrete paths and commands: model or model family/name, checkpoint semantic label if different from the path, dataset name/split/source, dataset row/example count when known, method/objective such as SFT/DPO/OPD, early-stop behavior such as OPD early stop when relevant, metric/objective basis, prompt/template meaning, and inherited defaults. If a field is unknown or not applicable, write unknown/not_applicable with the reason rather than omitting it.",
             "If runtime cannot be estimated, state that explicitly with the missing information and still record command, start time, owned process refs, logs, and expected outputs.",
             "L4 execute terminality rule: run formal long jobs in a way the bridge can wait on or poll until terminal completion. Do not return a final or partial bridge report while an owned process is still running; emit progress evidence and keep waiting.",
-            "Formal GPU memory rule: unless the task is explicitly smoke/dry-run/conservative, configure formal GPU execution so observed memory after warmup exceeds 70GB on typical 80GB GPUs, or exceeds 90% of selected GPU total memory on other GPU sizes.",
-            "Prelaunch memory shortfall rule: if no GPU currently has the formal target free but a smaller approved attempt can plausibly run on the best approved GPU, do not stop before launch; downshift batch or related memory settings within policy, run the attempt, and record the lower-than-target memory as a deviation.",
-            "If the applicable formal memory target (>70GB on an 80GB GPU, otherwise >90%) cannot be reached after a real lower-batch attempt, classify a completed run as deviated with evidence; classify blocked only when no approved GPU can run the configured lower-bound attempt, required resources are missing, or the bounded retry ladder is exhausted.",
+            "Resource target rule: apply any formal resource target from execution_policy. If no such policy is present, record observed resources without inventing a GPU-specific threshold.",
+            "Prelaunch resource shortfall rule: apply the phase execution_policy for shortfalls. If no policy permits adaptation, classify blocked or ask for direction rather than changing method, data, objective, or resource assumptions silently.",
         ]
     if target_phase == "l4_execute" and teammate_name == "postrun":
         return [
@@ -573,10 +581,10 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str, phase_
             "Log manifest audit rule: verify each generated formal log folder has an internal manifest and that the manifest matches the command, environment, semantic basis, formal parameters/effective batch size, process refs, log files, artifact refs, and terminal status. Missing or stale manifests are execution deviations.",
             "Audit ETA rule: compare actual runtime against the executor's estimate when available, and flag material deviation as execution evidence rather than treating it as chat context.",
             "Postrun must run after the formal execution process has reached a terminal state or produced terminal failure evidence; do not audit a still-running process as complete.",
-            "Environment audit rule: verify formal execution used conda env mjy and did not use venv. Missing or contradictory environment evidence is an execution deviation.",
-            "GPU memory audit rule: for formal GPU execution, verify observed memory after warmup exceeded 70GB on typical 80GB GPUs, or exceeded 90% of selected GPU total memory on other GPU sizes. Lower usage after a best-available lower-batch attempt is a deviation to report, not an automatic failure.",
-            "Prelaunch memory shortfall audit rule: verify the executor did not stop solely because free memory was below target when a smaller approved attempt could run.",
-            "Multi-stage memory audit rule: when the task contains multiple formal stages such as train then value/evaluate/score, audit GPU memory target satisfaction separately for each stage. A good train-stage memory record does not prove a later value/eval stage satisfied the target.",
+            "Environment audit rule: verify formal execution followed the phase execution_policy environment requirements. Missing or contradictory environment evidence is an execution deviation.",
+            "Resource audit rule: verify observed resource usage against any phase execution_policy target. If no resource target is configured, report observed values without applying a project-specific threshold.",
+            "Prelaunch shortfall audit rule: verify the executor followed the phase execution_policy for resource shortfalls and did not stop or adapt for reasons outside the packet.",
+            "Multi-stage resource audit rule: when the task contains multiple formal stages, audit resource target satisfaction separately for each stage. A good earlier-stage record does not prove a later stage satisfied the target.",
         ]
     if target_phase == "l4_anomaly":
         return [

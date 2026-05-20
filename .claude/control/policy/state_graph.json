@@ -570,9 +570,9 @@
     {
       "id": "packet_rejected_returned",
       "from": "bridge_packet_rejected",
-      "to": "bridge_window_returned",
+      "to": "bridge_window_failed",
       "event_kinds": [
-        "bridge_result_returned"
+        "bridge_result_returned_with_failure"
       ]
     },
     {
@@ -628,7 +628,7 @@
       "from": "team_create_failed",
       "to": "bridge_window_failed",
       "event_kinds": [
-        "bridge_result_returned"
+        "bridge_result_returned_with_failure"
       ]
     },
     {
@@ -676,7 +676,7 @@
       "from": "task_create_failed",
       "to": "bridge_window_failed",
       "event_kinds": [
-        "bridge_result_returned"
+        "bridge_result_returned_with_failure"
       ]
     },
     {
@@ -764,7 +764,7 @@
       "from": "message_dispatch_failed",
       "to": "bridge_window_failed",
       "event_kinds": [
-        "bridge_result_returned"
+        "bridge_result_returned_with_failure"
       ]
     },
     {
@@ -944,7 +944,7 @@
       "from": "team_wait_timeout",
       "to": "bridge_window_partial_returned",
       "event_kinds": [
-        "bridge_result_returned"
+        "bridge_result_returned_with_partial"
       ]
     },
     {
@@ -1017,7 +1017,7 @@
       "from": "task_completion_rejected",
       "to": "bridge_window_failed",
       "event_kinds": [
-        "bridge_result_returned"
+        "bridge_result_returned_with_failure"
       ]
     },
     {
@@ -1057,7 +1057,7 @@
       "from": "task_failed",
       "to": "bridge_window_failed",
       "event_kinds": [
-        "bridge_result_returned"
+        "bridge_result_returned_with_failure"
       ]
     },
     {

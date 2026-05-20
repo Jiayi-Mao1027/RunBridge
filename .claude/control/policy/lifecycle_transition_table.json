@@ -107,6 +107,11 @@
       "bridge_window_returned"
     ],
     [
+      "bridge_packet_rejected",
+      "bridge_result_returned_with_failure",
+      "bridge_window_failed"
+    ],
+    [
       "bridge_packet_accepted",
       "team_create_started",
       "team_create_started"
@@ -147,6 +152,11 @@
       "bridge_window_failed"
     ],
     [
+      "team_create_failed",
+      "bridge_result_returned_with_failure",
+      "bridge_window_failed"
+    ],
+    [
       "team_create_completed",
       "task_create_started",
       "task_create_started"
@@ -184,6 +194,11 @@
     [
       "task_create_failed",
       "bridge_result_returned",
+      "bridge_window_failed"
+    ],
+    [
+      "task_create_failed",
+      "bridge_result_returned_with_failure",
       "bridge_window_failed"
     ],
     [
@@ -254,6 +269,11 @@
     [
       "message_dispatch_failed",
       "bridge_result_returned",
+      "bridge_window_failed"
+    ],
+    [
+      "message_dispatch_failed",
+      "bridge_result_returned_with_failure",
       "bridge_window_failed"
     ],
     [
@@ -383,6 +403,16 @@
     ],
     [
       "team_wait_timeout",
+      "bridge_result_returned_with_partial",
+      "bridge_window_partial_returned"
+    ],
+    [
+      "team_wait_timeout",
+      "bridge_result_returned_with_failure",
+      "bridge_window_failed"
+    ],
+    [
+      "team_wait_timeout",
       "bridge_call_interrupted",
       "bridge_window_interrupted"
     ],
@@ -433,6 +463,11 @@
     ],
     [
       "task_completion_rejected",
+      "bridge_result_returned_with_failure",
+      "bridge_window_failed"
+    ],
+    [
+      "task_completion_rejected",
       "bridge_call_interrupted",
       "bridge_window_interrupted"
     ],
@@ -454,6 +489,11 @@
     [
       "task_failed",
       "bridge_result_returned",
+      "bridge_window_failed"
+    ],
+    [
+      "task_failed",
+      "bridge_result_returned_with_failure",
       "bridge_window_failed"
     ],
     [

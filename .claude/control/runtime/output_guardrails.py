@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from loader import load_json_file
@@ -140,7 +141,14 @@ def validate_bridge_result(
     return validation_ok()
 
 
-def validate_teammate_report(report: Any, *, path: str = "$", strict: bool = True, control_root: str | Path | None = None) -> dict[str, Any]:
+def validate_teammate_report(
+    report: Any,
+    *,
+    path: str = "$",
+    strict: bool = True,
+    control_root: str | Path | None = None,
+    required_sections: list[str] | None = None,
+) -> dict[str, Any]:
     if not isinstance(report, dict):
         return validation_error(error_type="InvalidTeammateReport", path=path, message="teammate report must be an object")
     if strict:
@@ -165,6 +173,15 @@ def validate_teammate_report(report: Any, *, path: str = "$", strict: bool = Tru
             completed_claims = completed_claims or disposition == "completed"
         if not coverage:
             return validation_error(error_type="MissingInstructionCoverage", path=f"{path}.instruction_coverage", message="teammate report instruction_coverage cannot be empty")
+        for section in required_sections or []:
+            if section == "semantic_identity_resolution":
+                resolution = report.get(section)
+                if not isinstance(resolution, dict) or not resolution:
+                    return validation_error(
+                        error_type="MissingSemanticIdentityResolution",
+                        path=f"{path}.semantic_identity_resolution",
+                        message="teammate report requires semantic_identity_resolution from the report contract",
+                    )
         completed_items = report.get("completed_items") if isinstance(report.get("completed_items"), list) else []
         completed_claims = completed_claims or bool(completed_items)
         evidence_refs = report.get("evidence_refs") if isinstance(report.get("evidence_refs"), list) else []
@@ -211,13 +228,15 @@ def validate_log_manifest(
     *,
     control_root: str | Path | None = None,
     formal_run: bool | None = None,
+    required_fields: list[str] | None = None,
+    formal_required_fields: list[str] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return validation_error(error_type="InvalidLogManifest", path="$", message="log manifest must be an object")
     schema_validation = validate_schema(payload, "log_manifest.schema.json", control_root=control_root)
     if not schema_validation.get("valid"):
         return schema_validation
-    required = _log_manifest_required_fields()
+    required = required_fields if isinstance(required_fields, list) and required_fields else _log_manifest_required_fields()
     for field in required:
         if field not in payload or _is_empty_value(payload.get(field)):
             return validation_error(error_type="MissingLogManifestField", path=f"$.{field}", message=f"log manifest missing {field}")
@@ -228,7 +247,8 @@ def validate_log_manifest(
     if not isinstance(process_refs, list) or not process_refs:
         return validation_error(error_type="MissingLogManifestField", path="$.process_refs", message="log manifest requires non-empty process_refs")
     if formal_run is True or (formal_run is None and _looks_like_l4_formal_manifest(payload)):
-        for field in _formal_l4_manifest_required_fields():
+        formal_fields = formal_required_fields if isinstance(formal_required_fields, list) else _formal_l4_manifest_required_fields()
+        for field in formal_fields:
             if field not in payload or _is_empty_value(payload.get(field)):
                 return validation_error(
                     error_type="MissingFormalRunEvidence",
@@ -267,6 +287,26 @@ def _load_schema_default(control_root: str | Path | None, schema_name: str) -> d
 
 
 def _validate_schema_node(value: Any, schema: dict[str, Any], path: str) -> dict[str, Any]:
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for index, child_schema in enumerate(all_of):
+            if isinstance(child_schema, dict):
+                child = _validate_schema_node(value, child_schema, path)
+                if not child.get("valid"):
+                    return validation_error(
+                        error_type="SchemaValidationFailed",
+                        path=path,
+                        message=f"{path} failed allOf[{index}]: {child.get('message')}",
+                    )
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list):
+        if not any(isinstance(child_schema, dict) and _validate_schema_node(value, child_schema, path).get("valid") for child_schema in any_of):
+            return validation_error(error_type="SchemaValidationFailed", path=path, message=f"{path} does not match any allowed schema")
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list):
+        matches = sum(1 for child_schema in one_of if isinstance(child_schema, dict) and _validate_schema_node(value, child_schema, path).get("valid"))
+        if matches != 1:
+            return validation_error(error_type="SchemaValidationFailed", path=path, message=f"{path} must match exactly one schema")
     expected_type = schema.get("type")
     if expected_type is not None and not _schema_type_matches(value, expected_type):
         return validation_error(
@@ -277,6 +317,20 @@ def _validate_schema_node(value: Any, schema: dict[str, Any], path: str) -> dict
     enum = schema.get("enum")
     if isinstance(enum, list) and value not in enum:
         return validation_error(error_type="SchemaValidationFailed", path=path, message=f"{path} value is not in schema enum")
+    if isinstance(value, str):
+        min_length = schema.get("minLength")
+        if isinstance(min_length, int) and len(value) < min_length:
+            return validation_error(error_type="SchemaValidationFailed", path=path, message=f"{path} is shorter than minLength")
+        max_length = schema.get("maxLength")
+        if isinstance(max_length, int) and len(value) > max_length:
+            return validation_error(error_type="SchemaValidationFailed", path=path, message=f"{path} is longer than maxLength")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str):
+            try:
+                if re.search(pattern, value) is None:
+                    return validation_error(error_type="SchemaValidationFailed", path=path, message=f"{path} does not match schema pattern")
+            except re.error:
+                return validation_error(error_type="SchemaValidationFailed", path=path, message=f"{path} has invalid schema pattern")
     if isinstance(value, dict):
         for key in schema.get("required", []) if isinstance(schema.get("required"), list) else []:
             if key not in value:
@@ -304,6 +358,12 @@ def _validate_schema_node(value: Any, schema: dict[str, Any], path: str) -> dict
                         message=f"{path} has unexpected field {key}",
                     )
     if isinstance(value, list):
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            return validation_error(error_type="SchemaValidationFailed", path=path, message=f"{path} has fewer items than minItems")
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            return validation_error(error_type="SchemaValidationFailed", path=path, message=f"{path} has more items than maxItems")
         items_schema = schema.get("items") if isinstance(schema.get("items"), dict) else None
         if items_schema:
             for index, item in enumerate(value):

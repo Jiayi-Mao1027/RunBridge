@@ -162,12 +162,13 @@ def _tools() -> list[dict[str, Any]]:
     return [
         {
             "name": "read_runtime_snapshot",
-            "description": "Read the authoritative bridge workflow RuntimeSnapshot for a run. If run_id is omitted, use the current project run.",
+            "description": "Read the authoritative bridge workflow RuntimeSnapshot for a real run. If run_id is omitted, use the current project run; set allow_synthetic=true only for explicit fallback diagnostics.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string"},
                     "repo_key": {"type": "string"},
+                    "allow_synthetic": {"type": "boolean"},
                 },
                 "required": [],
                 "additionalProperties": False,
@@ -175,7 +176,7 @@ def _tools() -> list[dict[str, Any]]:
         },
         {
             "name": "build_bridge_packet",
-            "description": "Main-leader tool: build exactly one BridgePacket for exactly one bridge invocation window from current runtime truth. If run_id is omitted, use the current project run. This is not terminal for advance/continue requests; after this tool returns, call call_bridge_sdk. If the packet is shown as a bridge_packet-*.txt artifact, call call_bridge_sdk with repo_key and persist=true because the server saved the run-scoped packet.",
+            "description": "Main-leader tool: build exactly one BridgePacket for exactly one bridge invocation window from current runtime truth. If run_id is omitted, use the current project run. This is not terminal for advance/continue requests; after this tool returns, call call_bridge_sdk unless auto_dispatch=true was explicitly requested. If the packet is shown as a bridge_packet-*.txt artifact, call call_bridge_sdk with repo_key and persist=true because the server saved the run-scoped packet.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -185,6 +186,7 @@ def _tools() -> list[dict[str, Any]]:
                     "user_instruction": {"type": "string"},
                     "task_spec": {"type": "object"},
                     "target_phase": {"type": "string"},
+                    "auto_dispatch": {"type": "boolean"},
                 },
                 "required": [],
                 "additionalProperties": False,
@@ -296,9 +298,10 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if tool_name == "read_runtime_snapshot":
         result = read_runtime_snapshot(
             CONTROL_ROOT,
-            _resolve_run_id(arguments, runtime_runs_root, require_active=False),
+            _resolve_run_id(arguments, runtime_runs_root, require_active=False, allow_synthetic=bool(arguments.get("allow_synthetic"))),
             repo_key=arguments.get("repo_key"),
             runtime_runs_root=runtime_runs_root,
+            allow_synthetic=bool(arguments.get("allow_synthetic")),
         )
     elif tool_name == "build_bridge_packet":
         arguments = _repair_bridge_packet_arguments(arguments)
@@ -653,6 +656,8 @@ def _should_auto_dispatch_after_build(
     run_id: str,
     packet: dict[str, Any],
 ) -> bool:
+    if arguments.get("auto_dispatch") is not True:
+        return False
     context = _load_outer_host_context(runtime_runs_root)
     if str(context.get("run_id") or "").strip() != run_id:
         return False
@@ -782,6 +787,7 @@ def _resolve_run_id(
     *,
     require_active: bool,
     packet: dict[str, Any] | None = None,
+    allow_synthetic: bool = False,
 ) -> str:
     run_id = str(arguments.get("run_id") or "").strip()
     if run_id:
@@ -803,7 +809,9 @@ def _resolve_run_id(
         return active_run_id
     if require_active:
         raise ValueError("active run is required; SessionStart must create .active_run.json before this tool can run")
-    return "current"
+    if allow_synthetic:
+        return "current"
+    raise ValueError("active run is required; pass run_id or set allow_synthetic=true for a fallback snapshot")
 
 
 def _resolve_main_session_id(arguments: dict[str, Any], runtime_runs_root: str | Path, run_id: str, snapshot: dict[str, Any] | None = None) -> str:

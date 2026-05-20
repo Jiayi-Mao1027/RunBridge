@@ -401,6 +401,7 @@ class BridgeLeaderRuntime:
         self._event("team_delete_succeeded", team_id=self.team_id, task_id=self.task_id, tool_name="team_delete")
 
     def _return_bridge_result(self, event_kind: str, bridge_result: dict[str, Any], *, agent_type: str = "main-leader") -> None:
+        event_kind = _bridge_result_event_kind(bridge_result, requested_event_kind=event_kind)
         bind_window_objects = bridge_result.get("failure_stage_or_null") != "packet_accept"
         self._event(
             event_kind,
@@ -432,7 +433,7 @@ class BridgeLeaderRuntime:
     def _fail_window(self, exc: BridgeExecutionError) -> dict[str, Any]:
         bridge_result = self._bridge_result("failed", exc.failure_stage, {"error_or_null": {"message": str(exc), **exc.payload}})
         if exc.failure_stage == "packet_accept":
-            self._return_bridge_result("bridge_result_returned", bridge_result, agent_type="bridge-leader")
+            self._return_bridge_result("bridge_result_returned_with_failure", bridge_result, agent_type="bridge-leader")
             return bridge_result
         if self.team_id:
             try:
@@ -440,7 +441,7 @@ class BridgeLeaderRuntime:
                 self._event("team_delete_succeeded", team_id=self.team_id, task_id=self.task_id, tool_name="team_delete")
             except Exception:
                 bridge_result["cleanup_required"] = True
-        self._return_bridge_result("bridge_result_returned", bridge_result)
+        self._return_bridge_result("bridge_result_returned_with_failure", bridge_result)
         return bridge_result
 
     def _interrupt_window(self, exc: KeyboardInterrupt) -> dict[str, Any]:
@@ -707,6 +708,19 @@ def _failure_stage_for_event(event_kind: str) -> str:
     if event_kind.startswith("completion") or event_kind == "artifacts_ready":
         return "task_complete"
     return "bridge_return"
+
+
+def _bridge_result_event_kind(bridge_result: dict[str, Any], *, requested_event_kind: str | None = None) -> str:
+    if bridge_result.get("cleanup_required") is True:
+        return "bridge_result_returned_with_cleanup_required"
+    status = str(bridge_result.get("status") or "").strip()
+    if status == "succeeded":
+        return "bridge_result_returned"
+    if status in {"partial", "partial_or_failed"}:
+        return "bridge_result_returned_with_partial"
+    if requested_event_kind == "bridge_result_returned_with_user_clarification_request":
+        return requested_event_kind
+    return "bridge_result_returned_with_failure"
 
 
 def _now_iso() -> str:

@@ -1464,8 +1464,8 @@ def _runtime_owned_teammate_prompt(
         f"Runtime-owned dispatch input for this teammate:\n{json.dumps(dispatch, ensure_ascii=False, indent=2)}\n\n"
         f"Teammate spec:\n{json.dumps(teammate_spec, ensure_ascii=False, indent=2)}\n\n"
         f"Teammate assignment:\n{json.dumps(assignment, ensure_ascii=False, indent=2)}\n\n"
-        "Return exactly one JSON teammate report object. Required semantic keys: summary and "
-        "instruction_coverage. Optional keys: semantic_identity_resolution, evidence_refs, "
+        "Return exactly one JSON teammate report object. Required semantic keys: summary, "
+        "instruction_coverage, and semantic_identity_resolution. Optional keys: evidence_refs, "
         "current_user_intent_context, next_action_recommendation, classification. instruction_coverage "
         "values must be one of completed, deferred, blocked, escalated. The runtime owns mechanical "
         "format repair; include evidence_refs only when semantically available.\n\n"
@@ -1477,7 +1477,7 @@ def _runtime_owned_teammate_prompt(
 
 def _runtime_owned_teammate_report_schema() -> dict[str, Any]:
     schema = deepcopy(TEAMMATE_REPORT_SCHEMA)
-    schema["required"] = ["summary", "instruction_coverage"]
+    schema["required"] = ["summary", "instruction_coverage", "semantic_identity_resolution"]
     return schema
 
 

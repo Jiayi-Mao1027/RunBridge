@@ -1100,6 +1100,26 @@ def _assistant_record(request: dict[str, Any], text: str) -> dict[str, Any]:
 
 def _build_user_prompt(request: dict[str, Any]) -> str:
     text = str(request.get("text") or "").strip()
+    if str(request.get("dispatch_intent") or "").strip() == "leader_decide":
+        envelope = {
+            "dispatch_intent": "leader_decide",
+            "repo_key": request.get("repo_key"),
+            "run_id": request.get("run_id"),
+            "input_id": request.get("input_id"),
+            "input_kind": request.get("input_kind"),
+            "target_phase": request.get("target_phase"),
+            "user_text": text,
+            "contract": [
+                "Read runtime truth before deciding when state matters.",
+                "Make the semantic judgment yourself; do not rely on keyword phase matching.",
+                "If the user intent moves target work forward, call mcp__bridge__build_bridge_packet and then mcp__bridge__call_bridge_sdk in this turn.",
+                "If no bridge should open, answer concisely and include NO_BRIDGE_DECISION: <semantic reason>.",
+            ],
+        }
+        return "Handle this 8787 operator input under the leader_decide contract:\n" + json.dumps(
+            envelope,
+            ensure_ascii=False,
+        )
     if "\n" not in text and "\r" not in text:
         return text
     return f"Follow this user input exactly: {json.dumps(text, ensure_ascii=False)}"

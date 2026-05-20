@@ -150,6 +150,19 @@ TEAMMATE_REPORT_LOSS_TEXT_MARKERS = (
     "no implementation evidence",
 )
 
+RUN_TERMINAL_STATUSES = {"completed", "failed", "aborted"}
+RUN_EVENT_STATUSES = {
+    "run_completed": "completed",
+    "run_failed": "failed",
+    "run_aborted": "aborted",
+}
+BRIDGE_RESULT_STATUS_EVENT_KINDS = {
+    "succeeded": "bridge_result_returned",
+    "failed": "bridge_result_returned_with_failure",
+    "partial": "bridge_result_returned_with_partial",
+    "partial_or_failed": "bridge_result_returned_with_partial",
+}
+
 AGENT_TYPES = {"main-leader", "bridge-leader", "teammate", "hook", "runtime"}
 AGENT_TYPE_ALIASES = {
     "leader-orchestrator": "main-leader",
@@ -221,7 +234,10 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
-    "bridge_packet_rejected": {"bridge_result_returned": "bridge_window_returned"},
+    "bridge_packet_rejected": {
+        "bridge_result_returned": "bridge_window_returned",
+        "bridge_result_returned_with_failure": "bridge_window_failed",
+    },
     "bridge_packet_accepted": {
         "team_create_started": "team_create_started",
         "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
@@ -233,7 +249,10 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
-    "team_create_failed": {"bridge_result_returned": "bridge_window_failed"},
+    "team_create_failed": {
+        "bridge_result_returned": "bridge_window_failed",
+        "bridge_result_returned_with_failure": "bridge_window_failed",
+    },
     "team_create_completed": {
         "task_create_started": "task_create_started",
         "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
@@ -245,7 +264,10 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
-    "task_create_failed": {"bridge_result_returned": "bridge_window_failed"},
+    "task_create_failed": {
+        "bridge_result_returned": "bridge_window_failed",
+        "bridge_result_returned_with_failure": "bridge_window_failed",
+    },
     "task_create_completed": {
         "taskcreated_hook_accepted": "task_created_recorded",
         "taskcreated_hook_denied": "task_create_failed",
@@ -267,6 +289,7 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "message_dispatch_retry_started": "message_dispatch_started",
         "bridge_leader_fails_task": "task_failed",
         "bridge_result_returned": "bridge_window_failed",
+        "bridge_result_returned_with_failure": "bridge_window_failed",
     },
     "message_dispatch_completed": {
         "team_idle_waiting": "team_waiting",
@@ -301,6 +324,8 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "partial_evidence_collected": "bridge_window_partial_returned",
         "task_failed_by_bridge_leader": "task_failed",
         "bridge_result_returned": "bridge_window_partial_returned",
+        "bridge_result_returned_with_partial": "bridge_window_partial_returned",
+        "bridge_result_returned_with_failure": "bridge_window_failed",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "task_completion_started": {
@@ -315,10 +340,16 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "blocked_for_user_clarification": "blocked_for_user_clarification",
         "bridge_leader_fails_task": "task_failed",
         "bridge_result_returned": "bridge_window_failed",
+        "bridge_result_returned_with_failure": "bridge_window_failed",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "task_completion_completed": {"team_delete_started": "team_delete_started", "bridge_call_interrupted": "bridge_window_interrupted"},
-    "task_failed": {"team_delete_started": "team_delete_started", "bridge_result_returned": "bridge_window_failed", "bridge_call_interrupted": "bridge_window_interrupted"},
+    "task_failed": {
+        "team_delete_started": "team_delete_started",
+        "bridge_result_returned": "bridge_window_failed",
+        "bridge_result_returned_with_failure": "bridge_window_failed",
+        "bridge_call_interrupted": "bridge_window_interrupted",
+    },
     "bridge_window_partial_returned": {"team_delete_started": "team_delete_started", "bridge_call_interrupted": "bridge_window_interrupted"},
     "team_delete_started": {
         "team_delete_succeeded": "team_delete_completed",
@@ -379,9 +410,23 @@ EVENT_TO_UPDATE_KIND = {
     "bridge_result_returned_with_cleanup_required": "persist_bridge_result_returned",
     "orphan_timeout_without_bridge_return": "persist_bridge_window_orphaned",
     "orphan_timeout_without_heartbeat": "persist_bridge_window_orphaned",
+    "run_completed": "persist_run_completed",
+    "run_failed": "persist_run_failed",
+    "run_aborted": "persist_run_aborted",
 }
 
-CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE = {"session_started", "user_prompt_submitted", "semantic_frozen", "phase_advanced", "route_rerouted", "retry_attempt_scheduled", "enter_anomaly"}
+CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE = {
+    "session_started",
+    "user_prompt_submitted",
+    "semantic_frozen",
+    "phase_advanced",
+    "route_rerouted",
+    "retry_attempt_scheduled",
+    "enter_anomaly",
+    "run_completed",
+    "run_failed",
+    "run_aborted",
+}
 
 FAILURE_UPDATE_KINDS = {
     "record_bridge_call_denied",
@@ -1020,6 +1065,13 @@ def _positive_int_or_none(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _bridge_result_event_kind_for_payload(bridge_result: dict[str, Any]) -> str | None:
+    if bridge_result.get("cleanup_required") is True:
+        return "bridge_result_returned_with_cleanup_required"
+    status = str(bridge_result.get("status") or "").strip()
+    return BRIDGE_RESULT_STATUS_EVENT_KINDS.get(status)
+
+
 def check_event(
     event: WorkflowEvent,
     snapshot: dict[str, Any],
@@ -1075,6 +1127,10 @@ def check_event(
             if not guardrail.get("valid"):
                 reasons.append("bridge_result_guardrail_failed")
                 derived_facts["guardrail_validation"] = guardrail
+            expected_event_kind = _bridge_result_event_kind_for_payload(bridge_result)
+            if expected_event_kind and event.event_kind != expected_event_kind:
+                reasons.append("bridge_result_event_kind_status_mismatch")
+                derived_facts["expected_bridge_result_event_kind"] = expected_event_kind
 
     if event.event_kind in CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE:
         derived_facts["from_status"] = None
@@ -1258,6 +1314,9 @@ def update_runtime(
         run["route"]["is_stale"] = False
         run["route"]["decided_by_event_id"] = event.event_id
         run["current_phase"] = target_phase
+    elif event.event_kind in RUN_EVENT_STATUSES:
+        run["run_status"] = RUN_EVENT_STATUSES[event.event_kind]
+        run["closed_at"] = event.timestamp
     elif event.event_kind in {"pretooluse_allowed_by_main_leader", "call_bridge_sdk_started"}:
         _record_bridge_packet_route(run, event)
 
@@ -1393,6 +1452,7 @@ def build_runtime_snapshot(paths: ControlPaths, run_ledger: dict[str, Any]) -> d
         "snapshot_refs": snapshot_refs,
         "repo_key": run.get("repo_key") or repo_key_for_paths(paths.control_root, paths.runtime_runs_root),
         "run_id": run["run_id"],
+        "run_status": _snapshot_run_status(run),
         "main_session_id": run.get("main_session_id") or run["run_id"],
         "current_phase": current_phase,
         "semantic": run.get("semantic", {"frozen": None, "frozen_at": None, "requires_refresh": False}),
@@ -1418,6 +1478,20 @@ def build_runtime_snapshot(paths: ControlPaths, run_ledger: dict[str, Any]) -> d
     return snapshot
 
 
+def _snapshot_run_status(run: dict[str, Any]) -> str:
+    status = str(run.get("run_status") or "in_progress").strip() or "in_progress"
+    return status
+
+
+def _registry_status_for_run(run: dict[str, Any]) -> str:
+    status = _snapshot_run_status(run)
+    if status in RUN_TERMINAL_STATUSES:
+        return status
+    if status in {"idle"}:
+        return status
+    return "running"
+
+
 def persist_workflow_result(
     *,
     paths: ControlPaths,
@@ -1438,8 +1512,9 @@ def persist_workflow_result(
     repo_key = infer_repo_key_from_runs_root(paths.runtime_runs_root) or snapshot.get("repo_key")
     registry_paths: dict[str, str] = {}
     try:
+        registry_status = _registry_status_for_run(run_ledger)
         if repo_root:
-            manifest = ensure_repo_registered(paths.control_root, repo_root, run_id=event.run_id, status="running")
+            manifest = ensure_repo_registered(paths.control_root, repo_root, run_id=event.run_id, status=registry_status)
             registry_paths["repo_manifest"] = str(paths.control_root.parent / "runtime_state" / "projects" / manifest.repo_key / "repo_manifest.json")
         elif repo_key:
             update_active_run_registry(
@@ -1447,7 +1522,7 @@ def persist_workflow_result(
                 repo_key=str(repo_key),
                 repo_root=None,
                 run_id=event.run_id,
-                status="running",
+                status=registry_status,
             )
         registry_paths["repo_registry"] = str(paths.control_root.parent / "runtime_state" / "registry" / "repos.json")
         registry_paths["active_runs_registry"] = str(paths.control_root.parent / "runtime_state" / "registry" / "active_runs.json")
@@ -2673,10 +2748,10 @@ def _validate_packet_policy_fields(packet: dict[str, Any], snapshot: dict[str, A
             reasons.append("bridge_packet_execute_log_manifest_contract_missing")
         if policy_ref.get("source") == "control/policy/phase_contracts.json":
             manifest_fields = completion.get("manifest_required_fields")
-            if not isinstance(manifest_fields, list) or not {"run_id", "bridge_window_id", "task_id", "command", "cwd", "batchbasis", "gpu_id_or_device_ids", "formal_memory_observed", "terminal_status"}.issubset({str(item) for item in manifest_fields}):
+            if not isinstance(manifest_fields, list) or not {"run_id", "bridge_window_id", "task_id", "command", "cwd", "terminal_status"}.issubset({str(item) for item in manifest_fields}):
                 reasons.append("bridge_packet_execute_manifest_schema_missing")
             execution_policy = completion.get("execution_policy")
-            if not isinstance(execution_policy, dict) or execution_policy.get("formal_conda_env") != "mjy":
+            if not isinstance(execution_policy, dict) or not execution_policy:
                 reasons.append("bridge_packet_execute_policy_missing")
     if packet.get("approval_requirements") not in (None, []):
         reasons.append("bridge_packet_approval_requirements_not_runtime_owned")

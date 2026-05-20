@@ -9,6 +9,7 @@
       "type": "object",
       "required": [
         "run_id",
+        "run_status",
         "main_session_id",
         "event_id",
         "event_kind",
@@ -120,6 +121,7 @@
       ],
       "properties": {
         "run_id": {"type": "string"},
+        "run_status": {"type": "string"},
         "main_session_id": {"type": "string"},
         "snapshot_detail_level": {"type": "string"},
         "snapshot_policy": {"type": "object"},

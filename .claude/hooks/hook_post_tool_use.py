@@ -94,8 +94,8 @@ def main() -> int:
     }
 
     if tool_name in BRIDGE_TOOL_NAMES:
-        event_kind = "call_bridge_sdk_error" if failed else "bridge_result_returned"
         bridge_result = tool_response.get("bridge_result") if isinstance(tool_response.get("bridge_result"), dict) else tool_response
+        event_kind = "call_bridge_sdk_error" if failed else _bridge_result_event_kind(bridge_result)
         event = {
             **event_base,
             "agent_type": payload.get("agent_type") or "main-leader",
@@ -254,6 +254,19 @@ def _emit_agent_teammate_report(
             "diagnostic_note": "Agent tool returned final text, but no structured teammate report JSON was found; do not treat this alone as task completion.",
         },
     )
+
+
+def _bridge_result_event_kind(bridge_result: object) -> str:
+    if not isinstance(bridge_result, dict):
+        return "bridge_result_returned_with_failure"
+    if bridge_result.get("cleanup_required") is True:
+        return "bridge_result_returned_with_cleanup_required"
+    status = str(bridge_result.get("status") or "").strip()
+    if status == "succeeded":
+        return "bridge_result_returned"
+    if status in {"partial", "partial_or_failed"}:
+        return "bridge_result_returned_with_partial"
+    return "bridge_result_returned_with_failure"
 
 
 def _action_for_tool(tool_name: str) -> str:

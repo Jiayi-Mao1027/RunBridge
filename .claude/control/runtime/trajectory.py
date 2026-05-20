@@ -248,6 +248,9 @@ def _workflow_goal(event_kind: str) -> str:
         "completion_contract_satisfied": "validate completion contract",
         "completion_contract_rejected": "record completion validation failure",
         "bridge_result_returned": "return bridge result",
+        "bridge_result_returned_with_failure": "return failed bridge result",
+        "bridge_result_returned_with_partial": "return partial bridge result",
+        "bridge_result_returned_with_cleanup_required": "return bridge result with cleanup required",
         "orphan_timeout_without_bridge_return": "mark bridge window orphaned",
     }.get(event_kind, f"record {event_kind}")
 
@@ -258,7 +261,14 @@ def _workflow_state_delta(run_root: Path, event_kind: str, payload: dict[str, An
         "completed_checklist_items": payload.get("completed_checklist_items", []),
         "new_blockers": payload.get("missing_contract_items", []) if event_kind == "completion_contract_rejected" else [],
     }
-    if event_kind in {"completion_contract_satisfied", "completion_contract_rejected", "bridge_result_returned"}:
+    if event_kind in {
+        "completion_contract_satisfied",
+        "completion_contract_rejected",
+        "bridge_result_returned",
+        "bridge_result_returned_with_failure",
+        "bridge_result_returned_with_partial",
+        "bridge_result_returned_with_cleanup_required",
+    }:
         delta["supporting_trajectory_refs"] = _supporting_trajectory_refs(run_root, payload)
     return delta
 

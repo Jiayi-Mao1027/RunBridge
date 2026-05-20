@@ -2801,7 +2801,10 @@ def run_hook_pretool_packet_derivation_tests(runtime_dir: Path) -> dict:
     ):
         raise AssertionError(json.dumps(preflight_model_binding, ensure_ascii=False, indent=2))
     policy = contract_packet["dispatch_contract"].get("agent_call_policy", {})
-    if "generic_model_aliases_forbidden" in policy or "agent_tool_model_schema_carrier" in policy:
+    if (
+        policy.get("model_field") != "must_be_absent_except_wrapper_schema_carrier"
+        or set(policy.get("model_schema_carriers_tolerated", [])) != {"haiku", "sonnet"}
+    ):
         raise AssertionError(json.dumps(policy, ensure_ascii=False, indent=2))
     last_packet.write_text(json.dumps(contract_packet, ensure_ascii=False), encoding="utf-8")
     payload = {
@@ -3140,7 +3143,11 @@ def run_hook_pretool_packet_derivation_tests(runtime_dir: Path) -> dict:
         cwd=str(target_root),
         timeout=30,
     )
-    if short_description_proc.returncode != 0 or "permissionDecision" in short_description_proc.stdout:
+    if (
+        short_description_proc.returncode != 0
+        or "permissionDecision" not in short_description_proc.stdout
+        or "agent_dispatch_description_mismatch" not in short_description_proc.stdout
+    ):
         raise AssertionError(
             json.dumps(
                 {
@@ -3174,7 +3181,11 @@ def run_hook_pretool_packet_derivation_tests(runtime_dir: Path) -> dict:
         cwd=str(target_root),
         timeout=30,
     )
-    if decorated_subagent_proc.returncode != 0 or "permissionDecision" in decorated_subagent_proc.stdout:
+    if (
+        decorated_subagent_proc.returncode != 0
+        or "permissionDecision" not in decorated_subagent_proc.stdout
+        or "agent_dispatch_description_mismatch" not in decorated_subagent_proc.stdout
+    ):
         raise AssertionError(
             json.dumps(
                 {
@@ -3246,7 +3257,11 @@ def run_hook_pretool_packet_derivation_tests(runtime_dir: Path) -> dict:
         cwd=str(target_root),
         timeout=30,
     )
-    if semantic_prompt_proc.returncode != 0 or "permissionDecision" in semantic_prompt_proc.stdout:
+    if (
+        semantic_prompt_proc.returncode != 0
+        or "permissionDecision" not in semantic_prompt_proc.stdout
+        or "agent_dispatch_prompt_mismatch" not in semantic_prompt_proc.stdout
+    ):
         raise AssertionError(
             json.dumps(
                 {
@@ -3976,7 +3991,14 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     strict_ok = validate_teammate_report(report(), strict=True)
     if not strict_ok.get("valid"):
         raise AssertionError(json.dumps(strict_ok, ensure_ascii=False, indent=2))
-    strict_bad = validate_teammate_report({"summary": "bad", "instruction_coverage": {"completed": "item"}}, strict=True)
+    strict_bad = validate_teammate_report(
+        {
+            "summary": "bad",
+            "instruction_coverage": {"completed": "item"},
+            "semantic_identity_resolution": {"disposition": "not_applicable"},
+        },
+        strict=True,
+    )
     if strict_bad.get("valid") or strict_bad.get("error_type") != "InvalidCoverageDisposition":
         raise AssertionError(json.dumps(strict_bad, ensure_ascii=False, indent=2))
     summary_only = validate_bridge_result({"status": "succeeded", "reports": [{"summary": "only"}], "artifact_refs": ["artifact"], "evidence": {"event_ids": ["evt"]}, "error_or_null": None, "cleanup_required": False})
@@ -4033,7 +4055,14 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     repaired_normalized = _normalize_bridge_payload(repaired_bridge_payload, "", "")
     if repaired_normalized.get("status") != "succeeded" or not repaired_normalized.get("reports", [{}])[0].get("evidence_refs"):
         raise AssertionError(json.dumps(repaired_normalized, ensure_ascii=False, indent=2))
-    completed_without_evidence = validate_teammate_report({"summary": "bad", "instruction_coverage": {"item": "completed"}}, strict=True)
+    completed_without_evidence = validate_teammate_report(
+        {
+            "summary": "bad",
+            "instruction_coverage": {"item": "completed"},
+            "semantic_identity_resolution": {"disposition": "not_applicable"},
+        },
+        strict=True,
+    )
     if completed_without_evidence.get("valid") or completed_without_evidence.get("error_type") != "MissingRequiredEvidenceRef":
         raise AssertionError(json.dumps(completed_without_evidence, ensure_ascii=False, indent=2))
     fallback_packet = packet("bw_runtime_owned_fallback", "sub_runtime_owned_fallback")
@@ -4585,7 +4614,15 @@ def run_multi_repo_isolation_tests(root: Path, control_root: Path) -> dict:
                 "cleanup_required": False,
             }
         )
-        auto_tool_result = bridge_server._call_tool("build_bridge_packet", {"repo_key": key_a, "run_id": context_run})
+        pure_build_result = bridge_server._call_tool("build_bridge_packet", {"repo_key": key_a, "run_id": context_run})
+        pure_build_payload = json.loads(pure_build_result["content"][0]["text"])
+        if (
+            pure_build_payload.get("auto_dispatched") is True
+            or pure_build_payload.get("next_required_tool") != "mcp__bridge__call_bridge_sdk"
+            or auto_calls
+        ):
+            raise AssertionError(json.dumps({"pure_build_payload": pure_build_payload, "auto_calls": auto_calls}, ensure_ascii=False, indent=2, default=str))
+        auto_tool_result = bridge_server._call_tool("build_bridge_packet", {"repo_key": key_a, "run_id": context_run, "auto_dispatch": True})
     finally:
         bridge_server.call_bridge_sdk = real_call_bridge_sdk
     auto_payload = json.loads(auto_tool_result["content"][0]["text"])
@@ -4707,6 +4744,8 @@ def run_event_artifact_completion_tests(control_root: Path, runs_root: Path) -> 
             "task_id": "task_event_artifact",
             "command": "conda run -n mjy python train.py",
             "cwd": ".",
+            "environment_evidence": {"conda_env": "mjy"},
+            "process_refs": [{"pid": 123, "status": "completed"}],
             "batchbasis": "smoke selected batch 8",
             "gpu_id": "0",
             "memory": "warmup memory observed 72GB",
@@ -5054,10 +5093,13 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         name = "success-no-bridge-smoke"
 
         def handle_user_input(self, request, *, event_sink=None):
+            summary = "outer leader returned without a bridge call"
+            if str(request.get("dispatch_intent") or "") == "leader_decide":
+                summary = "NO_BRIDGE_DECISION: smoke adapter intentionally did not open a bridge"
             return {
                 "status": "succeeded",
                 "handled_by": self.name,
-                "reports": [{"summary": "outer leader returned without a bridge call", "source": "smoke"}],
+                "reports": [{"summary": summary, "source": "smoke"}],
                 "artifact_refs": [],
                 "evidence": {},
                 "error_or_null": None,
@@ -5167,6 +5209,36 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         or phase_word_payloads[-1].get("target_phase") is not None
     ):
         raise AssertionError(json.dumps({"response": phase_word_response, "events": phase_word_events[-5:], "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+
+    class SilentLeaderDecideAdapter:
+        name = "silent-leader-decide-smoke"
+
+        def handle_user_input(self, request, *, event_sink=None):
+            return {
+                "status": "succeeded",
+                "handled_by": self.name,
+                "reports": [{"summary": "outer leader returned without a bridge call", "source": "smoke"}],
+                "artifact_refs": [],
+                "evidence": {},
+                "error_or_null": None,
+                "cleanup_required": False,
+            }
+
+    leader_decide_guard_host = OuterSdkHost(config, adapter=SilentLeaderDecideAdapter(), auto_bridge_runner=fake_auto_bridge_runner)
+    leader_decide_guard_response = leader_decide_guard_host.handle_user_input(
+        {
+            "text": "continue the selected run through the bridge",
+            "run_id": "run_outer_leader_decide_contract_guard",
+        }
+    )
+    leader_decide_guard_result = leader_decide_guard_response.get("leader_result", {})
+    if (
+        leader_decide_guard_result.get("status") != "blocked"
+        or leader_decide_guard_result.get("handled_by") != "outer_sdk_host_contract_guard"
+        or leader_decide_guard_result.get("error_or_null", {}).get("type") != "OuterLeaderContractViolation"
+        or len(auto_bridge_calls) != 2
+    ):
+        raise AssertionError(json.dumps({"response": leader_decide_guard_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
     implicit_negated_response = auto_bridge_host.handle_user_input(
         {
             "text": "UI async ack probe only. Do not advance project work.",
@@ -5222,6 +5294,23 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     tmux_multiline_prompt = _build_tmux_user_prompt({"text": "first line\nsecond line", "run_id": run_id})
     if "\nsecond line" in tmux_multiline_prompt or "[outer_host_context]" in tmux_multiline_prompt:
         raise AssertionError(json.dumps({"tmux_multiline_prompt": tmux_multiline_prompt}, ensure_ascii=False, indent=2))
+    tmux_leader_decide_prompt = _build_tmux_user_prompt(
+        {
+            "text": "continue through execution",
+            "run_id": run_id,
+            "repo_key": repo_key,
+            "input_id": "in_leader_decide_prompt_smoke",
+            "input_kind": "user_prompt",
+            "dispatch_intent": "leader_decide",
+        }
+    )
+    if (
+        "Handle this 8787 operator input under the leader_decide contract" not in tmux_leader_decide_prompt
+        or '"dispatch_intent": "leader_decide"' not in tmux_leader_decide_prompt
+        or "NO_BRIDGE_DECISION" not in tmux_leader_decide_prompt
+        or "continue through execution" not in tmux_leader_decide_prompt
+    ):
+        raise AssertionError(json.dumps({"tmux_leader_decide_prompt": tmux_leader_decide_prompt}, ensure_ascii=False, indent=2))
     if _outer_tmux_submit_delay_seconds("short") < 0.2 or _outer_tmux_submit_delay_seconds("x" * 100000) > 3.0:
         raise AssertionError("outer tmux submit delay bounds failed")
     if _outer_tmux_paste_visible_timeout_seconds("short") < 0.5 or _outer_tmux_paste_visible_timeout_seconds("x" * 100000) > 8.0:

@@ -89,8 +89,12 @@ def validate_artifact_refs(
     required = [str(item) for item in required_artifacts] if isinstance(required_artifacts, list) else []
     for requirement in required:
         matches = [ref for ref in normalized if artifact_ref_satisfies(requirement, ref)]
-        if matches:
-            checks.append(_check("artifact_required", "pass", requirement, evidence_ref=matches[0].get("id")))
+        usable_matches = [ref for ref in matches if _required_ref_is_usable(requirement, ref)]
+        if usable_matches:
+            checks.append(_check("artifact_required", "pass", requirement, evidence_ref=usable_matches[0].get("id")))
+        elif matches:
+            missing.append(requirement)
+            checks.append(_check("artifact_required", "block", requirement, message="required artifact path is missing or unreadable"))
         else:
             missing.append(requirement)
             checks.append(_check("artifact_required", "block", requirement, message="required artifact missing"))
@@ -152,6 +156,16 @@ def _validate_one_ref(ref: dict[str, Any], *, context: dict[str, Any]) -> list[d
     else:
         checks.append(_check("artifact_exists", "warn", str(ref.get("id")), message="logical artifact ref has no path to verify"))
     return checks
+
+
+def _required_ref_is_usable(requirement: str, ref: dict[str, Any]) -> bool:
+    ref_type = str(ref.get("ref_type") or "").strip().casefold()
+    requirement_key = str(requirement or "").strip().casefold()
+    file_backed = ref_type in {"path", "file", "log_manifest"} or requirement_key == "log_manifest"
+    if not file_backed:
+        return True
+    path_text = _optional_str(ref.get("path"))
+    return bool(path_text and Path(path_text).is_file())
 
 
 def _check(name: str, status: str, subject: str, *, message: str = "", evidence_ref: str | None = None) -> dict[str, Any]:

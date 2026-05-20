@@ -212,6 +212,18 @@ class OuterSdkHost:
         }
 
     def _maybe_auto_bridge_after_outer_leader(self, request: dict[str, Any], leader_result: dict[str, Any]) -> dict[str, Any]:
+        leader_decide_violation = self._leader_decide_contract_violation(request, leader_result)
+        if leader_decide_violation:
+            failed = _leader_decide_contract_failure(request, leader_result, leader_decide_violation)
+            self._write_host_event(
+                "outer_leader_contract_violation",
+                {
+                    "request": request,
+                    "leader_result": failed,
+                    "contract_violation": leader_decide_violation,
+                },
+            )
+            return failed
         error_type = ""
         if isinstance(leader_result.get("error_or_null"), dict):
             error_type = str(leader_result["error_or_null"].get("type") or "")
@@ -273,6 +285,26 @@ class OuterSdkHost:
                 },
             )
             return failed
+
+    def _leader_decide_contract_violation(self, request: dict[str, Any], leader_result: dict[str, Any]) -> str | None:
+        if str(request.get("dispatch_intent") or "").strip() != "leader_decide":
+            return None
+        if leader_result.get("status") != "succeeded":
+            return None
+        repo_key = str(request.get("repo_key") or "").strip()
+        run_id = str(request.get("run_id") or "").strip()
+        if repo_key and run_id:
+            run_root = get_repo_runtime_root(self.config.control_root, repo_key) / run_id
+            if _bridge_started_after_request(run_root, request):
+                return None
+        summary_text = _leader_result_summary_text(leader_result)
+        if _has_explicit_no_bridge_decision(summary_text):
+            return None
+        return (
+            "leader_decide returned without a bridge call or an explicit NO_BRIDGE_DECISION. "
+            "The leader must either call build_bridge_packet/call_bridge_sdk for forward-moving intent "
+            "or state a no-bridge semantic decision."
+        )
 
     def _auto_bridge_decision(self, request: dict[str, Any]) -> dict[str, Any]:
         if str(request.get("dispatch_intent") or "").strip() != "advance_or_continue":
@@ -704,7 +736,7 @@ def _bridge_started_after_request(run_root: Path, request: dict[str, Any]) -> bo
         "call_bridge_sdk_started",
         "bridge_result_returned",
         "bridge_result_returned_with_failure",
-        "bridge_result_returned_partial",
+        "bridge_result_returned_with_partial",
         "bridge_window_failed",
         "bridge_window_partial_returned",
         "bridge_window_returned",
@@ -798,6 +830,43 @@ def _auto_bridge_leader_result(
         "error_or_null": bridge_error if bridge_status != "succeeded" else None,
         "cleanup_required": bool(bridge_result.get("cleanup_required")),
     }
+
+
+def _leader_decide_contract_failure(
+    request: dict[str, Any],
+    previous_leader_result: dict[str, Any],
+    contract_violation: str,
+) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "handled_by": "outer_sdk_host_contract_guard",
+        "reports": [{"summary": contract_violation, "source": "outer_sdk_host"}],
+        "artifact_refs": previous_leader_result.get("artifact_refs") if isinstance(previous_leader_result.get("artifact_refs"), list) else [],
+        "evidence": {
+            "repo_key": request.get("repo_key"),
+            "run_id": request.get("run_id"),
+            "input_id": request.get("input_id"),
+            "dispatch_intent": request.get("dispatch_intent"),
+            "previous_leader_result": _bound(previous_leader_result),
+        },
+        "error_or_null": {
+            "type": "OuterLeaderContractViolation",
+            "message": contract_violation,
+        },
+        "cleanup_required": bool(previous_leader_result.get("cleanup_required")),
+    }
+
+
+def _leader_result_summary_text(leader_result: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for report in leader_result.get("reports") or []:
+        if isinstance(report, dict) and report.get("summary"):
+            parts.append(str(report.get("summary")))
+    return "\n".join(parts)
+
+
+def _has_explicit_no_bridge_decision(text: Any) -> bool:
+    return "NO_BRIDGE_DECISION:" in str(text or "")
 
 
 def _outer_leader_failure_allows_auto_bridge(error_type: str) -> bool:
