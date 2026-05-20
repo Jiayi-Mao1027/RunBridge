@@ -1690,12 +1690,13 @@ function projectMessageCard(event) {
 }
 
 function projectLeaderReportCards(events) {
+  const bridgeResults = events.filter(event => bridgeResultFromEvent(event));
   const outerResults = events.filter(event => event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result");
   const sdkResults = events.filter(event => {
     const sdkType = String(event.raw?.sdk_message_type || event.raw?.event_type || "");
     return event.source === "sdk_stream" && ["ResultMessage", "sdk_stream_final_result"].includes(sdkType);
   });
-  return dedupeLeaderReportCards([...outerResults, ...sdkResults])
+  return dedupeLeaderReportCards([...bridgeResults, ...outerResults, ...sdkResults])
     .slice(-40)
     .map(projectLeaderReportCard);
 }
@@ -1719,6 +1720,19 @@ function dedupeLeaderReportCards(events) {
 function projectLeaderReportCard(event) {
   const raw = event.raw || {};
   const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+  const bridgeResult = bridgeResultFromEvent(event);
+  if (bridgeResult) {
+    const reports = Array.isArray(bridgeResult.reports) ? bridgeResult.reports : [];
+    return {
+      ...projectTimelineEvent(event),
+      handledBy: raw.agent_id || raw.agent_type || "main-leader",
+      reportStatus: bridgeResult.status || raw.status || event.status || "unknown",
+      summary: summarizeBridgeResult(bridgeResult),
+      error: bridgeResult.error_or_null || raw.error_or_null || null,
+      evidence: bridgeResult.evidence || raw.evidence || null,
+      reportCount: reports.length
+    };
+  }
   const leaderResult = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : null;
   const report = Array.isArray(leaderResult?.reports) ? leaderResult.reports[0] : null;
   return {
@@ -1729,6 +1743,30 @@ function projectLeaderReportCard(event) {
     error: leaderResult?.error_or_null || raw.error_or_null || null,
     evidence: leaderResult?.evidence || raw.evidence || null
   };
+}
+
+function bridgeResultFromEvent(event) {
+  const raw = event?.raw || {};
+  const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+  if (payload.bridge_result && typeof payload.bridge_result === "object") return payload.bridge_result;
+  if (raw.bridge_result && typeof raw.bridge_result === "object") return raw.bridge_result;
+  if (raw.result?.bridge_result && typeof raw.result.bridge_result === "object") return raw.result.bridge_result;
+  return null;
+}
+
+function summarizeBridgeResult(bridgeResult) {
+  const reports = Array.isArray(bridgeResult?.reports) ? bridgeResult.reports : [];
+  const header = [
+    `BridgeResult status=${bridgeResult?.status || "unknown"}`,
+    `report_count=${reports.length}`
+  ].join("; ");
+  const reportLines = reports
+    .map((report, index) => {
+      const name = report?.teammate_name || report?.agent_type || report?.role || `report ${index + 1}`;
+      return `${name}: ${report?.summary || "report recorded"}`;
+    })
+    .filter(Boolean);
+  return compactText([header, ...reportLines].join("\n\n"));
 }
 
 function projectArtifactCard(event) {

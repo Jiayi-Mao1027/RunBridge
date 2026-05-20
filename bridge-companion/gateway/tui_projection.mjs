@@ -419,7 +419,8 @@ function buildHeader(events, snapshot, context) {
 }
 
 function buildMainReport(events, snapshot, context) {
-  const latestReport = [...events].reverse().find(isLeaderReportEvent);
+  const latestReport = [...events].reverse().find(isBridgeResultReportEvent)
+    || [...events].reverse().find(isLeaderReportEvent);
   const snapshotResult = snapshot?.last_bridge_result && typeof snapshot.last_bridge_result === "object"
     ? snapshot.last_bridge_result
     : null;
@@ -793,11 +794,21 @@ function unknownKey(value) {
 
 function isLeaderReportEvent(event) {
   if (!event) return false;
+  if (isBridgeResultReportEvent(event)) return true;
   if (event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result") return true;
   if (event.source !== "sdk_stream") return false;
   const type = String(event.raw?.sdk_message_type || event.raw?.event_type || "");
   if (type === "ResultMessage" || type === "sdk_stream_final_result") return true;
   return event.raw?.raw_stream_event_type === "result" && Boolean(event.raw?.result || event.messagePreview);
+}
+
+function isBridgeResultReportEvent(event) {
+  const raw = event?.raw || {};
+  return Boolean(
+    raw.payload?.bridge_result
+    || raw.bridge_result
+    || raw.result?.bridge_result
+  );
 }
 
 function leaderReportKey(event) {
@@ -808,23 +819,50 @@ function leaderReportKey(event) {
 }
 
 function leaderReportStatus(event) {
+  const bridge = bridgeResultFromEvent(event);
+  if (bridge) return bridge.status || event.raw?.status || event.status || "unknown";
   const payload = event.raw?.payload && typeof event.raw.payload === "object" ? event.raw.payload : {};
   const leader = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : {};
   return leader.status || event.raw?.status || event.status || "unknown";
 }
 
 function leaderReportHandledBy(event) {
+  if (bridgeResultFromEvent(event)) return event.raw?.agent_id || event.raw?.agent_type || "main-leader";
   const payload = event.raw?.payload && typeof event.raw.payload === "object" ? event.raw.payload : {};
   const leader = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : {};
   return leader.handled_by || event.raw?.handled_by || event.raw?.source || "leader-orchestrator";
 }
 
 function leaderReportSummary(event) {
+  const bridge = bridgeResultFromEvent(event);
+  if (bridge) {
+    const reports = Array.isArray(bridge.reports) ? bridge.reports : [];
+    const reportLines = reports
+      .map((report, index) => {
+        const name = report?.teammate_name || report?.agent_type || report?.role || `report ${index + 1}`;
+        return `${name}: ${report?.summary || "report recorded"}`;
+      })
+      .filter(Boolean);
+    const header = [
+      `BridgeResult status=${bridge.status || "unknown"}`,
+      `report_count=${reports.length}`
+    ].join("; ");
+    return compact([header, ...reportLines].join("\n\n"), 4000);
+  }
   const raw = event.raw || {};
   const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
   const leader = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : {};
   const report = Array.isArray(leader.reports) ? leader.reports[0] : null;
   return compact(report?.summary || raw.result || event.messagePreview || leader.error_or_null?.message || "leader result recorded", 4000);
+}
+
+function bridgeResultFromEvent(event) {
+  const raw = event?.raw || {};
+  const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+  if (payload.bridge_result && typeof payload.bridge_result === "object") return payload.bridge_result;
+  if (raw.bridge_result && typeof raw.bridge_result === "object") return raw.bridge_result;
+  if (raw.result?.bridge_result && typeof raw.result.bridge_result === "object") return raw.result.bridge_result;
+  return null;
 }
 
 function taskTitleFrom(packetSummary, snapshot) {
