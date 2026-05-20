@@ -90,7 +90,7 @@ class OuterSdkHost:
 
     def handle_queued_user_input(self, request: dict[str, Any]) -> dict[str, Any]:
         try:
-            runtime_result = self._accept_normalized_user_input(request)
+            request, runtime_result = self._accept_normalized_user_input(request)
             leader_result = self._leader_result_for_request(request, runtime_result)
             self._write_outer_leader_result(request, runtime_result, leader_result)
             return leader_result
