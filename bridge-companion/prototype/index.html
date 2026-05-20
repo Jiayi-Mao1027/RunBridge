@@ -1355,7 +1355,8 @@
     function renderLeaderReports() {
       const view = tuiView();
       const report = view.mainReport || {};
-      $("leaderReportMeta").textContent = report.status ? report.status : "no result";
+      const projectedReports = projectedLeaderReportCards();
+      $("leaderReportMeta").textContent = report.status || projectedReports[0]?.status || "no result";
       const response = state.lastLeaderResponse?.leader_result ? {
         eventId: "latest-response",
         id: "latest-response",
@@ -1376,7 +1377,7 @@
         currentState: report.currentState,
         nextStep: report.nextStep,
         rawRefs: report.rawRefs || []
-      } : null].filter(Boolean);
+      } : null, ...(!report?.summary ? projectedReports.slice(0, 3) : [])].filter(Boolean);
       $("leaderReportList").innerHTML = cards.length ? cards.map((card, index) => `
         <article class="leader-report selectable ${index === 0 ? "primary" : ""}" data-item-id="${escapeHtml(card.id || card.eventId || "")}">
           <div class="member-head">
@@ -2063,7 +2064,7 @@
     }
 
     $("repoSelect").addEventListener("change", event => {
-      selectRepo(event.target.value, { autoSelectRun: false }).catch(error => {
+      selectRepo(event.target.value, { autoSelectRun: true }).catch(error => {
         console.error(error);
         setChip("streamChip", "repo error", "warn");
       });
@@ -2106,7 +2107,7 @@
         await refreshGatewayHealth();
         await loadRepos();
         const firstRepo = state.repos[0]?.repoKey || "";
-        await selectRepo(firstRepo, { autoSelectRun: false });
+        await selectRepo(firstRepo, { autoSelectRun: true });
       } catch (error) {
         console.error(error);
         setChip("streamChip", "gateway error", "warn");
