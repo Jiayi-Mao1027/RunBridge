@@ -49,7 +49,7 @@ process.env.BRIDGE_OUTER_HOST_URL = `http://127.0.0.1:${port}`;
 process.env.BRIDGE_OUTER_HOST_TOKEN = "fixture-token";
 
 try {
-  const { outerHostStatus, submitLeaderInput } = await import(`./server.mjs?leader-input-fixture=${Date.now()}`);
+  const { outerHostStatus, submitLeaderInput, submitLeaderInputAsync } = await import(`./server.mjs?leader-input-fixture=${Date.now()}`);
   const status = await outerHostStatus();
   assert.equal(status.default_run_id, "run_host_default");
   assert.equal(statusCaptured.method, "GET");
@@ -66,6 +66,56 @@ try {
   assert.equal(captured.token, "fixture-token");
   assert.equal(captured.body.text, "continue the current run");
   assert.equal(captured.body.source, "bridge_companion_gateway");
+  assert.equal(captured.body.dispatch_intent, "user_answer");
+  const asyncResponse = await submitLeaderInputAsync({
+    text: "start a new run",
+    repo_key: "repo_fixture",
+    input_kind: "user_prompt"
+  });
+  assert.equal(asyncResponse.accepted, true);
+  assert.equal(captured.url, "/v1/input?async=1");
+  assert.equal(captured.body.text, "start a new run");
+  assert.equal(captured.body.target_phase, undefined);
+  assert.equal(captured.body.dispatch_intent, "leader_decide");
+  await submitLeaderInputAsync({
+    text: "the memory use should be based on facts; if there is only 52 gb available then set bs close to it",
+    repo_key: "repo_fixture",
+    input_kind: "user_prompt"
+  });
+  assert.equal(captured.body.target_phase, undefined);
+  assert.equal(captured.body.dispatch_intent, "leader_decide");
+  await submitLeaderInputAsync({
+    text: "l4 execute with the current approved plan",
+    repo_key: "repo_fixture",
+    input_kind: "user_prompt"
+  });
+  assert.equal(captured.body.target_phase, undefined);
+  assert.equal(captured.body.dispatch_intent, "leader_decide");
+  await submitLeaderInputAsync({
+    text: "continue the current selected route",
+    repo_key: "repo_fixture",
+    input_kind: "continue"
+  });
+  assert.equal(captured.body.target_phase, undefined);
+  assert.equal(captured.body.dispatch_intent, "advance_or_continue");
+  await submitLeaderInputAsync({
+    text: "advance with explicit selected phase",
+    repo_key: "repo_fixture",
+    input_kind: "user_prompt",
+    targetPhase: "L4 execute"
+  });
+  assert.equal(captured.body.target_phase, "l4_execute");
+  assert.equal(captured.body.dispatch_intent, "advance_or_continue");
+  assert.equal(captured.body.targetPhase, undefined);
+  await submitLeaderInputAsync({
+    text: "read state only",
+    repo_key: "repo_fixture",
+    input_kind: "user_prompt",
+    dispatchIntent: "inspect only"
+  });
+  assert.equal(captured.body.target_phase, undefined);
+  assert.equal(captured.body.dispatch_intent, "inspect_only");
+  assert.equal(captured.body.dispatchIntent, undefined);
   console.log(JSON.stringify({ ok: true, leader_input_proxy: "passed" }, null, 2));
 } finally {
   await new Promise(resolve => server.close(resolve));

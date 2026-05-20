@@ -75,6 +75,7 @@ from outer_sdk.tmux_repl_adapter import _tmux_prompt_completion_candidate as _ou
 from outer_sdk.tmux_repl_adapter import _tmux_waiting_on_bridge_status as _outer_tmux_waiting_on_bridge_status
 from outer_sdk.tmux_repl_adapter import _runtime_bridge_completion_state as _outer_runtime_bridge_completion_state
 from outer_sdk.tmux_repl_adapter import _runtime_terminal_bridge_result as _outer_runtime_terminal_bridge_result
+from outer_sdk.tmux_repl_adapter import _tmux_bridge_status_should_wait as _outer_tmux_bridge_status_should_wait
 from outer_sdk.tmux_repl_adapter import _bridge_result_backed_leader_result as _outer_bridge_result_backed_leader_result
 from outer_sdk.tmux_repl_adapter import _bridge_result_should_override_success as _outer_bridge_result_should_override_success
 from outer_sdk.tmux_repl_adapter import OuterLeaderTmuxTerminalError as OuterTmuxTerminalError
@@ -1451,6 +1452,10 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         "do not return final or partial while an owned process is still running",
         "bounded smoke evidence",
         "Each formal stage must independently satisfy batch/memory adaptation",
+        "Long-run launch rule",
+        "Minor OOM adaptation rule",
+        "Prelaunch memory shortfall rule",
+        "OOM attempt log rule",
         "effective batch size",
         "Formal log manifest required fields",
         "batchbasis",
@@ -1466,7 +1471,14 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         or "typical_80gb_gpu_min_observed_gb" not in execute_assignments
         or "other_gpu_min_observed_fraction" not in execute_assignments
         or "multi_stage_memory_evidence_required" not in execute_assignments
+        or "expected long runtime is not by itself a user-decision blocker" not in execute_assignments
+        or "oom_adaptation_policy" not in execute_assignments
+        or "minor_oom_is_execute_retryable" not in execute_assignments
+        or "same formal stage OOMs after the configured execute-owned retry ladder" not in execute_assignments
+        or "M1 OOM ladder rule" not in execute_assignments
         or "Environment and GPU audit rule" not in execute_assignments
+        or "Prelaunch memory shortfall audit rule" not in execute_assignments
+        or "OOM adaptation audit rule" not in execute_assignments
         or "Semantic audit rule" not in execute_assignments
         or "Log manifest audit rule" not in execute_assignments
     ):
@@ -2069,7 +2081,7 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         raise AssertionError(settings_text)
 
     old_allowed_models = os.environ.get("BRIDGE_ALLOWED_MODELS")
-    os.environ["BRIDGE_ALLOWED_MODELS"] = "gpt-main,sonnet-main,deepseek-main"
+    os.environ["BRIDGE_ALLOWED_MODELS"] = "gpt-main,sonnet-main,seepseek-main"
     try:
         mixed_model_result = _required_agent_models(
             [
@@ -2087,9 +2099,9 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
             os.environ.pop("BRIDGE_ALLOWED_MODELS", None)
         else:
             os.environ["BRIDGE_ALLOWED_MODELS"] = old_allowed_models
-    if mixed_model_result.get("error_or_null") or mixed_model_result.get("models", {}).get("chiefmate-b") != "deepseek-main":
+    if mixed_model_result.get("error_or_null") or mixed_model_result.get("models", {}).get("chiefmate-b") != "seepseek-main":
         raise AssertionError(json.dumps(mixed_model_result, ensure_ascii=False, indent=2))
-    if mixed_model_result.get("models", {}).get("anomaly-analyst-b") != "deepseek-main":
+    if mixed_model_result.get("models", {}).get("anomaly-analyst-b") != "seepseek-main":
         raise AssertionError(json.dumps(mixed_model_result, ensure_ascii=False, indent=2))
 
     original_text = "\u4e0a\u4e00\u6b21\u5c1d\u8bd5\u7cfb"
@@ -4171,12 +4183,28 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     curator_packet["task_spec"]["instruction_coverage_checklist"] = ["curation inspected"]
     curator_packet["dispatch_contract"] = build_dispatch_contract(curator_packet)
     curator_tools = _runtime_owned_teammate_allowed_tools(curator_packet, "curator")
-    if "Bash" not in curator_tools or any(tool in curator_tools for tool in ["Edit", "Write"]):
+    if "Bash" not in curator_tools or any(tool not in curator_tools for tool in ["Edit", "Write"]):
         raise AssertionError(json.dumps(curator_tools, ensure_ascii=False, indent=2))
+    refresher_packet = deepcopy(fallback_packet)
+    refresher_packet["team_spec"]["teammate_specs"] = [
+        {
+            "teammate_name": "refresher",
+            "role": "documentation_refresh",
+            "allowed_tools": ["Read", "Grep", "Glob", "LS", "Edit", "Write"],
+            "responsibilities": [],
+        }
+    ]
+    refresher_packet["task_team_mapping"]["teammate_assignments"] = [
+        {"teammate_name": "refresher", "assignment": "Refresh AGENTS.md and CLAUDE.md from the active plan.", "expected_output": "report"}
+    ]
+    refresher_packet["dispatch_contract"] = build_dispatch_contract(refresher_packet)
+    refresher_tools = _runtime_owned_teammate_allowed_tools(refresher_packet, "refresher")
+    if any(tool not in refresher_tools for tool in ["Edit", "Write"]):
+        raise AssertionError(json.dumps(refresher_tools, ensure_ascii=False, indent=2))
     read_only_curator_packet = deepcopy(curator_packet)
     read_only_curator_packet["task_team_mapping"]["teammate_assignments"][0]["assignment"] = "Read-only curation assessment; no edits and no destructive operations."
     read_only_curator_tools = _runtime_owned_teammate_allowed_tools(read_only_curator_packet, "curator")
-    if "Bash" in read_only_curator_tools:
+    if "Bash" in read_only_curator_tools or any(tool in read_only_curator_tools for tool in ["Edit", "Write"]):
         raise AssertionError(json.dumps(read_only_curator_tools, ensure_ascii=False, indent=2))
     read_only_team_packet = deepcopy(fallback_packet)
     read_only_team_packet["team_spec"]["teammate_specs"] = [
@@ -5105,6 +5133,52 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     )
     if inspect_response.get("leader_result", {}).get("handled_by") == "outer_sdk_host_auto_bridge" or len(auto_bridge_calls) != 2:
         raise AssertionError(json.dumps({"response": inspect_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+    leader_decide_response = auto_bridge_host.handle_user_input(
+        {
+            "text": "continue the selected run through the bridge",
+            "run_id": "run_outer_auto_bridge_leader_decide",
+        }
+    )
+    leader_decide_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / "run_outer_auto_bridge_leader_decide"
+    leader_decide_events = _read_jsonl(leader_decide_root / "event_log.jsonl")
+    leader_decide_payloads = [item.get("payload", {}) for item in leader_decide_events if item.get("event_kind") == "user_prompt_submitted"]
+    if (
+        leader_decide_response.get("leader_result", {}).get("handled_by") == "outer_sdk_host_auto_bridge"
+        or len(auto_bridge_calls) != 2
+        or not leader_decide_payloads
+        or leader_decide_payloads[-1].get("dispatch_intent") != "leader_decide"
+        or leader_decide_payloads[-1].get("target_phase") is not None
+    ):
+        raise AssertionError(json.dumps({"response": leader_decide_response, "events": leader_decide_events[-5:], "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+    phase_word_response = auto_bridge_host.handle_user_input(
+        {
+            "text": "Please get L4 execute ready if the leader agrees.",
+            "run_id": "run_outer_auto_bridge_no_phase_infer",
+        }
+    )
+    phase_word_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / "run_outer_auto_bridge_no_phase_infer"
+    phase_word_events = _read_jsonl(phase_word_root / "event_log.jsonl")
+    phase_word_payloads = [item.get("payload", {}) for item in phase_word_events if item.get("event_kind") == "user_prompt_submitted"]
+    if (
+        phase_word_response.get("leader_result", {}).get("handled_by") == "outer_sdk_host_auto_bridge"
+        or len(auto_bridge_calls) != 2
+        or not phase_word_payloads
+        or phase_word_payloads[-1].get("dispatch_intent") != "leader_decide"
+        or phase_word_payloads[-1].get("target_phase") is not None
+    ):
+        raise AssertionError(json.dumps({"response": phase_word_response, "events": phase_word_events[-5:], "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+    implicit_negated_response = auto_bridge_host.handle_user_input(
+        {
+            "text": "UI async ack probe only. Do not advance project work.",
+            "run_id": "run_outer_auto_bridge_negated_probe",
+        }
+    )
+    if (
+        implicit_negated_response.get("host", {}).get("input_kind") != "user_prompt"
+        or implicit_negated_response.get("leader_result", {}).get("handled_by") == "outer_sdk_host_auto_bridge"
+        or len(auto_bridge_calls) != 2
+    ):
+        raise AssertionError(json.dumps({"response": implicit_negated_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
 
     class LongReportAdapter:
         name = "long-report-smoke"
@@ -5282,6 +5356,19 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         raise AssertionError(json.dumps({"tmux_status_only": extract_tmux_assistant_text(tmux_status_only, "inspect plan")}, ensure_ascii=False, indent=2))
     if not _outer_tmux_completed_without_assistant(tmux_status_only, "inspect plan"):
         raise AssertionError("outer tmux status-only prompt return should be classified as no assistant text")
+    tmux_progress_report_like = "\n\u276f continue\n\n\u25cf Reading 1 file, calling bridge 1 time...\n\u25cf Read 2 files, called bridge 1 time (ctrl+o to expand)\n\n\u273b Cooked for 10s\n\u276f\n? for shortcuts\n"
+    if extract_tmux_assistant_text(tmux_progress_report_like, "continue"):
+        raise AssertionError(json.dumps({"tmux_progress_report_like": extract_tmux_assistant_text(tmux_progress_report_like, "continue")}, ensure_ascii=False, indent=2))
+    tmux_processing_status_only = "\n\u276f go on for execute\n\n\u2736 Processing\u2026 (15s \u00b7 \u2191 335 tokens \u00b7 thought for 4s)\n\n\u2500\u2500\u2500 leader-orchestrator \u2500\u2500\n\u276f\n? for shortcuts\n"
+    if extract_tmux_assistant_text(tmux_processing_status_only, "go on for execute"):
+        raise AssertionError(json.dumps({"tmux_processing_status_only": extract_tmux_assistant_text(tmux_processing_status_only, "go on for execute")}, ensure_ascii=False, indent=2))
+    if not _outer_tmux_completed_without_assistant(tmux_processing_status_only, "go on for execute"):
+        raise AssertionError("outer tmux processing-only prompt return should be classified as no assistant text")
+    tmux_synthesizing_status_only = "\n\u276f go on for execution\n\n\u273d Synthesizing\u2026 (57s \u00b7 \u2191 755 tokens \u00b7 thought for 11s)\n\n\u2500\u2500\u2500 leader-orchestrator \u2500\u2500\n\u276f\n? for shortcuts\n"
+    if extract_tmux_assistant_text(tmux_synthesizing_status_only, "go on for execution"):
+        raise AssertionError(json.dumps({"tmux_synthesizing_status_only": extract_tmux_assistant_text(tmux_synthesizing_status_only, "go on for execution")}, ensure_ascii=False, indent=2))
+    if not _outer_tmux_completed_without_assistant(tmux_synthesizing_status_only, "go on for execution"):
+        raise AssertionError("outer tmux synthesizing-only prompt return should be classified as no assistant text")
     tmux_separator_only_after_bridge = "\n\u276f continue\n\n  Called bridge (ctrl+o to expand)\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f\n? for shortcuts\n"
     if extract_tmux_assistant_text(tmux_separator_only_after_bridge, "continue"):
         raise AssertionError(json.dumps({"tmux_separator_only_after_bridge": extract_tmux_assistant_text(tmux_separator_only_after_bridge, "continue")}, ensure_ascii=False, indent=2))
@@ -5335,6 +5422,13 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         json.dumps({"lifecycle": {"open_bridge_window_ids": []}}, ensure_ascii=False),
         encoding="utf-8",
     )
+    (bridge_status_root / "event_log.jsonl").write_text(
+        json.dumps({"event_kind": "partial_evidence_collected"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    bridge_state = _outer_runtime_bridge_completion_state(config, {"repo_key": repo_key, "run_id": bridge_status_run_id})
+    if not bridge_state.get("partial_evidence_seen") or not _outer_tmux_bridge_status_should_wait(bridge_state):
+        raise AssertionError(json.dumps(bridge_state, ensure_ascii=False, indent=2))
     (bridge_status_root / "event_log.jsonl").write_text(
         json.dumps({"event_kind": "bridge_result_returned_with_failure"}, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -5402,6 +5496,9 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     terminal_error = _outer_tmux_terminal_error(outer_api_error)
     if not terminal_error or terminal_error.get("type") != "OuterLeaderTmuxTerminalApiError":
         raise AssertionError(json.dumps({"terminal_error": terminal_error}, ensure_ascii=False, indent=2))
+    terminal_error_blank_tail = _outer_tmux_terminal_error(outer_api_error + "\n" * 40)
+    if not terminal_error_blank_tail or terminal_error_blank_tail.get("type") != "OuterLeaderTmuxTerminalApiError":
+        raise AssertionError(json.dumps({"terminal_error_blank_tail": terminal_error_blank_tail}, ensure_ascii=False, indent=2))
     if _outer_tmux_terminal_error("API Error: 500 while still streaming") is not None:
         raise AssertionError("outer tmux terminal error should require the Claude prompt to be visible")
     outer_prompt_echo_api_error = (

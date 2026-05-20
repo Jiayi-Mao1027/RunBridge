@@ -827,15 +827,19 @@
       return state.repos;
     }
 
-    async function selectRepo(repoKey) {
+    async function selectRepo(repoKey, options = {}) {
+      const autoSelectRun = Boolean(options.autoSelectRun);
       state.repoKey = repoKey || "";
+      state.runId = "";
       $("repoSelect").value = state.repoKey;
+      $("leaderRunMode").value = "host_default";
       stopStream();
       state.events.clear();
       state.rawLookups.clear();
       state.discussionBuffers.clear();
       state.toolInputBuffers.clear();
       state.gatewayWarnings = [];
+      state.status = null;
       state.projection = null;
       state.lastSeq = 0;
       state.lastEventId = "";
@@ -843,25 +847,34 @@
       state.selectedItemId = "";
       if (!state.repoKey) {
         state.runs = [];
+        $("runSelect").innerHTML = `<option value="">No runs</option>`;
         render();
         return;
       }
       const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs`);
       state.runs = Array.isArray(payload.runs) ? payload.runs : [];
       $("runSelect").innerHTML = state.runs.length
-        ? state.runs.map(run => `<option value="${escapeHtml(run.runId)}">${escapeHtml(run.runId)}</option>`).join("")
+        ? [`<option value="">Select run...</option>`, ...state.runs.map(run => `<option value="${escapeHtml(run.runId)}">${escapeHtml(run.runId)}</option>`)].join("")
         : `<option value="">No runs</option>`;
-      let nextRun = state.runs[0]?.runId || "";
-      try {
-        const latest = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/latest`);
-        nextRun = latest.runId || nextRun;
-      } catch {}
-      await selectRun(nextRun);
+      if (autoSelectRun) {
+        let nextRun = state.runs[0]?.runId || "";
+        try {
+          const latest = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/latest`);
+          nextRun = latest.runId || nextRun;
+        } catch {}
+        await selectRun(nextRun);
+        return;
+      }
+      state.runId = "";
+      $("runSelect").value = "";
+      await refreshGatewayHealth();
+      render();
     }
 
     async function selectLatestRun() {
       if (!state.repoKey) return;
       const latest = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/latest`);
+      $("leaderRunMode").value = "selected_run";
       await selectRun(latest.runId);
     }
 
@@ -886,11 +899,15 @@
         render();
         return;
       }
-      state.status = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`);
-      const payload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500&tail=1`);
+      const [status, payload, projection] = await Promise.all([
+        api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`),
+        api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500&tail=1`),
+        api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/projection`)
+      ]);
+      state.status = status;
       addEvents(payload.events || []);
       mergeSourceCursors(payload.sourceCursors || {});
-      await refreshProjection();
+      state.projection = projection;
       await refreshGatewayHealth();
       render();
       startStream();
@@ -1207,7 +1224,7 @@
       $("repoValue").textContent = state.repoKey || "none";
       $("runValue").textContent = state.runId || "none";
       $("eventCountValue").textContent = String(view.debugSummary?.sourceDedupedEventCount ?? state.events.size);
-      $("trajectoryCountValue").textContent = String(state.status?.trajectory?.length || 0);
+      $("trajectoryCountValue").textContent = String(state.status?.trajectoryCount ?? state.status?.trajectory?.length ?? 0);
       $("taskValue").textContent = header.taskTitle || "No task packet recorded.";
       $("summaryMeta").textContent = state.status?.gateway?.state || "not connected";
       setChip("phaseChip", header.phase || "unknown");
@@ -1216,16 +1233,18 @@
 
     function renderLeaderInput() {
       const host = state.leaderHostStatus || {};
-      $("inputProxyMeta").textContent = host.defaultRunId
-        ? `host run ${compact(host.defaultRunId, 32)}`
-        : state.gatewayHealth?.inputProxy || "unknown";
+      const runMode = $("leaderRunMode").value || "host_default";
+      $("inputProxyMeta").textContent = runMode === "host_default" && state.gatewayHealth?.inputProxy === "outer_sdk_host"
+        ? "new run on send"
+        : host.defaultRunId
+          ? `host run ${compact(host.defaultRunId, 32)}`
+          : state.gatewayHealth?.inputProxy || "unknown";
       const status = $("leaderInputStatus");
       status.textContent = state.inputStatus || "";
       status.className = `submit-status ${state.inputStatusClass || ""}`.trim();
-      const runMode = $("leaderRunMode").value || "host_default";
       $("leaderTargetStatus").textContent = runMode === "selected_run"
         ? `Target: continue selected run ${state.runId || "none selected"}`
-        : `Target: host default run ${host.defaultRunId || "pending host status"}; restarts create a new default run.`;
+        : `Target: create a new host run for ${state.repoKey || "selected repo"}.`;
       $("leaderSendButton").disabled = Boolean(state.inputPending);
       $("leaderInputText").disabled = Boolean(state.inputPending);
       $("leaderInputKind").disabled = Boolean(state.inputPending);
@@ -1336,7 +1355,8 @@
     function renderLeaderReports() {
       const view = tuiView();
       const report = view.mainReport || {};
-      $("leaderReportMeta").textContent = report.status ? report.status : "no result";
+      const projectedReports = projectedLeaderReportCards();
+      $("leaderReportMeta").textContent = report.status || projectedReports[0]?.status || "no result";
       const response = state.lastLeaderResponse?.leader_result ? {
         eventId: "latest-response",
         id: "latest-response",
@@ -1357,7 +1377,7 @@
         currentState: report.currentState,
         nextStep: report.nextStep,
         rawRefs: report.rawRefs || []
-      } : null].filter(Boolean);
+      } : null, ...(!report?.summary ? projectedReports.slice(0, 3) : [])].filter(Boolean);
       $("leaderReportList").innerHTML = cards.length ? cards.map((card, index) => `
         <article class="leader-report selectable ${index === 0 ? "primary" : ""}" data-item-id="${escapeHtml(card.id || card.eventId || "")}">
           <div class="member-head">
@@ -1993,7 +2013,8 @@
           text,
           input_kind: $("leaderInputKind").value || "user_prompt",
           repo_key: state.repoKey || undefined,
-          run_id: runMode === "selected_run" ? state.runId || undefined : undefined
+          run_id: runMode === "selected_run" ? state.runId || undefined : undefined,
+          start_new_run: runMode !== "selected_run"
         };
         const response = await apiJson("/api/leader/input", {
           method: "POST",
@@ -2001,15 +2022,29 @@
           body: JSON.stringify(payload)
         });
         state.lastLeaderResponse = response;
-        state.inputStatus = `accepted by ${response.host?.adapter || "outer host"} / ${response.leader_result?.status || "recorded"}`;
-        state.inputStatusClass = response.leader_result?.status === "succeeded" ? "ok" : "warn";
+        const leaderStatus = response.leader_result?.status || "recorded";
+        state.inputStatus = response.async
+          ? `submitted to ${response.host?.adapter || "outer host"} / ${leaderStatus}`
+          : `accepted by ${response.host?.adapter || "outer host"} / ${leaderStatus}`;
+        state.inputStatusClass = response.async || leaderStatus === "succeeded" ? "ok" : "warn";
         $("leaderInputText").value = "";
+        state.inputPending = false;
+        renderLeaderInput();
         const nextRepo = response.host?.repo_key || state.repoKey;
-        const nextRun = response.host?.run_id || state.runId;
+        const nextRun = runMode === "selected_run"
+          ? response.host?.run_id || state.runId
+          : response.host?.run_id || response.host?.default_run_id || "";
         if (nextRepo && nextRepo !== state.repoKey) {
           await loadRepos();
-          await selectRepo(nextRepo);
+          await selectRepo(nextRepo, { autoSelectRun: false });
         } else if (nextRun && nextRun !== state.runId) {
+          if (state.repoKey) {
+            const runsPayload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs`);
+            state.runs = Array.isArray(runsPayload.runs) ? runsPayload.runs : [];
+            $("runSelect").innerHTML = state.runs.length
+              ? [`<option value="">Select run...</option>`, ...state.runs.map(run => `<option value="${escapeHtml(run.runId)}">${escapeHtml(run.runId)}</option>`)].join("")
+              : `<option value="">No runs</option>`;
+          }
           await selectRun(nextRun);
         } else if (state.repoKey && state.runId) {
           state.status = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`);
@@ -2031,12 +2066,13 @@
     }
 
     $("repoSelect").addEventListener("change", event => {
-      selectRepo(event.target.value).catch(error => {
+      selectRepo(event.target.value, { autoSelectRun: true }).catch(error => {
         console.error(error);
         setChip("streamChip", "repo error", "warn");
       });
     });
     $("runSelect").addEventListener("change", event => {
+      $("leaderRunMode").value = event.target.value ? "selected_run" : "host_default";
       selectRun(event.target.value).catch(error => {
         console.error(error);
         setChip("streamChip", "run error", "warn");
@@ -2073,7 +2109,7 @@
         await refreshGatewayHealth();
         await loadRepos();
         const firstRepo = state.repos[0]?.repoKey || "";
-        await selectRepo(firstRepo);
+        await selectRepo(firstRepo, { autoSelectRun: true });
       } catch (error) {
         console.error(error);
         setChip("streamChip", "gateway error", "warn");

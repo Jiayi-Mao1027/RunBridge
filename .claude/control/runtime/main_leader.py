@@ -99,8 +99,8 @@ PHASE_TEAM_DEFAULTS = {
         ("rungater", "implementation_gate", READ_CHECK_TOOLS, "judge post-implementation readiness and recommend proceed, repair, reroute, or stop"),
     ],
     "l4_execute": [
-        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow through conda env mjy, adapt batch size and memory-related settings to actual GPU capacity, force formal GPU runs above 70GB on typical 80GB GPUs or above 90% of selected GPU memory otherwise when applicable, and record exact execution evidence"),
-        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, conda env use, GPU memory utilization, outcome classification, and recommend anomaly routing when needed"),
+        ("executor", "formal_execute", ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "run the approved workflow through conda env mjy, adapt batch size and memory-related settings to actual GPU capacity, target formal GPU runs above 70GB on typical 80GB GPUs or above 90% of selected GPU memory otherwise when applicable, but do not treat prelaunch free-memory shortfall as a hard stop when a smaller approved attempt can run; record exact execution evidence"),
+        ("postrun", "postrun_audit", READ_CHECK_TOOLS, "audit execution artifacts, conda env use, GPU memory utilization, lower-batch memory-shortfall handling, outcome classification, and recommend anomaly routing when needed"),
     ],
     "l4_anomaly": [
         ("anomaly-analyst-a", "anomaly_analysis", ANOMALY_TOOLS, "perform a complete independent anomaly diagnosis before peer review: inspect local evidence, answer-level/result samples when relevant, causal alternatives, missing evidence, and discriminative next checks"),
@@ -564,7 +564,8 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str, phase_
             "If runtime cannot be estimated, state that explicitly with the missing information and still record command, start time, owned process refs, logs, and expected outputs.",
             "L4 execute terminality rule: run formal long jobs in a way the bridge can wait on or poll until terminal completion. Do not return a final or partial bridge report while an owned process is still running; emit progress evidence and keep waiting.",
             "Formal GPU memory rule: unless the task is explicitly smoke/dry-run/conservative, configure formal GPU execution so observed memory after warmup exceeds 70GB on typical 80GB GPUs, or exceeds 90% of selected GPU total memory on other GPU sizes.",
-            "If the applicable formal memory target (>70GB on an 80GB GPU, otherwise >90%) cannot be reached safely, stop or classify the run as blocked/deviated with evidence; do not silently accept a low-memory formal run.",
+            "Prelaunch memory shortfall rule: if no GPU currently has the formal target free but a smaller approved attempt can plausibly run on the best approved GPU, do not stop before launch; downshift batch or related memory settings within policy, run the attempt, and record the lower-than-target memory as a deviation.",
+            "If the applicable formal memory target (>70GB on an 80GB GPU, otherwise >90%) cannot be reached after a real lower-batch attempt, classify a completed run as deviated with evidence; classify blocked only when no approved GPU can run the configured lower-bound attempt, required resources are missing, or the bounded retry ladder is exhausted.",
         ]
     if target_phase == "l4_execute" and teammate_name == "postrun":
         return [
@@ -573,7 +574,8 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str, phase_
             "Audit ETA rule: compare actual runtime against the executor's estimate when available, and flag material deviation as execution evidence rather than treating it as chat context.",
             "Postrun must run after the formal execution process has reached a terminal state or produced terminal failure evidence; do not audit a still-running process as complete.",
             "Environment audit rule: verify formal execution used conda env mjy and did not use venv. Missing or contradictory environment evidence is an execution deviation.",
-            "GPU memory audit rule: for formal GPU execution, verify observed memory after warmup exceeded 70GB on typical 80GB GPUs, or exceeded 90% of selected GPU total memory on other GPU sizes. Lower usage requires explicit smoke/conservative approval or hard resource evidence.",
+            "GPU memory audit rule: for formal GPU execution, verify observed memory after warmup exceeded 70GB on typical 80GB GPUs, or exceeded 90% of selected GPU total memory on other GPU sizes. Lower usage after a best-available lower-batch attempt is a deviation to report, not an automatic failure.",
+            "Prelaunch memory shortfall audit rule: verify the executor did not stop solely because free memory was below target when a smaller approved attempt could run.",
             "Multi-stage memory audit rule: when the task contains multiple formal stages such as train then value/evaluate/score, audit GPU memory target satisfaction separately for each stage. A good train-stage memory record does not prove a later value/eval stage satisfied the target.",
         ]
     if target_phase == "l4_anomaly":

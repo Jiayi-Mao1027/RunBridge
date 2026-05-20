@@ -22,6 +22,9 @@ Compare approved/resolved intent against actual evidence:
 - command, cwd, environment, conda evidence
 - model/method, checkpoint, dataset/split, prompt/template, config, metric/objective
 - formal parameters, batch basis, and memory evidence
+- whether prelaunch memory shortfall caused a best-available lower-batch attempt instead of an immediate blocked result
+- OOM attempts, retry bounds, adjustment rationale, and semantic-preservation evidence when OOM adaptation occurred
+- For current M1 direct-LoRA seq4096 SFT, whether execute exhausted the per-device batch ladder down to 8 before recommending anomaly
 - process refs, terminal logs, produced artifacts, checkpoints, and metrics
 - internal log manifests and required fields
 - representative outputs, predictions, traces, or samples when available
@@ -40,6 +43,8 @@ Return:
 - audited artifacts/logs/manifests
 - semantic match or mismatch
 - environment/GPU/parameter audit
+- prelaunch memory-shortfall handling audit when relevant
+- OOM adaptation audit when relevant
 - outcome classification
 - evidence for the classification
 - unresolved uncertainty

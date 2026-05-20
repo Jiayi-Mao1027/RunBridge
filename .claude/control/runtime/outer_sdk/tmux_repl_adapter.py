@@ -107,7 +107,15 @@ class TmuxReplOuterLeaderAdapter:
             capture = self._wait_for_completion(session_name, prompt, request=request, timeout=_tmux_timeout_seconds())
             assistant_text = extract_assistant_text(capture, prompt)
             if not assistant_text:
-                assistant_text = _tail_capture(capture)
+                tail_text = _tail_capture(capture)
+                if tail_text and not _is_transient_tui_status(tail_text) and not _is_tui_progress_report_text(tail_text):
+                    assistant_text = tail_text
+            if not assistant_text or _is_transient_tui_status(assistant_text) or _is_tui_progress_report_text(assistant_text):
+                raise OuterLeaderTmuxTerminalError(
+                    "Claude TTY returned to the prompt without assistant text; capture contained only tool or status output.",
+                    error_type="OuterLeaderTmuxNoAssistantText",
+                    capture=capture,
+                )
             duration_ms = int((time.time() - started) * 1000)
             contract_violation = _outer_leader_tmux_contract_violation(self.config, request, assistant_text)
             if contract_violation:
@@ -300,7 +308,17 @@ class TmuxReplOuterLeaderAdapter:
         deadline = time.time() + timeout
         last = ""
         while time.time() < deadline:
-            last = self._capture(session_name)
+            try:
+                last = self._capture(session_name)
+            except subprocess.CalledProcessError as exc:
+                message = (exc.stderr or exc.stdout or str(exc)).strip()
+                if not self._session_exists(session_name):
+                    raise OuterLeaderTmuxTerminalError(
+                        f"Claude TTY exited before the prompt became ready: {message}",
+                        error_type="OuterLeaderTmuxStartupFailed",
+                        capture=last,
+                    ) from exc
+                raise
             if "❯" in last:
                 return
             time.sleep(0.5)
@@ -356,6 +374,12 @@ class TmuxReplOuterLeaderAdapter:
             runtime_bridge = _runtime_bridge_completion_state(self.config, request)
             if runtime_bridge.get("terminal_bridge_result_seen") and not _tmux_bridge_status_should_wait(runtime_bridge):
                 return last
+            if _tmux_waiting_on_bridge_status(last) and not _tmux_bridge_status_should_wait(runtime_bridge):
+                raise OuterLeaderTmuxTerminalError(
+                    "Claude TTY displayed bridge activity, but runtime did not record a bridge call within the bridge-status grace window.",
+                    error_type="OuterLeaderTmuxNoAssistantText",
+                    capture=last,
+                )
             if _looks_complete(last, prompt):
                 return last
             prompt_completion = _tmux_prompt_completion_candidate(last, prompt)
@@ -465,6 +489,10 @@ class TmuxReplOuterLeaderAdapter:
         result = self._run(["tmux", "capture-pane", "-p", "-t", session_name, "-S", "-500"])
         return _strip_ansi(result.stdout)
 
+    def _session_exists(self, session_name: str) -> bool:
+        result = self._run(["tmux", "has-session", "-t", session_name], check=False)
+        return result.returncode == 0
+
     def _run(self, args: list[str], *, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             args,
@@ -513,7 +541,7 @@ def extract_assistant_text(capture: str, prompt: str | None = None) -> str:
                 continue
             collected.append(item.rstrip())
         candidate = _limit_text("\n".join(collected).strip(), REPORT_TEXT_LIMIT)
-        if candidate and not _is_transient_tui_status(candidate):
+        if candidate and not _is_transient_tui_status(candidate) and not _is_tui_progress_report_text(candidate):
             return candidate
     return ""
 
@@ -521,17 +549,22 @@ def extract_assistant_text(capture: str, prompt: str | None = None) -> str:
 def _looks_complete(capture: str, prompt: str) -> bool:
     text = _strip_ansi(capture)
     assistant_text = extract_assistant_text(text, prompt)
-    return "✻" in text and text.count("❯") >= 1 and bool(assistant_text) and not _is_transient_tui_status(assistant_text)
+    return (
+        _tmux_prompt_visible(text)
+        and bool(assistant_text)
+        and not _is_transient_tui_status(assistant_text)
+        and not _is_tui_progress_report_text(assistant_text)
+    )
 
 
 def _tmux_prompt_completion_candidate(capture: str, prompt: str) -> str:
     text = _strip_ansi(capture)
     assistant_text = extract_assistant_text(text, prompt)
-    if not assistant_text or _is_transient_tui_status(assistant_text):
+    if not assistant_text or _is_transient_tui_status(assistant_text) or _is_tui_progress_report_text(assistant_text):
         return ""
     if "leader-orchestrator" not in text:
         return ""
-    if "esc to interrupt" not in text and "? for shortcuts" not in text:
+    if not _tmux_tui_footer_visible(text):
         return ""
     return assistant_text
 
@@ -554,6 +587,8 @@ def _tmux_completed_without_assistant(capture: str, prompt: str) -> bool:
     if extract_assistant_text(text, prompt):
         return False
     if "Cooked for" in text or "Baked for" in text:
+        return True
+    if "? for shortcuts" in text.lower() and _tmux_active_status_visible(text):
         return True
     return _tmux_status_summary_without_assistant(text)
 
@@ -655,14 +690,28 @@ def _tmux_terminal_api_error_line(line: str) -> str | None:
 
 
 def _tmux_prompt_visible(text: str) -> bool:
-    if "? for shortcuts" not in text and "esc to interrupt" not in text:
+    if not _tmux_tui_footer_visible(text):
         return False
     current_prompt = _tmux_current_prompt_line(text)
     return bool(re.match(r"^\s*(?:\u276f|>)\s*$", current_prompt or ""))
 
 
+def _tmux_tui_footer_visible(text: str) -> bool:
+    normalized = _strip_ansi(text).lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "? for shortcuts",
+            "esc to interrupt",
+            "shift+tab to cycle",
+            "don't ask on",
+            "dont ask on",
+        )
+    )
+
+
 def _tmux_current_prompt_line(text: str) -> str:
-    tail_lines = _strip_ansi(text).splitlines()[-20:]
+    tail_lines = [line for line in _strip_ansi(text).splitlines() if line.strip()][-80:]
     for raw_line in reversed(tail_lines):
         line = _clean_line(raw_line).strip()
         if re.match(r"^(?:\u276f|>)\s*", line):
@@ -683,9 +732,35 @@ def _is_transient_tui_status(text: str) -> bool:
     if normalized.startswith("calling ") and ("…" in normalized or "..." in normalized):
         return True
     spinner_text = re.sub(r"^[^\w]+", "", normalized.replace("…", "...")).strip()
-    if re.match(r"^(frosting|cooking|baking|thinking|reading)\b", spinner_text) and "..." in spinner_text:
+    if "..." in spinner_text and re.search(r"\([^)]*(?:tokens?|\bthought\b|↑|\b\d+\s*[smh]\b)", spinner_text):
+        return True
+    if re.match(r"^(frosting|cooking|baking|thinking|reading|processing|forging|sketching)\b", spinner_text) and "..." in spinner_text:
         return True
     return False
+
+
+def _is_tui_progress_report_text(text: str) -> bool:
+    lines = [_clean_line(line).strip() for line in _strip_ansi(str(text or "")).splitlines()]
+    meaningful = [line for line in lines if line]
+    if not meaningful:
+        return False
+    non_progress: list[str] = []
+    for line in meaningful:
+        normalized = re.sub(r"^[^\w]+", "", line).strip()
+        lowered = normalized.lower().replace("…", "...")
+        if not lowered:
+            continue
+        if _is_transient_tui_status(line) or _is_tui_tool_or_output_line(line) or _is_tui_chrome_line(line):
+            continue
+        if "ctrl+o to expand" in lowered:
+            continue
+        if re.search(r"\b(read|reading|call|calling|called|using|searching|running|listed|edited|wrote|thinking|retrying)\b", lowered):
+            if "..." in lowered or re.search(r"\b\d+\s+(?:file|files|tool|tools|time|times|memory|memories)\b", lowered):
+                continue
+        if re.match(r"^(?:cooked|baked|frosting|cooking|thinking|reading|processing|forging|sketching)\b", lowered):
+            continue
+        non_progress.append(normalized)
+    return not non_progress
 
 
 def _tmux_waiting_on_bridge_status(text: str) -> bool:
@@ -730,6 +805,9 @@ def _runtime_bridge_completion_state(config: Any, request: dict[str, Any]) -> di
         if request_created_at is not None:
             request_age_seconds = max(0.0, (datetime.now(timezone.utc) - request_created_at).total_seconds())
         terminal_seen = False
+        partial_evidence_seen = False
+        bridge_activity_seen = False
+        latest_bridge_event_at = None
         event_log = run_root / "event_log.jsonl"
         if event_log.exists():
             for line in event_log.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]:
@@ -740,15 +818,48 @@ def _runtime_bridge_completion_state(config: Any, request: dict[str, Any]) -> di
                 if request_created_at is not None and event_timestamp is not None and event_timestamp < request_created_at:
                     continue
                 event_kind = str(event.get("event_kind") or "")
-                if event_kind.startswith("bridge_result_returned") or event_kind in {"bridge_call_failed", "bridge_window_failed"}:
+                if event_kind in {
+                    "bridge_call_intended",
+                    "call_bridge_sdk_started",
+                    "bridge_window_opened",
+                    "bridge_packet_accepted",
+                    "team_create_started",
+                    "team_create_succeeded",
+                    "task_create_started",
+                    "task_create_succeeded",
+                    "message_dispatch_started",
+                    "message_dispatch_succeeded",
+                    "partial_evidence_collected",
+                }:
+                    bridge_activity_seen = True
+                    latest_bridge_event_at = event_timestamp or latest_bridge_event_at
+                if event_kind == "partial_evidence_collected":
+                    partial_evidence_seen = True
+                if event_kind.startswith("bridge_result_returned") or event_kind in {
+                    "bridge_call_failed",
+                    "bridge_window_failed",
+                    "bridge_window_returned",
+                    "bridge_window_partial_returned",
+                    "bridge_window_interrupted",
+                    "bridge_window_orphaned",
+                }:
+                    bridge_activity_seen = True
                     terminal_seen = True
+                    latest_bridge_event_at = event_timestamp or latest_bridge_event_at
+        latest_bridge_event_age_seconds = None
+        if latest_bridge_event_at is not None:
+            latest_bridge_event_age_seconds = max(0.0, (datetime.now(timezone.utc) - latest_bridge_event_at).total_seconds())
         last_bridge_result = snapshot.get("last_bridge_result") if isinstance(snapshot.get("last_bridge_result"), dict) else None
         return {
             "open_bridge_windows": open_windows,
             "terminal_bridge_result_seen": terminal_seen,
+            "partial_evidence_seen": partial_evidence_seen,
+            "bridge_activity_seen": bridge_activity_seen,
             "request_age_seconds": request_age_seconds,
+            "latest_bridge_event_age_seconds": latest_bridge_event_age_seconds,
             "snapshot_ref": str(snapshot_path),
             "last_bridge_result": last_bridge_result,
+            "request_created_at": request_created_at.isoformat() if request_created_at is not None else None,
         }
     except Exception:
         return {"open_bridge_windows": None, "terminal_bridge_result_seen": False, "request_age_seconds": None}
@@ -756,11 +867,16 @@ def _runtime_bridge_completion_state(config: Any, request: dict[str, Any]) -> di
 
 def _runtime_terminal_bridge_result(config: Any, request: dict[str, Any]) -> dict[str, Any] | None:
     state = _runtime_bridge_completion_state(config, request)
-    if not state.get("terminal_bridge_result_seen"):
-        return None
     result = state.get("last_bridge_result")
     if not isinstance(result, dict) or not result:
         return None
+    if not state.get("terminal_bridge_result_seen"):
+        request_created_at = _parse_iso_timestamp(state.get("request_created_at"))
+        result_returned_at = _parse_iso_timestamp(
+            result.get("returned_at") or result.get("completed_at") or result.get("timestamp")
+        )
+        if request_created_at is None or result_returned_at is None or result_returned_at < request_created_at:
+            return None
     status = str(result.get("status") or "").strip().lower()
     if status not in {"succeeded", "failed", "partial", "partial_or_failed", "orphaned", "needs_user_answer", "blocked"} and not isinstance(result.get("error_or_null"), dict):
         return None
@@ -772,6 +888,16 @@ def _tmux_bridge_status_should_wait(state: dict[str, Any]) -> bool:
         return True
     if state.get("terminal_bridge_result_seen"):
         return False
+    if state.get("bridge_activity_seen"):
+        event_age = state.get("latest_bridge_event_age_seconds")
+        if event_age is None:
+            return True
+        return float(event_age) < _tmux_bridge_status_grace_seconds()
+    if state.get("partial_evidence_seen"):
+        event_age = state.get("latest_bridge_event_age_seconds")
+        if event_age is None:
+            return True
+        return float(event_age) < _tmux_bridge_status_grace_seconds()
     age = state.get("request_age_seconds")
     if age is None:
         return True

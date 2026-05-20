@@ -2595,7 +2595,13 @@ def _validate_bridge_packet(packet: Any, event: WorkflowEvent, snapshot: dict[st
         reasons.append("bridge_packet_binding_mismatch")
     allowed_routes = set(snapshot.get("allowed_routes", []))
     target_phase = packet.get("target_phase")
-    if target_phase and allowed_routes and target_phase not in allowed_routes and target_phase != snapshot.get("current_phase"):
+    if (
+        target_phase
+        and allowed_routes
+        and target_phase not in allowed_routes
+        and target_phase != snapshot.get("current_phase")
+        and not _packet_target_matches_explicit_reroute(snapshot, str(target_phase))
+    ):
         reasons.append("bridge_packet_route_not_allowed")
     allowed_actions = packet.get("allowed_actions", [])
     required_window_actions = {"team_create", "task_create", "send_messages", "task_complete", "team_delete"}
@@ -2689,6 +2695,16 @@ def _expected_phase_route(snapshot: dict[str, Any], target_phase: str) -> list[s
         return [str(item) for item in route]
     current = str(snapshot.get("current_phase") or "leader_freeze")
     return [current] if current == target_phase else [current, target_phase]
+
+
+def _packet_target_matches_explicit_reroute(snapshot: dict[str, Any], target_phase: str) -> bool:
+    route_state = snapshot.get("route")
+    if not isinstance(route_state, dict) or route_state.get("is_stale") is True:
+        return False
+    if str(route_state.get("target_phase") or "") != target_phase:
+        return False
+    route = route_state.get("current_route")
+    return isinstance(route, list) and bool(route) and str(route[-1]) == target_phase
 
 
 def _packet_l3_write_scope_policy_owned(packet: dict[str, Any]) -> bool:

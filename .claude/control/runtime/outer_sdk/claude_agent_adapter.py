@@ -505,7 +505,7 @@ def _outer_leader_cli_info(control_root: Path, repo_root: Path | None = None) ->
         parsed = _parse_claude_command(command)
         if parsed.get("command"):
             return {
-                "cli_path": _resolve_cli_path(str(parsed["command"])),
+                "cli_path": _resolve_cli_path(str(parsed["command"]), parsed.get("env") or {}),
                 "cli_source": "BRIDGE_CLAUDE_COMMAND",
                 "cli_warning": parsed.get("warning"),
                 "env": parsed.get("env") or {},
@@ -576,7 +576,7 @@ def _default_outer_leader_cli_info(control_root: Path, repo_root: Path | None = 
         }
     command = f"HOME={_shell_quote(str(workspace_home))} claude --mcp-config {_shell_quote(str(mcp_config))}"
     return {
-        "cli_path": _resolve_cli_path("claude"),
+        "cli_path": _resolve_cli_path("claude", {"HOME": str(workspace_home)}),
         "cli_source": "control_root_default",
         "cli_warning": None,
         "env": {"HOME": str(workspace_home)},
@@ -705,11 +705,34 @@ def _expand_cli_path(value: str | None) -> str | None:
     return str(Path(value).expanduser()) if any(sep in value for sep in ("/", "\\")) else value
 
 
-def _resolve_cli_path(value: str) -> str:
+def _resolve_cli_path(value: str, env: dict[str, str] | None = None) -> str:
     expanded = Path(value).expanduser()
     if expanded.is_absolute() or any(sep in value for sep in ("/", "\\")):
         return str(expanded)
-    return shutil.which(value) or value
+    if value == "claude":
+        env_home = (env or {}).get("HOME")
+        if env_home:
+            resolved = _resolve_claude_from_home(env_home)
+            if resolved:
+                return resolved
+    resolved = shutil.which(value)
+    if resolved:
+        return resolved
+    if value == "claude":
+        process_home = os.environ.get("HOME")
+        if process_home and process_home != (env or {}).get("HOME"):
+            resolved = _resolve_claude_from_home(process_home)
+            if resolved:
+                return resolved
+    return value
+
+
+def _resolve_claude_from_home(home: str) -> str | None:
+    for relative in (".local/bin/claude", ".npm-global/bin/claude"):
+        candidate = Path(home).expanduser() / relative
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def _outer_leader_setting_sources(cli_info: dict[str, Any]) -> list[str]:

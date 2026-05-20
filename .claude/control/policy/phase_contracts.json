@@ -144,31 +144,88 @@
     "other_gpu_min_observed_fraction": 0.9,
     "smoke_is_not_formal_basis": true,
     "multi_stage_memory_evidence_required": true,
+    "prelaunch_memory_shortfall_policy": {
+      "free_memory_shortfall_is_not_terminal": true,
+      "best_available_gpu_attempt_required": true,
+      "batch_downshift_before_blocking": true,
+      "m1_direct_lora_seq4096_min_per_device_batch_size": 8,
+      "rule": "Prelaunch free memory below the formal memory target is evidence to choose the best approved GPU and downshift batch or related memory settings inside the approved semantic boundary; it is not by itself a hard stop or user-decision blocker.",
+      "block_only_when": [
+        "no approved GPU can run even the configured lower-bound attempt",
+        "required tools, environment, model, dataset, or writable output path are unavailable",
+        "the configured lower-bound attempt or OOM ladder is exhausted with auditable terminal evidence",
+        "the next viable fix would change method, checkpoint, dataset, prompt/template, objective, metric, sequence/truncation policy, or require killing unrelated processes"
+      ],
+      "classification_when_run_succeeds_below_target": "nonblocking_risk_or_deviation"
+    },
+    "oom_adaptation_policy": {
+      "minor_oom_is_execute_retryable": true,
+      "bounded_execute_owned_attempts_per_stage": 5,
+      "m1_direct_lora_min_per_device_batch_size": 8,
+      "m1_direct_lora_retry_ladder_guidance": "For the current M1 direct-LoRA seq4096 SFT case, if batch 12 or 11 OOMs narrowly during normal forward/loss allocation, keep execute ownership and continue the policy-preserving ladder through per-device batch 10, then 9, then 8 while preserving effective batch with gradient accumulation when possible.",
+      "retryable_minor_oom_definition": "An OOM during smoke, warmup, or formal launch is execute-owned when the resolved method, dataset, sequence/template basis, objective, and selected hardware remain valid and the fix is limited to batch, microbatch, gradient accumulation, GPU selection, precision already allowed by the packet, or an already-implemented memory-efficient toggle.",
+      "executor_may_adjust_without_user_or_anomaly": [
+        "per_device_batch_size",
+        "microbatch_size",
+        "gradient_accumulation_steps",
+        "available GPU selection within the approved resource boundary",
+        "prelaunch batch downshift when free memory is below the formal target but a smaller approved attempt can run",
+        "precision setting when already permitted by the packet and method",
+        "already-implemented memory-efficient loss, checkpointing, chunking, or cache toggles that preserve semantics"
+      ],
+      "executor_must_preserve": [
+        "resolved model/method family, including direct LoRA when that is the approved method",
+        "checkpoint, dataset/split/source, prompt/template, objective, and evaluation metric",
+        "sequence length and truncation policy unless explicit packet/user approval allows a change",
+        "formal GPU utilization target intent; lower observed memory is a recorded deviation unless explicitly approved or backed by hard resource evidence, but prelaunch free-memory shortfall alone must not prevent a smaller approved attempt"
+      ],
+      "escalate_after": [
+        "the same formal stage OOMs after the configured execute-owned retry ladder is exhausted, including per-device batch 8 for the current M1 direct-LoRA seq4096 SFT case",
+        "the next viable fix would change method family, sequence length, dataset, objective, metric, or materially lower the formal memory target",
+        "OOM occurs before normal model/data allocation or suggests corrupted environment, broken driver/runtime, or unavailable hardware after the prelaunch memory-shortfall policy has been applied",
+        "logs are contradictory, missing, or insufficient for postrun to audit the actual attempted settings"
+      ],
+      "manifest_requirements": [
+        "record every OOM attempt with command, cwd, GPU IDs, available memory snapshot, batch/microbatch/grad_accum/precision, traceback or log path, observed/reserved memory when available, and adjustment rationale",
+        "record why each retry preserved the approved semantic basis",
+        "record why bounded attempts were exhausted or why escalation was needed"
+      ]
+    },
     "long_running_execute_waits_until_terminal": true,
     "partial_return_allowed_only_after_process_terminal": true,
     "runtime_estimate_required_before_long_running_launch": true,
     "executor_prelaunch_requirements": [
       "confirm the resolved semantic basis before formal execution: model/method, checkpoint, dataset/split, prompt/template, config, metric/objective, and inherited defaults",
       "probe available GPU memory and competing processes before choosing formal settings",
+      "if no GPU meets the formal free-memory target but at least one approved GPU can plausibly run a smaller attempt, choose the best available GPU and downshift batch or related memory settings before reporting blocked",
       "use bounded smoke or warmup evidence to choose formal batch, microbatch, gradient accumulation, sequence length, precision, and effective batch size",
+      "prepare a bounded OOM adaptation plan for retryable minor OOMs before escalating to anomaly or user decision; for current M1 direct-LoRA seq4096 SFT, include the batch ladder down to per-device batch 8",
       "provide an estimated wall-clock runtime range with basis before launching a long-running process",
       "record process refs, log paths, expected outputs, and polling/audit plan before returning from launch"
     ],
     "formal_stage_contract": [
       "each formal stage, including train, value, evaluate, score, or export stages, needs its own command, cwd, environment evidence, semantic basis, parameter basis, and observed memory evidence",
       "do not reuse train-stage batch or memory evidence as proof that a later stage is configured correctly",
+      "expected long runtime is not by itself a user-decision blocker when the formal stage is approved and wait_until_process_complete or executor_hard_timeout_disabled is set",
+      "runtime-owned or direct fallback execute remains responsible for launching or waiting on approved long formal jobs when tools and resources are available; do not block solely because the job is long",
+      "minor OOMs are bounded execute-owned adaptation events, not immediate bridge failures, when the fix preserves the approved semantic basis and stays within oom_adaptation_policy",
+      "prelaunch free-memory shortfall is not a terminal resource failure when a smaller approved attempt can run; select the best approved GPU, downshift batch or related memory settings within policy, and record any lower-than-target memory use as a deviation",
+      "for current M1 direct-LoRA seq4096 SFT, do not escalate repeated minor OOMs to anomaly before trying the policy-preserving per-device batch ladder down to 8 unless logs become unauditable or a semantic/resource-policy change is required",
+      "each OOM retry attempt must be logged with the failed settings, adjustment rationale, and preserved semantic basis",
       "do not downgrade to toy, debug, smoke, or conservative settings unless explicitly approved or backed by hard resource evidence",
-      "if the formal target cannot meet memory or semantic requirements, classify the stage as blocked or deviated with evidence instead of silently accepting a weak run"
+      "if the formal memory target cannot be met after a real lower-batch attempt, classify a completed run as deviated with evidence rather than silently accepting a weak run; classify blocked only after the lower-bound attempt cannot run or the retry ladder is exhausted"
     ],
     "postrun_audit_requirements": [
       "compare approved or resolved intent against the actual command, config, checkpoint, dataset, prompt/template, metric, and produced artifacts",
       "audit that formal settings follow smoke or warmup evidence and do not accidentally inherit toy/debug parameters",
+      "audit any OOM adaptation attempts against oom_adaptation_policy and verify bounded retries preserved semantic identity",
       "audit that every formal log folder has a complete internal manifest, not only a descriptive filename",
       "inspect terminal logs, process refs, metrics, produced artifacts, and representative outputs or samples when available",
       "distinguish execution defect, method underperformance, acceptable completion, nonblocking deviation, and anomaly-worthy suspicion"
     ],
     "postrun_route_policy": [
       "route to l4_anomaly when the outcome is contradictory, suspicious, materially under-explained, or cannot be classified from logs/artifacts alone",
+      "route to l4_anomaly or user decision when OOM recovery exhausted the configured execute-owned retry ladder, including per-device batch 8 for current M1 direct-LoRA seq4096 SFT, or would require a semantic/method/resource-policy change",
       "route to l4_implement when the issue is a concrete implementation or config defect that should be repaired before another formal run",
       "route to user decision when the next step changes scope, consumes major resources, or requires a strategic choice"
     ]
@@ -310,8 +367,8 @@
         "partial_return_allowed_only_after_process_terminal": true
       },
       "teammates": [
-        {"teammate_name": "executor", "role": "formal_execute", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "responsibilities": ["run the approved workflow through conda env mjy, adapt batch/memory settings to selected GPU capacity, and record exact execution evidence"]},
-        {"teammate_name": "postrun", "role": "postrun_audit", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash"], "responsibilities": ["audit execution artifacts, conda env use, GPU memory utilization, outcome classification, and recommend anomaly routing when needed"]}
+        {"teammate_name": "executor", "role": "formal_execute", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "Write"], "responsibilities": ["run the approved workflow through conda env mjy, adapt batch/memory/OOM settings within oom_adaptation_policy, and record exact execution evidence"]},
+        {"teammate_name": "postrun", "role": "postrun_audit", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash"], "responsibilities": ["audit execution artifacts, conda env use, GPU memory utilization, bounded OOM adaptation, outcome classification, and recommend anomaly routing when needed"]}
       ],
       "completion_contract_additions": {
         "required_artifacts": ["log_manifest"],
@@ -342,12 +399,19 @@
           "Execution environment rule: all formal execute commands must use conda env mjy and record environment evidence.",
           "Before formal execution, use bounded smoke evidence to choose formal per-device batch, microbatch, gradient accumulation, sequence length, precision, and effective batch size.",
           "Each formal stage must independently satisfy batch/memory adaptation and record stage-specific memory evidence.",
+          "Long-run launch rule: expected long runtime alone is not a blocker when the formal stage is approved and wait_until_process_complete/executor_hard_timeout_disabled is active; launch and wait/poll in the bridge window unless a concrete tool/resource/approval constraint blocks it.",
+          "Minor OOM adaptation rule: retryable OOMs are execute-owned bounded adaptation events; adjust only the packet-approved batch, microbatch, grad accumulation, GPU, precision, or already-implemented memory-efficient toggles, and preserve model/method/dataset/template/objective semantics.",
+          "Prelaunch memory shortfall rule: if no GPU meets the formal free-memory target but an approved GPU can plausibly run a smaller attempt, do not report blocked; choose the best available GPU, downshift batch or related memory settings within policy, run the attempt, and record lower memory use as a deviation.",
+          "M1 OOM ladder rule: for current M1 direct-LoRA seq4096 SFT, continue policy-preserving OOM retries through per-device batch 10, 9, and 8 before routing to anomaly, preserving effective batch with gradient accumulation when possible.",
+          "OOM attempt log rule: record every OOM attempt with failed settings, GPU memory snapshot, traceback/log path, adjustment rationale, and why the retry preserves the approved semantic basis.",
           "Every generated formal log folder must contain an internal manifest with the required manifest fields from policy.",
           "Formal long jobs must be waitable or polled until terminal completion; do not return final or partial while an owned process is still running."
         ],
         "postrun": [
           "Semantic audit rule: verify the actual run used the resolved model/method, checkpoint, dataset, prompt/template, config, and metric basis.",
           "Log manifest audit rule: verify each generated formal log folder has an internal manifest matching command, environment, semantic basis, formal parameters/effective batch size, process refs, artifacts, and terminal status.",
+          "OOM adaptation audit rule: verify any OOM retries stayed within oom_adaptation_policy, preserved semantic identity, and stopped only after the configured retry ladder, including batch 8 for current M1 direct-LoRA seq4096 SFT, or a major-change requirement.",
+          "Prelaunch memory shortfall audit rule: verify low free memory was handled as a best-available lower-batch attempt when possible, not as an immediate failure; lower-than-target observed memory is a deviation unless explicitly approved.",
           "Postrun must run after the formal execution process has reached terminal state or terminal failure evidence.",
           "Environment and GPU audit rule: verify conda env mjy and formal GPU utilization threshold evidence."
         ]
