@@ -62,10 +62,12 @@ class OuterSdkHost:
         *,
         adapter: OuterLeaderAdapter | None = None,
         auto_bridge_runner: Any | None = None,
+        print_fallback_adapter: OuterLeaderAdapter | None = None,
     ) -> None:
         self.config = config
         self.adapter = adapter or build_outer_leader_adapter(config)
         self._auto_bridge_runner = auto_bridge_runner
+        self._print_fallback_adapter = print_fallback_adapter
         self.started_at = _now_iso()
         self.host_instance_id = f"outer_host_{uuid.uuid4().hex[:12]}"
         repo_key = self._repo_key()
@@ -180,7 +182,64 @@ class OuterSdkHost:
                 sequence=sequence,
             ),
         )
+        leader_result = self._maybe_retry_outer_leader_with_print(request, leader_result)
         return self._maybe_auto_bridge_after_outer_leader(request, leader_result)
+
+    def _maybe_retry_outer_leader_with_print(self, request: dict[str, Any], leader_result: dict[str, Any]) -> dict[str, Any]:
+        if not _outer_leader_print_retry_needed(self.config, self.adapter.name, request, leader_result):
+            return leader_result
+        self._write_host_event(
+            "outer_leader_adapter_fallback_started",
+            {
+                "request": request,
+                "from_adapter": self.adapter.name,
+                "to_adapter": "claude-print",
+                "reason": _outer_leader_print_retry_reason(request, leader_result),
+                "previous_leader_result": _bound(leader_result),
+            },
+        )
+        try:
+            adapter = self._print_fallback_adapter or build_outer_leader_adapter(self.config, mode="print")
+            retry_result = adapter.handle_user_input(
+                dict(request),
+                event_sink=lambda event_type, payload, status="streaming", sequence=None: self.emit_sdk_observed_event(
+                    request,
+                    event_type,
+                    payload,
+                    status=status,
+                    sequence=sequence,
+                ),
+            )
+            retry_result = _with_outer_leader_adapter_fallback_evidence(
+                retry_result,
+                from_adapter=self.adapter.name,
+                previous_leader_result=leader_result,
+                reason=_outer_leader_print_retry_reason(request, leader_result),
+            )
+            self._write_host_event(
+                "outer_leader_adapter_fallback_result",
+                {
+                    "request": request,
+                    "leader_result": retry_result,
+                },
+            )
+            return retry_result
+        except Exception as exc:
+            failed = _outer_leader_exception_result(request, None, exc)
+            failed = _with_outer_leader_adapter_fallback_evidence(
+                failed,
+                from_adapter=self.adapter.name,
+                previous_leader_result=leader_result,
+                reason=_outer_leader_print_retry_reason(request, leader_result),
+            )
+            self._write_host_event(
+                "outer_leader_adapter_fallback_result",
+                {
+                    "request": request,
+                    "leader_result": failed,
+                },
+            )
+            return failed
 
     def _write_outer_leader_result(self, request: dict[str, Any], runtime_result: Any, leader_result: dict[str, Any]) -> None:
         self._write_host_event("outer_leader_result", {"request": request, "leader_result": leader_result})
@@ -304,21 +363,24 @@ class OuterSdkHost:
         )
 
     def _auto_bridge_decision(self, request: dict[str, Any], *, leader_result: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not _auto_bridge_enabled(request):
+            return {"should_auto_bridge": False, "reason": "auto_bridge_disabled"}
         intent = str(request.get("dispatch_intent") or "").strip()
         if intent == "advance_or_continue":
-            decision_reason = "advance_or_continue_without_bridge_call_after_outer_leader"
-        elif intent == "leader_decide":
-            result = leader_result if isinstance(leader_result, dict) else {}
-            error_type = _leader_result_error_type(result)
-            if result.get("status") == "succeeded":
-                return {"should_auto_bridge": False, "reason": "leader_decide_succeeded_without_recovery"}
-            if not _outer_leader_failure_allows_auto_bridge(error_type):
+            target_phase = str(request.get("target_phase") or "").strip()
+            if not target_phase:
                 return {
                     "should_auto_bridge": False,
-                    "reason": "leader_decide_failure_not_auto_recoverable",
-                    "error_type": error_type,
+                    "reason": "auto_bridge_requires_explicit_target_phase",
+                    "dispatch_intent": intent,
                 }
-            decision_reason = "leader_decide_recoverable_failure_policy_default_route"
+            decision_reason = "advance_or_continue_without_bridge_call_after_outer_leader"
+        elif intent == "leader_decide":
+            return {
+                "should_auto_bridge": False,
+                "reason": "leader_decide_requires_outer_leader_phase_decision",
+                "error_type": _leader_result_error_type(leader_result if isinstance(leader_result, dict) else {}),
+            }
         else:
             return {"should_auto_bridge": False, "reason": "dispatch_intent_not_auto_bridge_eligible", "dispatch_intent": intent}
         repo_key = str(request.get("repo_key") or "").strip()
@@ -358,7 +420,7 @@ class OuterSdkHost:
             "repo_key": repo_key,
             "run_id": run_id,
             "current_phase": snapshot.get("current_phase"),
-            "target_phase": request.get("target_phase"),
+            "target_phase": target_phase,
         }
 
     def _run_auto_bridge(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -497,6 +559,7 @@ class OuterSdkHost:
             "safe_preview": _safe_preview(text),
             "target_phase": target_phase,
             "dispatch_intent": dispatch_intent,
+            "auto_bridge": _truthy(payload.get("auto_bridge") or payload.get("autoBridge")),
             "task_spec": _payload_dict(payload, "task_spec", "taskSpec"),
             "created_at": now,
             "source": str(payload.get("source") or "outer_sdk_host_api"),
@@ -894,6 +957,61 @@ def _leader_result_error_type(leader_result: dict[str, Any]) -> str:
     return ""
 
 
+def _outer_leader_print_retry_needed(config: OuterSdkHostConfig, adapter_name: str, request: dict[str, Any], leader_result: dict[str, Any]) -> bool:
+    if not _outer_leader_print_retry_enabled():
+        return False
+    if adapter_name == "claude-print":
+        return False
+    repo_key = str(request.get("repo_key") or "").strip()
+    run_id = str(request.get("run_id") or "").strip()
+    if repo_key and run_id:
+        run_root = get_repo_runtime_root(config.control_root, repo_key) / run_id
+        if _bridge_started_after_request(run_root, request):
+            return False
+    return bool(_outer_leader_print_retry_reason(request, leader_result))
+
+
+def _outer_leader_print_retry_reason(request: dict[str, Any], leader_result: dict[str, Any]) -> str:
+    error_type = _leader_result_error_type(leader_result)
+    if error_type == "OuterLeaderTmuxNoAssistantText":
+        return "tmux_outer_leader_returned_without_assistant_text"
+    if str(request.get("dispatch_intent") or "").strip() == "leader_decide":
+        status = str(leader_result.get("status") or "").strip()
+        if status == "succeeded" and not _has_explicit_no_bridge_decision(_leader_result_summary_text(leader_result)):
+            return "leader_decide_returned_without_bridge_or_no_bridge_decision"
+    return ""
+
+
+def _outer_leader_print_retry_enabled() -> bool:
+    raw = os.environ.get("OUTER_LEADER_TMUX_PRINT_FALLBACK") or os.environ.get("BRIDGE_OUTER_LEADER_TMUX_PRINT_FALLBACK")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def _with_outer_leader_adapter_fallback_evidence(
+    leader_result: dict[str, Any],
+    *,
+    from_adapter: str,
+    previous_leader_result: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    result = dict(leader_result)
+    evidence = result.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+    else:
+        evidence = dict(evidence)
+    evidence["outer_leader_adapter_fallback"] = {
+        "from_adapter": from_adapter,
+        "to_adapter": result.get("handled_by"),
+        "reason": reason,
+        "previous_leader_result": _bound(previous_leader_result),
+    }
+    result["evidence"] = evidence
+    return result
+
+
 def _has_explicit_no_bridge_decision(text: Any) -> bool:
     return "NO_BRIDGE_DECISION:" in str(text or "")
 
@@ -907,6 +1025,15 @@ def _outer_leader_failure_allows_auto_bridge(error_type: str) -> bool:
         "OuterLeaderTransportApiFailure",
         "OuterLeaderApiError",
     }
+
+
+def _auto_bridge_enabled(request: dict[str, Any]) -> bool:
+    if _truthy(request.get("auto_bridge")):
+        return True
+    raw = os.environ.get("OUTER_HOST_AUTO_BRIDGE") or os.environ.get("BRIDGE_OUTER_HOST_AUTO_BRIDGE")
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def _latest_run_id(runs_root: Path) -> str | None:

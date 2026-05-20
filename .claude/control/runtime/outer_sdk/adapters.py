@@ -68,6 +68,10 @@ def build_outer_leader_adapter(config: Any, *, mode: str | None = None) -> Outer
         from .claude_agent_adapter import ClaudeAgentSdkOuterLeaderAdapter
 
         return ClaudeAgentSdkOuterLeaderAdapter(config)
+    if normalized in {"print", "cli-print", "claude-print", "stream-json"}:
+        from .print_adapter import ClaudePrintOuterLeaderAdapter
+
+        return ClaudePrintOuterLeaderAdapter(config)
     if normalized in {"tmux", "tmux-repl", "repl", "tty", "interactive"}:
         from .tmux_repl_adapter import TmuxReplOuterLeaderAdapter
 

@@ -49,7 +49,7 @@ Choose the target phase; do not reproduce phase policy in prompt prose. When an 
 - Use `l4_execute` for formal execution, validation runs, and postrun audit.
 - Use `l4_anomaly` for failed, contradictory, suspicious, partial, blocked, or orphaned outcomes that require deeper diagnosis.
 
-The full phase/team/tool mapping, ownership boundaries, report requirements, semantic-resolution fields, classification taxonomy, execution policy, and manifest requirements are system-owned in `.claude/control/policy/phase_contracts.json` and compiled into the BridgePacket. If the contract is wrong or missing, report a control-plane issue instead of overriding it from memory.
+The mechanical phase/team/tool mapping, ownership boundaries, report shape, semantic-resolution fields, classification taxonomy, and manifest requirements are system-owned in `.claude/control/policy/phase_contracts.json` and compiled into the BridgePacket. Durable semantic execution guidance belongs in `.claude/agents/*.md`; if the runtime contract or agent guidance is wrong or missing, report a control-plane issue instead of overriding it from memory.
 
 ## Bridge Discipline
 

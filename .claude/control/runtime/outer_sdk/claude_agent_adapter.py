@@ -489,12 +489,13 @@ def _outer_leader_cli_info(control_root: Path, repo_root: Path | None = None) ->
     for name in ("OUTER_LEADER_CLAUDE_CLI", "BRIDGE_CLAUDE_CLI"):
         value = os.environ.get(name)
         if value and value.strip():
+            default_info = _default_outer_leader_cli_info(control_root, repo_root)
             return {
                 "cli_path": _resolve_cli_path(value.strip()),
                 "cli_source": name,
                 "cli_warning": None,
                 "env": {},
-                "mcp_config": None,
+                "mcp_config": default_info.get("mcp_config"),
                 "settings": None,
                 "extra_args": {},
                 "strict_mcp_config": True,
@@ -504,12 +505,13 @@ def _outer_leader_cli_info(control_root: Path, repo_root: Path | None = None) ->
     if command and command.strip():
         parsed = _parse_claude_command(command)
         if parsed.get("command"):
+            default_info = _default_outer_leader_cli_info(control_root, repo_root)
             return {
                 "cli_path": _resolve_cli_path(str(parsed["command"]), parsed.get("env") or {}),
                 "cli_source": "BRIDGE_CLAUDE_COMMAND",
                 "cli_warning": parsed.get("warning"),
                 "env": parsed.get("env") or {},
-                "mcp_config": parsed.get("mcp_config"),
+                "mcp_config": parsed.get("mcp_config") or default_info.get("mcp_config"),
                 "settings": parsed.get("settings"),
                 "extra_args": parsed.get("extra_args") or {},
                 "strict_mcp_config": parsed.get("strict_mcp_config", True),
@@ -536,12 +538,13 @@ def _outer_leader_cli_info(control_root: Path, repo_root: Path | None = None) ->
     if os.environ.get("BRIDGE_DISABLE_CLAUDE_MJY_AUTO", "").strip().lower() not in {"1", "true", "yes"}:
         preferred = shutil.which("claude_mjy")
         if preferred:
+            default_info = _default_outer_leader_cli_info(control_root, repo_root)
             return {
                 "cli_path": str(Path(preferred).expanduser()),
                 "cli_source": "PATH:claude_mjy",
                 "cli_warning": None,
                 "env": {},
-                "mcp_config": None,
+                "mcp_config": default_info.get("mcp_config"),
                 "settings": None,
                 "extra_args": {},
                 "strict_mcp_config": True,

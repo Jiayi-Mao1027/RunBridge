@@ -17,6 +17,7 @@ from .adapters import OuterLeaderEventSink
 from .claude_agent_adapter import (
     _env_int,
     _leader_model,
+    _leader_prompt,
     _outer_leader_allowed_tools,
     _outer_leader_cli_info,
     _outer_leader_disallowed_tools,
@@ -284,7 +285,16 @@ class TmuxReplOuterLeaderAdapter:
             parts.append("--strict-mcp-config")
         if settings_path:
             parts.extend(["--settings", _q(str(settings_path))])
-        parts.extend(["--model", _q(model)])
+        parts.extend(
+            [
+                "--agent",
+                "leader-orchestrator",
+                "--model",
+                _q(model),
+                "--append-system-prompt",
+                _q(_leader_prompt(control_root)),
+            ]
+        )
         for directory in _outer_leader_add_dirs(control_root, repo_root):
             parts.extend(["--add-dir", _q(str(directory))])
         if _tmux_policy_args_enabled():
@@ -293,6 +303,8 @@ class TmuxReplOuterLeaderAdapter:
                 parts.extend(["--permission-mode", _q(permission_mode)])
         if _tmux_tool_args_enabled():
             tools = _outer_leader_tools()
+            if tools:
+                parts.extend(["--tools", _q(",".join(tools))])
             allowed_tools = _outer_leader_allowed_tools(tools)
             if allowed_tools:
                 parts.extend(["--allowedTools", _q(",".join(allowed_tools))])
@@ -1328,8 +1340,8 @@ def _tmux_policy_args_enabled() -> bool:
 def _tmux_tool_args_enabled() -> bool:
     raw = os.environ.get("OUTER_LEADER_TMUX_TOOL_ARGS")
     if raw is None:
-        return False
-    return raw.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
 
 
 def _outer_leader_add_dirs(control_root: Path, repo_root: Path) -> list[Path]:

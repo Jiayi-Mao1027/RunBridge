@@ -64,6 +64,7 @@ from completion_validator import completion_succeeded, validate_bridge_completio
 from dispatch_contract import agent_tool_inputs, build_dispatch_contract
 from main_leader import build_bridge_instruction_packet_for_this_invoke, decide_next_bridge_packet
 from outer_sdk import ClaudeAgentSdkOuterLeaderAdapter, OuterSdkHost, OuterSdkHostConfig, UnavailableOuterLeaderAdapter
+from outer_sdk.claude_agent_adapter import _outer_leader_cli_info
 from outer_sdk.claude_agent_adapter import _sdk_result as _outer_sdk_result
 from outer_sdk.tmux_repl_adapter import _build_user_prompt as _build_tmux_user_prompt
 from outer_sdk.tmux_repl_adapter import extract_assistant_text as extract_tmux_assistant_text
@@ -4887,6 +4888,10 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         "OUTER_LEADER_DISALLOWED_TOOLS",
         "OUTER_LEADER_PERMISSION_MODE",
         "OUTER_LEADER_TMUX_TOOL_ARGS",
+        "OUTER_LEADER_TMUX_PRINT_FALLBACK",
+        "OUTER_HOST_AUTO_BRIDGE",
+        "BRIDGE_OUTER_LEADER_TMUX_PRINT_FALLBACK",
+        "BRIDGE_OUTER_HOST_AUTO_BRIDGE",
     ]
     saved_env = {name: os.environ.get(name) for name in env_names}
     try:
@@ -4921,12 +4926,52 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         str(control_root.parent),
         "--settings",
         str(runtime_dir / "runtime_state" / "generated" / "outer_leader_settings.json"),
+        "--agent",
+        "leader-orchestrator",
+        "--append-system-prompt",
         "--permission-mode dontAsk",
+        "--tools",
+        "--allowedTools",
+        "mcp__bridge__build_bridge_packet",
+        "mcp__bridge__call_bridge_sdk",
+        "--disallowedTools",
+        "Bash",
+        "Agent",
     ]
     if any(fragment not in tmux_launch for fragment in expected_tmux_fragments):
         raise AssertionError(tmux_launch)
-    if "--allowedTools" in tmux_launch or "--disallowedTools" in tmux_launch:
-        raise AssertionError(tmux_launch)
+    cli_env_names = [
+        "OUTER_LEADER_CLAUDE_CLI",
+        "BRIDGE_CLAUDE_CLI",
+        "BRIDGE_CLAUDE_COMMAND",
+        "BRIDGE_DISABLE_CLAUDE_MJY_AUTO",
+        "BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS",
+    ]
+    old_cli_env = {name: os.environ.get(name) for name in cli_env_names}
+    parent_mcp_config = control_root.parent / "mcp.json"
+    parent_mcp_config.write_text(json.dumps({"mcpServers": {"bridge": {"command": "bridge-server"}}}), encoding="utf-8")
+    try:
+        for name in cli_env_names:
+            os.environ.pop(name, None)
+        os.environ["OUTER_LEADER_CLAUDE_CLI"] = "claude"
+        explicit_cli_info = _outer_leader_cli_info(control_root, repo_root)
+        if explicit_cli_info.get("mcp_config") != str(parent_mcp_config):
+            raise AssertionError(json.dumps(explicit_cli_info, ensure_ascii=False, indent=2))
+        os.environ.pop("OUTER_LEADER_CLAUDE_CLI", None)
+        os.environ["BRIDGE_CLAUDE_COMMAND"] = "HOME=/tmp/example claude"
+        command_cli_info = _outer_leader_cli_info(control_root, repo_root)
+        if command_cli_info.get("mcp_config") != str(parent_mcp_config):
+            raise AssertionError(json.dumps(command_cli_info, ensure_ascii=False, indent=2))
+        os.environ["BRIDGE_DISABLE_CLAUDE_STARTUP_DEFAULTS"] = "1"
+        disabled_cli_info = _outer_leader_cli_info(control_root, repo_root)
+        if disabled_cli_info.get("mcp_config"):
+            raise AssertionError(json.dumps(disabled_cli_info, ensure_ascii=False, indent=2))
+    finally:
+        for name, value in old_cli_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
     old_tmux_tool_args = os.environ.get("OUTER_LEADER_TMUX_TOOL_ARGS")
     try:
         os.environ["OUTER_LEADER_TMUX_TOOL_ARGS"] = "1"
@@ -4947,6 +4992,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         else:
             os.environ["OUTER_LEADER_TMUX_TOOL_ARGS"] = old_tmux_tool_args
     expected_tool_arg_fragments = [
+        "--tools",
         "--allowedTools",
         "mcp__bridge__list_registered_repos",
         "mcp__bridge__list_runs",
@@ -5101,6 +5147,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
             "run_id": "run_outer_auto_bridge",
             "dispatch_intent": "advance_or_continue",
             "target_phase": "l3_bridge",
+            "auto_bridge": True,
         }
     )
     auto_bridge_result = auto_bridge_response.get("leader_result", {})
@@ -5132,6 +5179,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
             "run_id": "run_outer_auto_bridge_transport_failure",
             "dispatch_intent": "advance_or_continue",
             "target_phase": "l3_bridge",
+            "auto_bridge": True,
         }
     )
     transport_failure_result = transport_failure_response.get("leader_result", {})
@@ -5208,13 +5256,67 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     )
     leader_decide_guard_result = leader_decide_guard_response.get("leader_result", {})
     if (
-        leader_decide_guard_result.get("status") != "succeeded"
-        or leader_decide_guard_result.get("handled_by") != "outer_sdk_host_auto_bridge"
-        or len(auto_bridge_calls) != 3
-        or auto_bridge_calls[-1].get("dispatch_intent") != "leader_decide"
-        or auto_bridge_calls[-1].get("target_phase") is not None
+        leader_decide_guard_result.get("status") != "blocked"
+        or leader_decide_guard_result.get("handled_by") != "outer_sdk_host_contract_guard"
+        or len(auto_bridge_calls) != 2
+        or leader_decide_guard_result.get("error_or_null", {}).get("type") != "OuterLeaderContractViolation"
     ):
         raise AssertionError(json.dumps({"response": leader_decide_guard_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+
+    class TmuxNoAssistantAdapter:
+        name = "claude-tmux-repl"
+
+        def handle_user_input(self, request, *, event_sink=None):
+            return {
+                "status": "failed",
+                "handled_by": self.name,
+                "reports": [{"summary": "Claude TTY returned to the prompt without assistant text", "source": "smoke"}],
+                "artifact_refs": [],
+                "evidence": {},
+                "error_or_null": {"type": "OuterLeaderTmuxNoAssistantText", "message": "tool-only return"},
+                "cleanup_required": False,
+            }
+
+    class PrintNoBridgeDecisionAdapter:
+        name = "claude-print"
+
+        def __init__(self):
+            self.calls = []
+
+        def handle_user_input(self, request, *, event_sink=None):
+            self.calls.append(dict(request))
+            return {
+                "status": "succeeded",
+                "handled_by": self.name,
+                "reports": [{"summary": "NO_BRIDGE_DECISION: print fallback smoke handled the empty TTY return", "source": "smoke"}],
+                "artifact_refs": [],
+                "evidence": {},
+                "error_or_null": None,
+                "cleanup_required": False,
+            }
+
+    print_fallback_adapter = PrintNoBridgeDecisionAdapter()
+    print_fallback_host = OuterSdkHost(
+        config,
+        adapter=TmuxNoAssistantAdapter(),
+        auto_bridge_runner=fake_auto_bridge_runner,
+        print_fallback_adapter=print_fallback_adapter,
+    )
+    print_fallback_response = print_fallback_host.handle_user_input(
+        {
+            "text": "leader decide should retry through print fallback after an empty tmux return",
+            "run_id": "run_outer_tmux_print_fallback",
+        }
+    )
+    print_fallback_result = print_fallback_response.get("leader_result", {})
+    fallback_evidence = print_fallback_result.get("evidence", {}).get("outer_leader_adapter_fallback", {})
+    if (
+        print_fallback_result.get("handled_by") != "claude-print"
+        or len(print_fallback_adapter.calls) != 1
+        or len(auto_bridge_calls) != 2
+        or fallback_evidence.get("reason") != "tmux_outer_leader_returned_without_assistant_text"
+    ):
+        raise AssertionError(json.dumps({"response": print_fallback_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
     implicit_negated_response = auto_bridge_host.handle_user_input(
         {
             "text": "UI async ack probe only. Do not advance project work.",
@@ -5224,7 +5326,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     if (
         implicit_negated_response.get("host", {}).get("input_kind") != "user_prompt"
         or implicit_negated_response.get("leader_result", {}).get("handled_by") == "outer_sdk_host_auto_bridge"
-        or len(auto_bridge_calls) != 3
+        or len(auto_bridge_calls) != 2
     ):
         raise AssertionError(json.dumps({"response": implicit_negated_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
 
