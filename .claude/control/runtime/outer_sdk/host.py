@@ -929,7 +929,7 @@ def _dispatch_intent(payload: dict[str, Any], *, text: str, input_kind: str, tar
         return explicit
     if input_kind not in {"user_prompt", "advance", "continue"}:
         return "inspect_only"
-    if str(target_phase or "").strip() in {"l2_advisory", "l3_bridge", "l4_execute"}:
+    if str(target_phase or "").strip() in {"l2_advisory", "l3_bridge", "l4_anomaly", "l4_implement", "l4_execute"}:
         return "advance_or_continue"
     lowered = str(text or "").strip().lower()
     advance_markers = (
@@ -941,6 +941,9 @@ def _dispatch_intent(payload: dict[str, Any], *, text: str, input_kind: str, tar
         "执行项目",
         "advance",
         "continue",
+        "go on",
+        "next step",
+        "move on",
         "proceed",
         "run the project",
         "execute the project",
@@ -959,7 +962,16 @@ def _infer_target_phase(text: str) -> str | None:
         return "l3_bridge"
     if "l4anomaly" in compact or re.search(r"\banomaly\b", lowered):
         return "l4_anomaly"
-    if "l4implement" in compact or re.search(r"\bimplement\b", lowered):
+    if (
+        "l4implement" in compact
+        or "l4impement" in compact
+        or "l4implemnt" in compact
+        or "l4implment" in compact
+        or re.search(r"\bimplement(?:ation|or)?\b", lowered)
+        or re.search(r"\bimpement\b", lowered)
+        or re.search(r"\bimplemnt\b", lowered)
+        or re.search(r"\bimplment\b", lowered)
+    ):
         return "l4_implement"
     if "l4execute" in compact or re.search(r"\bexecute\b", lowered):
         return "l4_execute"

@@ -1969,7 +1969,16 @@ function inferLeaderTargetPhase(text) {
   if (/(?<![a-z0-9])l2(?![a-z0-9])/.test(normalized) || compact.includes("l2advisory")) return "l2_advisory";
   if (/(?<![a-z0-9])l3(?![a-z0-9])/.test(normalized) || compact.includes("l3bridge")) return "l3_bridge";
   if (compact.includes("l4anomaly") || /\banomaly\b/.test(normalized)) return "l4_anomaly";
-  if (compact.includes("l4implement") || /\bimplement\b/.test(normalized)) return "l4_implement";
+  if (
+    compact.includes("l4implement")
+    || compact.includes("l4impement")
+    || compact.includes("l4implemnt")
+    || compact.includes("l4implment")
+    || /\bimplement(?:ation|or)?\b/.test(normalized)
+    || /\bimpement\b/.test(normalized)
+    || /\bimplemnt\b/.test(normalized)
+    || /\bimplment\b/.test(normalized)
+  ) return "l4_implement";
   if (compact.includes("l4execute") || /\bexecute\b/.test(normalized)) return "l4_execute";
   return "";
 }
