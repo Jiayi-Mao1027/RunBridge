@@ -135,7 +135,7 @@ def build_fixture(root: Path) -> tuple[Path, Path]:
 
     phase_graph = {
         "phases": [
-            {"name": "leader_freeze", "allowed_next_phases": ["l2_advisory", "l3_bridge"]},
+            {"name": "leader_freeze", "allowed_next_phases": ["l3_bridge", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly", "leader_freeze"]},
             {"name": "l2_advisory", "allowed_next_phases": ["l3_bridge"]},
             {"name": "l3_bridge", "allowed_next_phases": ["l3_bridge", "leader_freeze", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly"]},
             {"name": "l4_implement", "allowed_next_phases": ["l4_execute", "l4_anomaly"]},
@@ -5233,10 +5233,11 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     )
     leader_decide_guard_result = leader_decide_guard_response.get("leader_result", {})
     if (
-        leader_decide_guard_result.get("status") != "blocked"
-        or leader_decide_guard_result.get("handled_by") != "outer_sdk_host_contract_guard"
-        or leader_decide_guard_result.get("error_or_null", {}).get("type") != "OuterLeaderContractViolation"
-        or len(auto_bridge_calls) != 2
+        leader_decide_guard_result.get("status") != "succeeded"
+        or leader_decide_guard_result.get("handled_by") != "outer_sdk_host_auto_bridge"
+        or len(auto_bridge_calls) != 3
+        or auto_bridge_calls[-1].get("dispatch_intent") != "leader_decide"
+        or auto_bridge_calls[-1].get("target_phase") is not None
     ):
         raise AssertionError(json.dumps({"response": leader_decide_guard_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
     implicit_negated_response = auto_bridge_host.handle_user_input(
@@ -5248,7 +5249,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     if (
         implicit_negated_response.get("host", {}).get("input_kind") != "user_prompt"
         or implicit_negated_response.get("leader_result", {}).get("handled_by") == "outer_sdk_host_auto_bridge"
-        or len(auto_bridge_calls) != 2
+        or len(auto_bridge_calls) != 3
     ):
         raise AssertionError(json.dumps({"response": implicit_negated_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
 
@@ -5307,6 +5308,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     if (
         "Handle this 8787 operator input under the leader_decide contract" not in tmux_leader_decide_prompt
         or '"dispatch_intent": "leader_decide"' not in tmux_leader_decide_prompt
+        or "pass your chosen target_phase explicitly" not in tmux_leader_decide_prompt
         or "NO_BRIDGE_DECISION" not in tmux_leader_decide_prompt
         or "continue through execution" not in tmux_leader_decide_prompt
     ):

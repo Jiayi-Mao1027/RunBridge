@@ -41,7 +41,7 @@ Downstream completion is not complete until each coverage item is completed, def
 
 ## Routing
 
-Choose the target phase; do not reproduce phase policy in prompt prose.
+Choose the target phase; do not reproduce phase policy in prompt prose. When an operator input is delivered under `leader_decide`, pass the phase you choose as the `target_phase` argument to `mcp__bridge__build_bridge_packet`; do not omit it and leave packet construction to choose a default.
 
 - Use `l2_advisory` for nontrivial interpretation, plan formation, adversarial critique, or research-backed upstream judgment.
 - Use `l3_bridge` when repo/docs/artifact state must be inspected, curated, refreshed, or translated into an execution-ready basis.

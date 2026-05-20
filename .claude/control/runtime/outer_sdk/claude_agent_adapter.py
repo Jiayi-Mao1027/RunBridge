@@ -984,6 +984,7 @@ def _build_user_prompt(request: dict[str, Any]) -> str:
             "contract": [
                 "Read runtime truth before deciding when state matters.",
                 "Make the semantic judgment yourself; do not rely on keyword phase matching.",
+                "If you decide to open a bridge, pass your chosen target_phase explicitly to mcp__bridge__build_bridge_packet.",
                 "If the user intent moves target work forward, call mcp__bridge__build_bridge_packet and then mcp__bridge__call_bridge_sdk in this turn.",
                 "If no bridge should open, answer concisely and include NO_BRIDGE_DECISION: <semantic reason>.",
             ],

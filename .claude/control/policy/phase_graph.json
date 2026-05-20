@@ -10,8 +10,12 @@
       "optional": false,
       "completion_allowed": false,
       "allowed_next_phases": [
+        "l3_bridge",
         "l2_advisory",
-        "l3_bridge"
+        "l4_implement",
+        "l4_execute",
+        "l4_anomaly",
+        "leader_freeze"
       ],
       "exit_conditions": [
         "frozen_semantics_exists",

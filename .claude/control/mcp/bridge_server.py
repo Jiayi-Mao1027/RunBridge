@@ -305,6 +305,7 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         )
     elif tool_name == "build_bridge_packet":
         arguments = _repair_bridge_packet_arguments(arguments)
+        _validate_leader_decide_bridge_packet_arguments(arguments)
         run_id = _resolve_run_id(arguments, runtime_runs_root, require_active=True)
         main_session_id = _resolve_main_session_id(arguments, runtime_runs_root, run_id)
         _freeze_semantics_if_needed(arguments, run_id, runtime_runs_root, main_session_id=main_session_id)
@@ -932,6 +933,14 @@ def _apply_outer_host_context(arguments: dict[str, Any], runtime_runs_root: str 
             if isinstance(context_task_spec, dict) and context_task_spec:
                 updated["task_spec"] = context_task_spec
     return updated
+
+
+def _validate_leader_decide_bridge_packet_arguments(arguments: dict[str, Any]) -> None:
+    if str(arguments.get("dispatch_intent") or "").strip() != "leader_decide":
+        return
+    if str(arguments.get("target_phase") or "").strip():
+        return
+    raise ValueError("leader_decide build_bridge_packet requires the leader-chosen target_phase argument")
 
 
 def _build_frozen_semantics(arguments: dict[str, Any]) -> dict[str, Any]:
