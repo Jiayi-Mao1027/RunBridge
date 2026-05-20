@@ -3,7 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any, TypedDict
+
+try:
+    from typing import NotRequired
+except ImportError:  # Python 3.10 compatibility for live MCP hook entrypoints.
+    from typing_extensions import NotRequired
 
 from loader import ControlPaths, load_json_file, load_jsonl
 from repo_runtime import infer_repo_key_from_runs_root, repo_key_for_paths

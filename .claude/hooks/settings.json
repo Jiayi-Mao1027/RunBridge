@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_session_start.py"
+            "command": "python3 ../.claude/hooks/hook_session_start.py"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_session_start.py"
+            "command": "python3 ../.claude/hooks/hook_session_start.py"
           }
         ]
       }
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_subagent_stop.py"
+            "command": "python3 ../.claude/hooks/hook_subagent_stop.py"
           }
         ]
       }
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_user_prompt_submit.py"
+            "command": "python3 ../.claude/hooks/hook_user_prompt_submit.py"
           }
         ]
       }
@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_pre_tool_use.py"
+            "command": "python3 ../.claude/hooks/hook_pre_tool_use.py"
           }
         ]
       }
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_post_tool_use.py"
+            "command": "python3 ../.claude/hooks/hook_post_tool_use.py"
           }
         ]
       }
@@ -67,7 +67,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_bridge_event.py"
+            "command": "python3 ../.claude/hooks/hook_bridge_event.py"
           }
         ]
       }
@@ -77,7 +77,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_bridge_event.py"
+            "command": "python3 ../.claude/hooks/hook_bridge_event.py"
           }
         ]
       }
@@ -87,7 +87,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_bridge_event.py"
+            "command": "python3 ../.claude/hooks/hook_bridge_event.py"
           }
         ]
       }
@@ -97,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_task_created.py"
+            "command": "python3 ../.claude/hooks/hook_task_created.py"
           }
         ]
       }
@@ -107,7 +107,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_task_completed.py"
+            "command": "python3 ../.claude/hooks/hook_task_completed.py"
           }
         ]
       }
@@ -117,7 +117,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_team_idle.py"
+            "command": "python3 ../.claude/hooks/hook_team_idle.py"
           }
         ]
       }
@@ -127,7 +127,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_stop.py"
+            "command": "python3 ../.claude/hooks/hook_stop.py"
           }
         ]
       }
@@ -137,7 +137,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ../.claude/hooks/hook_session_end.py"
+            "command": "python3 ../.claude/hooks/hook_session_end.py"
           }
         ]
       }

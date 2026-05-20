@@ -18,6 +18,7 @@ from .claude_agent_adapter import (
     _outer_leader_cli_info,
     _outer_leader_disallowed_tools,
     _outer_leader_permission_mode,
+    _outer_leader_setting_sources,
     _outer_leader_settings_path,
     _outer_leader_tools,
     _settings_env,
@@ -102,6 +103,9 @@ class ClaudePrintOuterLeaderAdapter:
             cmd.append("--strict-mcp-config")
         if settings_path:
             cmd.extend(["--settings", str(settings_path)])
+        setting_sources = _outer_leader_setting_sources(cli_info)
+        if setting_sources:
+            cmd.extend(["--setting-sources", ",".join(setting_sources)])
         cmd.extend(
             [
                 "--agent",
@@ -123,8 +127,6 @@ class ClaudePrintOuterLeaderAdapter:
         if permission_mode:
             cmd.extend(["--permission-mode", permission_mode])
         tools = _outer_leader_tools()
-        if tools:
-            cmd.extend(["--tools", ",".join(tools)])
         allowed_tools = _outer_leader_allowed_tools(tools)
         if allowed_tools:
             cmd.extend(["--allowedTools", ",".join(allowed_tools)])
@@ -158,9 +160,11 @@ class ClaudePrintOuterLeaderAdapter:
             "cli_source": cli_info.get("cli_source"),
             "cli_mcp_config": cli_info.get("mcp_config"),
             "model": model,
-            "tools": tools,
+            "tools": [],
+            "tools_arg_policy": "omitted_for_mcp_compatibility",
             "allowed_tools": allowed_tools,
             "disallowed_tools": disallowed_tools,
+            "setting_sources": setting_sources,
         }
         return cmd, env, diagnostics
 

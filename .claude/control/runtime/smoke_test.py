@@ -4926,11 +4926,11 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         str(control_root.parent),
         "--settings",
         str(runtime_dir / "runtime_state" / "generated" / "outer_leader_settings.json"),
+        "--setting-sources user",
         "--agent",
         "leader-orchestrator",
         "--append-system-prompt",
         "--permission-mode dontAsk",
-        "--tools",
         "--allowedTools",
         "mcp__bridge__build_bridge_packet",
         "mcp__bridge__call_bridge_sdk",
@@ -4939,6 +4939,8 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         "Agent",
     ]
     if any(fragment not in tmux_launch for fragment in expected_tmux_fragments):
+        raise AssertionError(tmux_launch)
+    if "--tools" in tmux_launch:
         raise AssertionError(tmux_launch)
     cli_env_names = [
         "OUTER_LEADER_CLAUDE_CLI",
@@ -4992,7 +4994,6 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         else:
             os.environ["OUTER_LEADER_TMUX_TOOL_ARGS"] = old_tmux_tool_args
     expected_tool_arg_fragments = [
-        "--tools",
         "--allowedTools",
         "mcp__bridge__list_registered_repos",
         "mcp__bridge__list_runs",
@@ -5005,6 +5006,8 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         "Agent",
     ]
     if any(fragment not in tmux_launch_with_tool_args for fragment in expected_tool_arg_fragments):
+        raise AssertionError(tmux_launch_with_tool_args)
+    if "--tools" in tmux_launch_with_tool_args:
         raise AssertionError(tmux_launch_with_tool_args)
     allowed_tool_arg = tmux_launch_with_tool_args.split("--allowedTools", 1)[1].split()[0]
     disallowed_tool_arg = tmux_launch_with_tool_args.split("--disallowedTools", 1)[1].split()[0]

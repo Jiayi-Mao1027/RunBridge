@@ -22,6 +22,7 @@ from .claude_agent_adapter import (
     _outer_leader_cli_info,
     _outer_leader_disallowed_tools,
     _outer_leader_permission_mode,
+    _outer_leader_setting_sources,
     _outer_leader_settings_path,
     _outer_leader_tools,
     _settings_env,
@@ -285,6 +286,9 @@ class TmuxReplOuterLeaderAdapter:
             parts.append("--strict-mcp-config")
         if settings_path:
             parts.extend(["--settings", _q(str(settings_path))])
+        setting_sources = _outer_leader_setting_sources(cli_info)
+        if setting_sources:
+            parts.extend(["--setting-sources", _q(",".join(setting_sources))])
         parts.extend(
             [
                 "--agent",
@@ -303,8 +307,6 @@ class TmuxReplOuterLeaderAdapter:
                 parts.extend(["--permission-mode", _q(permission_mode)])
         if _tmux_tool_args_enabled():
             tools = _outer_leader_tools()
-            if tools:
-                parts.extend(["--tools", _q(",".join(tools))])
             allowed_tools = _outer_leader_allowed_tools(tools)
             if allowed_tools:
                 parts.extend(["--allowedTools", _q(",".join(allowed_tools))])
