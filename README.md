@@ -85,6 +85,8 @@ Typical phases:
 
 From `leader_freeze`, the graph intentionally allows routing to the full workflow surface: minimal `l3_bridge`, `l2_advisory`, `l4_implement`, `l4_execute`, `l4_anomaly`, or another `leader_freeze` refresh. This lets the leader freeze semantics once and then choose the correct direct route from the user's request instead of forcing every run through a narrow advisory path.
 
+Every phase can route back to `l3_bridge`. L3 is the universal inspection/curation/preflight hub and may be used whenever the operator asks to inspect repo state, gather current evidence, or reorganize phase inputs before continuing.
+
 From `l3_bridge`, the graph also allows routing to every phase: another L3 pass, `leader_freeze`, `l2_advisory`, `l4_implement`, `l4_execute`, or `l4_anomaly`. This makes L3 the bridge hub: it can perform a minimal repo sanity check after L2, resume after user confirmation, send ambiguous strategy back to L2, or send execution/result questions to L4 anomaly before implementation or execution proceeds.
 
 L3 packets have a documentation responsibility. When the work touches docs, Markdown, `CLAUDE.md`, README, setup/usage guidance, workflow rules, or agent behavior, L3 must explicitly decide whether repo-facing documentation needs a bounded update. `CLAUDE.md` is a first-class L3 target for workflow and agent-behavior changes.

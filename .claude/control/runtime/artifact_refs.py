@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -125,7 +125,7 @@ def artifact_ref_satisfies(required: str, ref: dict[str, Any]) -> bool:
         ref_type = str(ref.get("ref_type") or "").casefold()
         return ref_type in {"artifact", "logical"} and "manifest" not in haystack
     if key == "log_manifest":
-        return "manifest" in haystack and ("log" in haystack or ref.get("ref_type") == "log_manifest")
+        return artifact_ref_is_log_manifest(ref)
     return key in haystack
 
 
@@ -180,11 +180,41 @@ def _check(name: str, status: str, subject: str, *, message: str = "", evidence_
 
 def _infer_ref_type(value: Any) -> str:
     text = str(value or "").casefold().replace("\\", "/")
-    if "manifest" in text and ("log" in text or "artifact" in text or "run" in text):
+    if _text_looks_like_formal_log_manifest(text):
         return "log_manifest"
     if "/" in text or re.search(r"\.[a-z0-9]{1,8}$", text):
         return "path"
     return "logical"
+
+
+def artifact_ref_is_log_manifest(ref: dict[str, Any]) -> bool:
+    candidates = [
+        ref.get("path"),
+        ref.get("safe_preview"),
+        ref.get("id"),
+    ]
+    if any(_text_looks_like_formal_log_manifest(str(candidate or "")) for candidate in candidates):
+        return True
+    ref_type = str(ref.get("ref_type") or "").strip().casefold()
+    has_pathish_candidate = any(str(candidate or "").strip() for candidate in candidates)
+    return ref_type == "log_manifest" and not has_pathish_candidate
+
+
+def _text_looks_like_formal_log_manifest(value: str) -> bool:
+    text = str(value or "").strip().casefold().replace("\\", "/")
+    if text == "log_manifest":
+        return True
+    if not text:
+        return False
+    basename = PurePosixPath(text).name
+    if basename in {"log_manifest.json", "execute_log_manifest.json"}:
+        return True
+    if basename.endswith("_log_manifest.json") or basename.endswith("-log-manifest.json"):
+        return True
+    if basename == "manifest.json":
+        parts = [part for part in text.split("/") if part]
+        return any(part in {"log", "logs", "execute", "execution"} or part.endswith("_logs") for part in parts[:-1])
+    return False
 
 
 def _resolve_path(path_text: str | None, base_dir: str | Path | None) -> Path | None:

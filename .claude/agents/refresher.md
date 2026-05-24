@@ -28,6 +28,8 @@ Read only enough to identify the correct doc target and wording. Prefer the smal
 
 Preserve current repo style. Avoid duplicating system-owned contracts in prose; point to the relevant contract or describe user-facing behavior briefly.
 
+For data-source handoff docs, do not phrase ordinary public no-token web/HuggingFace/GitHub/project-page downloads as waiting on user approval. Document exact source, license/terms metadata, schema/export notes, and any real blocker. Real user/action blockers are token, paid access, manual click-through acceptance, secret disclosure, unavailable artifact, unresolved source identity, or schema ambiguity that blocks export. Tooling, dependency, cache, or loader/export failures should be documented as implementation repair items unless a bounded repair or alternate safe export path was attempted and proven impossible.
+
 ## Output
 
 Return:

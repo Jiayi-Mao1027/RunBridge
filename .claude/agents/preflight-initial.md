@@ -30,6 +30,8 @@ Check:
 - whether active stale/ambiguous artifacts could mislead L4
 - whether docs need a bounded L3 refresher pass
 
+For dataset-preparation readiness, do not classify ordinary public no-token sources as user-decision blockers. If a source appears to be reachable through public web, HuggingFace, GitHub, or a project page without tokens, paid access, manual click-through acceptance, or secrets, recommend `l4_implement` to download/stage/process it and record license/terms metadata. Escalate only exact blockers: token, paid access, manual acceptance, secret disclosure, unavailable artifact, unresolved source identity, or schema ambiguity that blocks export. Missing tooling, dependency mismatches, cache failures, or loader/export bugs are implementation repair work unless repair would require secrets, paid access, manual acceptance, or destructive environment changes.
+
 ## Output
 
 Return a concise preflight report with:

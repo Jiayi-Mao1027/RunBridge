@@ -25,15 +25,23 @@ const TEAM_STATE_RANK = {
 
 export function reduceToTuiView(events = [], snapshot = null, activeOperations = null, context = {}) {
   const orderedEvents = sourceDedupe(events);
-  const header = buildHeader(orderedEvents, snapshot, context);
+  const currentBridgeWindowId = currentBridgeWindowIdFrom(snapshot, context, orderedEvents);
+  const projectionContext = {
+    ...context,
+    currentBridgeWindowId
+  };
+  const header = buildHeader(orderedEvents, snapshot, projectionContext);
   const rawInspectorIndex = {};
   const displayItems = reduceDisplayItems(orderedEvents, {
     header,
     inspectorIndex: rawInspectorIndex
   });
-  const teamTree = buildTeamTree(orderedEvents, activeOperations, context);
-  const mainReport = buildMainReport(orderedEvents, snapshot, context);
-  const completion = buildCompletionModel(orderedEvents, context);
+  const teamEvents = currentBridgeWindowId
+    ? orderedEvents.filter(event => eventBridgeWindowId(event) === currentBridgeWindowId)
+    : orderedEvents;
+  const teamTree = buildTeamTree(teamEvents, scopedActiveOperations(activeOperations, currentBridgeWindowId), projectionContext);
+  const mainReport = buildMainReport(orderedEvents, snapshot, projectionContext);
+  const completion = buildCompletionModel(orderedEvents, projectionContext);
   const waitingItem = buildWaitingItem(orderedEvents, header, displayItems);
   if (waitingItem) mergeDisplayItem(displayItems, waitingItem, null, rawInspectorIndex);
 
@@ -59,8 +67,8 @@ export function reduceToTuiView(events = [], snapshot = null, activeOperations =
   }
 
   const unknowns = mergeUnknowns([
-    ...unknownsForSources(orderedEvents, snapshot, activeOperations, context),
-    ...(Array.isArray(context.unknowns) ? context.unknowns : [])
+    ...unknownsForSources(orderedEvents, snapshot, activeOperations, projectionContext),
+    ...(Array.isArray(projectionContext.unknowns) ? projectionContext.unknowns : [])
   ]);
 
   return {
@@ -91,6 +99,69 @@ function sourceDedupe(events) {
     if (!byId.has(id)) byId.set(id, event);
   }
   return sortEvents([...byId.values()]);
+}
+
+function currentBridgeWindowIdFrom(snapshot, context, events) {
+  const candidates = [
+    context?.currentBridgeWindowId,
+    context?.packetSummary?.packetSummary?.bridge_window_id,
+    context?.packetSummary?.packetSummary?.bridgeWindowId,
+    context?.packetSummary?.packet?.bridge_window_id,
+    context?.packetSummary?.packet?.bridgeWindowId,
+    snapshot?.last_bridge_result?.bridge_window_id,
+    snapshot?.last_bridge_result?.bridgeWindowId,
+    snapshot?.lifecycle?.current_bridge_window_id,
+    snapshot?.lifecycle?.currentBridgeWindowId,
+    snapshot?.lifecycle?.latest_bridge_window_id,
+    snapshot?.lifecycle?.latestBridgeWindowId
+  ];
+  for (const value of candidates) {
+    const id = stringId(value);
+    if (id) return id;
+  }
+  const latestScopedEvent = [...events].reverse().find(event =>
+    eventBridgeWindowId(event) &&
+    (event.source === "bridge_packet" ||
+      event.source === "completion_check" ||
+      isBridgeResultReportEvent(event) ||
+      event.kind === "lifecycle_transition")
+  );
+  return eventBridgeWindowId(latestScopedEvent);
+}
+
+function eventBridgeWindowId(event) {
+  const raw = event?.raw && typeof event.raw === "object" ? event.raw : {};
+  const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+  const result = payload.bridge_result || raw.bridge_result || raw.result?.bridge_result || {};
+  const packet = raw.packet || payload.packet || {};
+  return stringId(event?.bridgeWindowId) ||
+    stringId(raw.bridge_window_id) ||
+    stringId(raw.bridgeWindowId) ||
+    stringId(payload.bridge_window_id) ||
+    stringId(payload.bridgeWindowId) ||
+    stringId(result.bridge_window_id) ||
+    stringId(result.bridgeWindowId) ||
+    stringId(packet.bridge_window_id) ||
+    stringId(packet.bridgeWindowId);
+}
+
+function scopedActiveOperations(activeOperations, bridgeWindowId) {
+  if (!bridgeWindowId || !activeOperations || typeof activeOperations !== "object") return activeOperations;
+  if (!Array.isArray(activeOperations.teammates)) return activeOperations;
+  return {
+    ...activeOperations,
+    teammates: activeOperations.teammates.filter(item =>
+      !item?.bridge_window_id && !item?.bridgeWindowId
+        ? true
+        : stringId(item.bridge_window_id || item.bridgeWindowId) === bridgeWindowId
+    )
+  };
+}
+
+function stringId(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
 }
 
 function reduceDisplayItems(events, context) {
@@ -404,11 +475,12 @@ function normalizeRenderItem(item) {
 
 function buildHeader(events, snapshot, context) {
   const latest = [...events].reverse().find(event => importanceForLatest(event) >= IMPORTANCE_THRESHOLD) || events.at(-1) || null;
-  const lifecycleState = latestLifecycleState(snapshot, events);
+  const lifecycleState = latestLifecycleState(snapshot, events, context.currentBridgeWindowId);
   return {
     title: "RunBridge",
     repoKey: context.repoKey || snapshot?.repo_key || events.find(event => event.repoKey)?.repoKey || "unknown",
     runId: context.runId || snapshot?.run_id || events.find(event => event.runId)?.runId || "unknown",
+    bridgeWindowId: context.currentBridgeWindowId || null,
     taskTitle: taskTitleFrom(context.packetSummary, snapshot),
     phase: snapshot?.current_phase || context.packetSummary?.targetPhase || "unknown",
     lifecycleState,
@@ -440,8 +512,8 @@ function buildMainReport(events, snapshot, context) {
     summary: compact(summary, 4000),
     body: compact(summary, 4000),
     task: taskTitleFrom(context.packetSummary, snapshot),
-    currentState: latestLifecycleState(snapshot, events),
-    nextStep: nextStepForLifecycle(latestLifecycleState(snapshot, events)),
+    currentState: latestLifecycleState(snapshot, events, context.currentBridgeWindowId),
+    nextStep: nextStepForLifecycle(latestLifecycleState(snapshot, events, context.currentBridgeWindowId)),
     rawRefs: rawRefsValue,
     evidenceRefs: latestReport ? evidenceRefs(latestReport) : [],
     inspector: {
@@ -489,7 +561,7 @@ function buildTeamTree(events, activeOperations, context) {
   });
 
   seedTeamFromPacket(events, ensure);
-  seedTeamFromBindings(context.sessionBindings, ensure);
+  seedTeamFromBindings(context.sessionBindings, ensure, context.currentBridgeWindowId);
   seedTeamFromActiveOperations(activeOperations, ensure);
 
   for (const event of events) {
@@ -613,9 +685,10 @@ function seedTeamFromPacket(events, ensure) {
   }
 }
 
-function seedTeamFromBindings(bindings, ensure) {
+function seedTeamFromBindings(bindings, ensure, bridgeWindowId = null) {
   for (const binding of Array.isArray(bindings) ? bindings : []) {
     if (!binding || typeof binding !== "object") continue;
+    if (bridgeWindowId && stringId(binding.bridge_window_id || binding.bridgeWindowId) !== bridgeWindowId) continue;
     const raw = binding.rawRef ? { rawRef: binding.rawRef, eventId: rawRefKey(binding.rawRef), cursor: binding.rawRef } : null;
     const id = binding.teammate_id || binding.agent_type || binding.agent_id || binding.session_id;
     const sourceQuality = binding.run_binding_state === "unbound" ? "unbound" : "assigned_only";
@@ -869,10 +942,11 @@ function taskTitleFrom(packetSummary, snapshot) {
   return packetSummary?.objective || snapshot?.semantic?.frozen?.task_subject || snapshot?.semantic?.frozen?.user_instruction || "No task packet recorded";
 }
 
-function latestLifecycleState(snapshot, events) {
+function latestLifecycleState(snapshot, events, bridgeWindowId = null) {
   const lifecycle = snapshot?.lifecycle || {};
   const open = Array.isArray(lifecycle.open_bridge_window_ids) ? lifecycle.open_bridge_window_ids[0] : null;
   const statusIndex = lifecycle.status_index && typeof lifecycle.status_index === "object" ? lifecycle.status_index : {};
+  if (bridgeWindowId && statusIndex[bridgeWindowId]) return statusIndex[bridgeWindowId];
   if (open && statusIndex[open]) return statusIndex[open];
   const latestTransition = [...events].reverse().find(event =>
     event.kind === "lifecycle_transition"

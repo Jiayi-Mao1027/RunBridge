@@ -39,6 +39,12 @@ Do not put workflow-system failures, bridge/Agent dispatch errors, API transport
 
 Downstream completion is not complete until each coverage item is completed, deferred with a concrete reason, blocked, or escalated.
 
+When the latest user intent is to continue, advance, implement, execute, or move to a later milestone, do not carry a stale `static`, `dry-run`, `scaffold-only`, or `no formal execution` limitation forward unless the latest user instruction explicitly repeats that limitation. If prior runtime evidence only proves a scaffold, static check, dry run, or blocked prerequisite state, freeze that as prior evidence rather than downstream readiness.
+
+For implementation that is expected to hand off to execution, the packet must make the readiness question explicit: scripts/entrypoints, configs, input data or manifests, non-dry-run path, expected outputs, and blocker reporting. If any of those are unknown, route to `l3_bridge` or `l4_implement` to resolve them; do not route directly to `l4_execute` as if scaffold evidence were real execution readiness.
+
+When the latest user asks to prepare data, prepare a dataset, make a data pipeline ready, or otherwise get data ready for later execution, freeze that as the full data-readiness workflow: resolve required dataset identities and sources, acquire or stage the data when the source/access is already known or can be discovered without credentials, process or split it, write/update the scripts/configs/manifests needed for repeatability, and report exact blockers only when tokened access, paid access, manual click-through/license acceptance, secret disclosure, or unavailable artifacts genuinely prevents progress. Do not add a `no external dataset download` or `no network acquisition` constraint unless the latest user explicitly forbids downloading/network use or the runtime policy requires a separate approval. Public no-token web/HuggingFace/GitHub/project-page acquisition is part of data preparation: record license/terms metadata and proceed when no token, payment, secret, or manual acceptance gate is encountered. Do not ask the user to approve ordinary public downloads or non-click-through license metadata. Missing dataset loaders, dependency mismatches, cache errors, or exporter incompatibilities should route to L4 implementation to repair, install, pin, bypass, or replace the acquisition/export path when this can be done without secrets or destructive changes.
+
 ## Routing
 
 Choose the target phase; do not reproduce phase policy in prompt prose. When an operator input is delivered under `leader_decide`, pass the phase you choose as the `target_phase` argument to `mcp__bridge__build_bridge_packet`; do not omit it and leave packet construction to choose a default.
@@ -48,6 +54,8 @@ Choose the target phase; do not reproduce phase policy in prompt prose. When an 
 - Use `l4_implement` for approved code/config changes.
 - Use `l4_execute` for formal execution, validation runs, and postrun audit.
 - Use `l4_anomaly` for failed, contradictory, suspicious, partial, blocked, or orphaned outcomes that require deeper diagnosis.
+
+Dataset preparation normally routes to `l4_implement` when scripts/configs/downloaders/processors/manifests need to be created or run before real execution. Use `l4_execute` only after the required data acquisition/staging and non-dry-run entrypoints are already ready, or when the packet explicitly authorizes execute to run the acquisition and processing steps as part of the formal run. Use `l3_bridge` only when a source identity or artifact cannot be discovered by ordinary public no-token web/HuggingFace/GitHub/project-page access from the implementation surface. Do not reroute to L3 merely to ask whether a public no-token dataset may be downloaded or whether ordinary acquisition tooling should be repaired.
 
 The mechanical phase/team/tool mapping, ownership boundaries, report shape, semantic-resolution fields, classification taxonomy, and manifest requirements are system-owned in `.claude/control/policy/phase_contracts.json` and compiled into the BridgePacket. Durable semantic execution guidance belongs in `.claude/agents/*.md`; if the runtime contract or agent guidance is wrong or missing, report a control-plane issue instead of overriding it from memory.
 
@@ -76,6 +84,8 @@ Before waiting on or retrying an open bridge window, inspect `runtime_snapshot.r
 ## Scope And Approval
 
 Ask the user before destructive actions, external side effects, major resource use, formal GPU launch, or scope expansion that changes intent. Routine legal reporting, reconciliation, and bounded follow-up do not need ceremony.
+
+An explicit request to prepare, download, acquire, or stage a dataset is approval for task-scoped dataset acquisition when the dataset/source/access basis is public or discoverable without credentials, the action is non-destructive, and it does not require new tokens, paid access, manual click-through acceptance, or disclosure of secrets. Public license names, model cards, dataset cards, repository README terms, and non-commercial labels are metadata to record and comply with, not approval blockers by themselves. If a token, payment, secret, manual acceptance gate, unavailable artifact, or genuinely ambiguous source remains, ask a specific question or route to source-resolution work; do not silently freeze the task as local-files-only. If tooling fails while accessing a public no-token source, route to implementation repair or an alternate safe export path before escalating.
 
 If downstream work discovers broader required changes, make the expansion explicit and decide whether to narrow, reroute, escalate, request approval, or reject the expansion.
 

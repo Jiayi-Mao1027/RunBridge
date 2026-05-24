@@ -428,6 +428,16 @@
     ],
     [
       "task_completion_started",
+      "orphan_timeout_without_bridge_return",
+      "bridge_window_orphaned"
+    ],
+    [
+      "task_completion_started",
+      "orphan_timeout_without_heartbeat",
+      "bridge_window_orphaned"
+    ],
+    [
+      "task_completion_started",
       "bridge_call_interrupted",
       "bridge_window_interrupted"
     ],
@@ -468,6 +478,16 @@
     ],
     [
       "task_completion_rejected",
+      "orphan_timeout_without_bridge_return",
+      "bridge_window_orphaned"
+    ],
+    [
+      "task_completion_rejected",
+      "orphan_timeout_without_heartbeat",
+      "bridge_window_orphaned"
+    ],
+    [
+      "task_completion_rejected",
       "bridge_call_interrupted",
       "bridge_window_interrupted"
     ],
@@ -475,6 +495,16 @@
       "task_completion_completed",
       "team_delete_started",
       "team_delete_started"
+    ],
+    [
+      "task_completion_completed",
+      "orphan_timeout_without_bridge_return",
+      "bridge_window_orphaned"
+    ],
+    [
+      "task_completion_completed",
+      "orphan_timeout_without_heartbeat",
+      "bridge_window_orphaned"
     ],
     [
       "task_completion_completed",

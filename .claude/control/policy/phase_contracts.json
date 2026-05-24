@@ -13,8 +13,8 @@
   "default_bridge_actions": ["team_create", "task_create", "send_messages", "task_complete", "team_delete"],
   "default_forbidden_actions": [
     "destructive filesystem operations outside writable scopes",
-    "external network calls through Bash or project code unless explicitly approved; WebSearch/WebFetch are allowed only when present in allowed_tools and used for task-relevant research",
-    "dependency installation unless explicitly approved",
+    "external network calls through Bash or project code that are unrelated to the accepted packet, require secrets/tokens/payment/manual license acceptance, or expose private data; task-authorized public no-token acquisition and task-relevant research are allowed when the phase/tools permit them",
+    "destructive or global dependency/environment changes unless explicitly approved; task-scoped dependency repair, version pinning, cache rebuilds, or local tooling bypasses are allowed in L4 implement/execute when needed and auditable",
     "implementation content edits during L3 artifact curation unless the file is human-facing documentation already in L3 doc scope",
     "physical deletion of user/project artifacts unless the item is clearly regenerable trash, an empty duplicate, or explicitly approved"
   ],
@@ -217,7 +217,28 @@
       "teammates": [
         {"teammate_name": "implementor", "role": "implement", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write"], "responsibilities": ["make approved code/config changes and collect bounded validation evidence"]},
         {"teammate_name": "rungater", "role": "implementation_gate", "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash"], "responsibilities": ["judge post-implementation readiness and recommend proceed, repair, reroute, or stop"]}
-      ]
+      ],
+      "completion_contract_additions": {
+        "validation_requirements": [
+          "implementation handoff distinguishes dry-run/debug evidence from formal-run readiness",
+          "execution entrypoint, configs, data/input manifests, expected outputs, and non-dry-run command are present or explicitly blocked with approved reason"
+        ],
+        "success_criteria": [
+          "L4 implement does not claim proceed-to-execute based only on dry run, static check, toy run, placeholder output, or blocker-only manifest",
+          "L4 implement leaves a formal execute handoff with concrete command, cwd, configs, inputs, expected outputs, and blocker evidence, or routes repair before execute"
+        ]
+      },
+      "report_contract_additions": {
+        "required_sections": ["execution_readiness", "formal_handoff"],
+        "hard_required_sections": ["execution_readiness", "formal_handoff"],
+        "required_evidence": [
+          "real non-dry-run entrypoint or explicit approved blocker",
+          "formal command and cwd or blocker reason",
+          "config paths and data/input manifest paths or blocker reason",
+          "expected output/checkpoint/log paths",
+          "dry-run/static evidence labeled as debugging only, not formal completion"
+        ]
+      }
     },
     "l4_execute": {
       "bridge_tools": ["Agent", "Read", "Grep", "Glob", "LS", "Bash", "Write"],

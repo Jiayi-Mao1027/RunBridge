@@ -28,8 +28,8 @@ const LEADER_INPUT_TIMEOUT_MS = Math.max(
   Number(process.env.BRIDGE_COMPANION_LEADER_INPUT_TIMEOUT_MS || 15 * 60 * 1000)
 );
 const LEADER_INPUT_ACK_TIMEOUT_MS = Math.max(
-  1000,
-  Number(process.env.BRIDGE_COMPANION_LEADER_INPUT_ACK_TIMEOUT_MS || REQUEST_JSON_TIMEOUT_MS)
+  10000,
+  Number(process.env.BRIDGE_COMPANION_LEADER_INPUT_ACK_TIMEOUT_MS || 30000)
 );
 const BRIEF_REQUEST_TIMEOUT_MS = Math.max(
   5000,
@@ -51,13 +51,21 @@ const PROJECTION_EVENT_WINDOW = Math.max(
   100,
   Number(process.env.BRIDGE_COMPANION_PROJECTION_EVENT_WINDOW || 1000)
 );
+const PROJECTION_JSONL_TAIL_MAX_BYTES = Math.max(
+  64 * 1024,
+  Number(process.env.BRIDGE_COMPANION_PROJECTION_JSONL_TAIL_MAX_BYTES || 256 * 1024)
+);
+const PROJECTION_JSONL_TAIL_MAX_LINES = Math.max(
+  100,
+  Number(process.env.BRIDGE_COMPANION_PROJECTION_JSONL_TAIL_MAX_LINES || 250)
+);
 const STATUS_ACTIVITY_EVENT_LIMIT = Math.max(
   20,
-  Number(process.env.BRIDGE_COMPANION_STATUS_ACTIVITY_EVENT_LIMIT || 80)
+  Number(process.env.BRIDGE_COMPANION_STATUS_ACTIVITY_EVENT_LIMIT || 40)
 );
 const STATUS_TRAJECTORY_LIMIT = Math.max(
   20,
-  Number(process.env.BRIDGE_COMPANION_STATUS_TRAJECTORY_LIMIT || 120)
+  Number(process.env.BRIDGE_COMPANION_STATUS_TRAJECTORY_LIMIT || 60)
 );
 const RUN_LIST_JSON_MAX_BYTES = Math.max(
   16 * 1024,
@@ -75,6 +83,9 @@ const ACCESS_CONTROL_ALLOW_ORIGIN =
   process.env.BRIDGE_COMPANION_ALLOWED_ORIGIN ||
   process.env.BRIDGE_COMPANION_ALLOWED_ORIGINS?.split(",").map(item => item.trim()).filter(Boolean)[0] ||
   `http://${HOST}:${PORT}`;
+const PRETTY_JSON_RESPONSES = ["1", "true", "yes"].includes(
+  String(process.env.BRIDGE_COMPANION_PRETTY_JSON || "").toLowerCase()
+);
 
 const PROJECTS_ROOT = resolveProjectsRoot();
 const SESSION_OBSERVER_ROOT = process.env.BRIDGE_SESSION_OBSERVER_ROOT
@@ -189,7 +200,7 @@ function sendJson(res, statusCode, body) {
     "access-control-allow-methods": "GET, HEAD, OPTIONS, POST",
     "access-control-allow-headers": "content-type, authorization, x-bridge-companion-token"
   });
-  res.end(JSON.stringify(redactForResponse(body), null, 2));
+  res.end(JSON.stringify(redactForResponse(body), null, PRETTY_JSON_RESPONSES ? 2 : 0));
 }
 
 function sendText(res, statusCode, body, contentType = "text/plain; charset=utf-8") {
@@ -325,17 +336,19 @@ async function readJsonIfExists(filePath, fallback = null, options = {}) {
   }
 }
 
-async function readJsonlText(filePath) {
+async function readJsonlText(filePath, options = {}) {
   const stats = await stat(filePath).catch(() => null);
   if (!stats) return null;
-  if (stats.size <= JSONL_TAIL_MAX_BYTES) {
+  const maxBytes = Math.max(1, Number(options.maxBytes || JSONL_TAIL_MAX_BYTES));
+  const maxLines = Math.max(1, Number(options.maxLines || JSONL_TAIL_MAX_LINES));
+  if (stats.size <= maxBytes) {
     return {
       text: await readFile(filePath, "utf8"),
       baseByteOffset: 0
     };
   }
 
-  const start = Math.max(0, stats.size - JSONL_TAIL_MAX_BYTES);
+  const start = Math.max(0, stats.size - maxBytes);
   const length = stats.size - start;
   const buffer = Buffer.alloc(length);
   const handle = await open(filePath, "r");
@@ -355,8 +368,8 @@ async function readJsonlText(filePath) {
   }
 
   const lines = text.split(/\r?\n/);
-  if (lines.length > JSONL_TAIL_MAX_LINES) {
-    const keepFrom = lines.length - JSONL_TAIL_MAX_LINES;
+  if (lines.length > maxLines) {
+    const keepFrom = lines.length - maxLines;
     const dropped = lines.slice(0, keepFrom).join("\n");
     if (dropped) baseByteOffset += Buffer.byteLength(`${dropped}\n`);
     text = lines.slice(keepFrom).join("\n");
@@ -365,8 +378,8 @@ async function readJsonlText(filePath) {
   return { text, baseByteOffset };
 }
 
-async function readJsonlWithMeta(filePath, sourceFile) {
-  const loaded = await readJsonlText(filePath).catch(() => null);
+async function readJsonlWithMeta(filePath, sourceFile, options = {}) {
+  const loaded = await readJsonlText(filePath, options).catch(() => null);
   if (!loaded) {
     return [];
   }
@@ -479,20 +492,11 @@ async function listRepos() {
   const registry = await loadRegistry();
   if (!(await exists(PROJECTS_ROOT)) && !registry.repos.length) return [];
   const byKey = new Map();
-  const runsCache = new Map();
-  const cachedRuns = async repoKey => {
-    if (!runsCache.has(repoKey)) runsCache.set(repoKey, await listRuns(repoKey));
-    return runsCache.get(repoKey);
-  };
 
   for (const item of registry.repos) {
     const repoKey = item.repoKey;
-    const runs = await cachedRuns(repoKey);
     const active = registry.activeRuns.get(repoKey) || {};
-    const latestRun =
-      runs.find(run => run.runId === active.latestRunId) ||
-      runs[0] ||
-      null;
+    const runSummary = await repoRunSummary(repoKey, active.latestRunId);
     byKey.set(repoKey, {
       repoKey,
       displayName: item.displayName || repoKey,
@@ -501,9 +505,9 @@ async function listRepos() {
       isActive: Boolean(item.isActive || active.status === "running" || active.activeRunIds?.length),
       activeRunIds: active.activeRunIds || [],
       activeRunStatus: active.status || null,
-      runCount: runs.length,
-      latestRun,
-      updatedAt: active.lastSeenAt || item.lastSeenAt || latestRun?.updatedAt || item.updatedAt || null,
+      runCount: runSummary.runCount,
+      latestRun: runSummary.latestRun,
+      updatedAt: active.lastSeenAt || item.lastSeenAt || runSummary.latestRun?.updatedAt || item.updatedAt || null,
       registrySource: "registry"
     });
   }
@@ -516,21 +520,66 @@ async function listRepos() {
     if (!entry.isDirectory()) continue;
     const repoKey = entry.name;
     const repoPath = path.join(PROJECTS_ROOT, repoKey);
-    const runs = await cachedRuns(repoKey);
-    const latestRun = runs[0] || null;
+    const active = registry.activeRuns.get(repoKey) || {};
+    const runSummary = await repoRunSummary(repoKey, active.latestRunId);
     const stats = await stat(repoPath).catch(() => null);
     const existing = byKey.get(repoKey) || {};
     byKey.set(repoKey, {
       ...existing,
       repoKey,
       displayName: existing.displayName || repoKey,
-      runCount: runs.length,
-      latestRun: existing.latestRun || latestRun,
-      updatedAt: existing.updatedAt || latestRun?.updatedAt || stats?.mtime?.toISOString() || null,
+      runCount: existing.runCount ?? runSummary.runCount,
+      latestRun: existing.latestRun || runSummary.latestRun,
+      updatedAt: existing.updatedAt || runSummary.latestRun?.updatedAt || stats?.mtime?.toISOString() || null,
       registrySource: existing.registrySource || "scan"
     });
   }
   return [...byKey.values()].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+}
+
+async function repoRunSummary(repoKey, preferredRunId = null) {
+  const repo = repoDir(repoKey);
+  if (!repo) return { runCount: 0, latestRun: null };
+  const runsRoot = path.join(repo, "runs");
+  if (!(await exists(runsRoot))) return { runCount: 0, latestRun: null };
+  const entries = await readdir(runsRoot, { withFileTypes: true });
+  const runEntries = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const runPath = path.join(runsRoot, entry.name);
+    runEntries.push({ runId: entry.name, runPath });
+  }
+  if (!runEntries.length) return { runCount: 0, latestRun: null };
+
+  const preferred = preferredRunId ? runEntries.find(item => item.runId === preferredRunId) : null;
+  const latestEntry = preferred || runEntries.sort((a, b) => String(b.runId).localeCompare(String(a.runId)))[0];
+  const latestStats = latestEntry ? await stat(latestEntry.runPath).catch(() => null) : null;
+  return {
+    runCount: runEntries.length,
+    latestRun: latestEntry ? await runSummaryFromDir(repoKey, latestEntry.runId, latestEntry.runPath, latestStats) : null
+  };
+}
+
+async function runSummaryFromDir(repoKey, runId, runPath, stats = null) {
+  const snapshot = await readJsonIfExists(path.join(runPath, "runtime_snapshot.json"), null, {
+    maxBytes: RUN_LIST_JSON_MAX_BYTES
+  });
+  const ledger = snapshot ? null : await readJsonIfExists(path.join(runPath, "run_ledger.json"), null, {
+    maxBytes: RUN_LIST_JSON_MAX_BYTES
+  });
+  return {
+    repoKey,
+    runId,
+    phase: snapshot?.current_phase || ledger?.current_phase || null,
+    lifecycleState: latestLifecycleState(snapshot || ledger),
+    updatedAt:
+      snapshot?.updated_at ||
+      ledger?.updated_at ||
+      stats?.mtime?.toISOString() ||
+      null,
+    hasSnapshot: Boolean(snapshot),
+    hasTrajectory: await exists(path.join(runPath, "trajectory.jsonl"))
+  };
 }
 
 async function repoInfo(repoKey) {
@@ -793,6 +842,7 @@ function compactRuntimeEventForResponse(runtimeEvent) {
 function compactEventForResponse(event, options = {}) {
   if (!event || typeof event !== "object") return event || null;
   const includeRaw = Boolean(options.includeRaw);
+  const omitRaw = Boolean(options.omitRaw);
   const compact = {
     seq: event.seq,
     eventId: event.eventId,
@@ -826,7 +876,7 @@ function compactEventForResponse(event, options = {}) {
   if (includeRaw) {
     compact.raw = event.raw;
     compact.rawLine = event.rawLine;
-  } else {
+  } else if (!omitRaw) {
     compact.raw = compactRawForResponse(event.raw);
   }
   return compact;
@@ -1205,13 +1255,23 @@ function eventAfterSourceCursor(event, cursor) {
   return Number(event.rawRef?.sourceOffset || 0) > seenOffset;
 }
 
-async function loadRunEvents(repoKey, runId) {
+async function loadRunEvents(repoKey, runId, options = {}) {
   const dir = runDir(repoKey, runId);
   if (!dir) return [];
   const all = [];
-  for (const sourceFile of runSourceFiles) {
-    const records = await readJsonlWithMeta(path.join(dir, sourceFile), sourceFile);
+  const sourceFiles = Array.isArray(options.sourceFiles) ? options.sourceFiles : runSourceFiles;
+  const readOptions = options.readOptions && typeof options.readOptions === "object" ? options.readOptions : {};
+  const perSourceReadOptions = options.perSourceReadOptions && typeof options.perSourceReadOptions === "object"
+    ? options.perSourceReadOptions
+    : {};
+  const includeRecord = typeof options.includeRecord === "function" ? options.includeRecord : null;
+  for (const sourceFile of sourceFiles) {
+    const records = await readJsonlWithMeta(path.join(dir, sourceFile), sourceFile, {
+      ...readOptions,
+      ...(perSourceReadOptions[sourceFile] || {})
+    });
     for (const item of records) {
+      if (includeRecord && !includeRecord(sourceFile, item.record || {})) continue;
       all.push(normalizeRunRecord(repoKey, runId, item));
     }
   }
@@ -1252,8 +1312,9 @@ function filterEvents(events, query) {
     filtered = events.filter(event => event.seq > after).slice(0, limit);
   }
   const includeRaw = ["1", "true", "yes"].includes(String(query.get("raw") || query.get("include_raw") || "").toLowerCase());
+  const includeCompactRaw = includeRaw || ["1", "true", "yes"].includes(String(query.get("compactRaw") || query.get("compact_raw") || "").toLowerCase());
   return {
-    events: filtered.map(event => compactEventForResponse(event, { includeRaw })),
+    events: filtered.map(event => compactEventForResponse(event, { includeRaw, omitRaw: !includeCompactRaw })),
     latestSeq: events.reduce((max, event) => Math.max(max, event.seq), after),
     latestEventId: events.at(-1)?.eventId || null,
     sourceCursors: sourceCursorsFor(events),
@@ -1261,7 +1322,51 @@ function filterEvents(events, query) {
   };
 }
 
-async function loadCompanionData(repoKey, runId) {
+function eventLoadOptionsForQuery(query) {
+  const tail = ["1", "true", "yes", "latest"].includes(String(query.get("tail") || "").toLowerCase());
+  const hasCursor = Boolean(query.get("after") || query.get("afterId") || query.get("after_id") || query.get("afterCursor") || query.get("after_cursor"));
+  if (!tail || hasCursor) return {};
+  const includeStreamDeltas = ["1", "true", "yes"].includes(String(query.get("includeStreamDeltas") || query.get("include_stream_deltas") || "").toLowerCase());
+  const limit = Math.min(
+    MAX_EVENT_LIMIT,
+    Math.max(1, Number(query.get("limit") || DEFAULT_EVENT_LIMIT))
+  );
+  return {
+    readOptions: {
+      maxBytes: PROJECTION_JSONL_TAIL_MAX_BYTES,
+      maxLines: Math.max(PROJECTION_JSONL_TAIL_MAX_LINES, limit)
+    },
+    includeRecord: includeStreamDeltas ? null : includeProjectionRecord
+  };
+}
+
+function includeProjectionRecord(sourceFile, record) {
+  if (sourceFile !== "sdk_stream_events.jsonl") return true;
+  const { kind } = sourceAndKind(sourceFile, record || {});
+  return !["text_delta", "sdk_delta"].includes(kind);
+}
+
+function projectionEventLoadOptions() {
+  return {
+    readOptions: {
+      maxBytes: PROJECTION_JSONL_TAIL_MAX_BYTES,
+      maxLines: PROJECTION_JSONL_TAIL_MAX_LINES
+    },
+    includeRecord: includeProjectionRecord
+  };
+}
+
+function statusEventLoadOptions() {
+  return {
+    readOptions: {
+      maxBytes: PROJECTION_JSONL_TAIL_MAX_BYTES,
+      maxLines: PROJECTION_JSONL_TAIL_MAX_LINES
+    },
+    includeRecord: includeProjectionRecord
+  };
+}
+
+async function loadCompanionData(repoKey, runId, options = {}) {
   const dir = runDir(repoKey, runId);
   if (!dir) return null;
   const snapshot = await readJsonIfExists(path.join(dir, "runtime_snapshot.json"), null);
@@ -1291,7 +1396,7 @@ async function loadCompanionData(repoKey, runId) {
     rawLine: item.rawLine,
     parseError: item.parseError || undefined
   }));
-  const events = await loadRunEvents(repoKey, runId);
+  const events = await loadRunEvents(repoKey, runId, options.events || {});
   return {
     repoKey,
     runId,
@@ -1338,6 +1443,31 @@ function packetSummaryFrom(snapshot, runLedger, events) {
       : "No report contract recorded",
     packet,
     packetSummary
+  };
+}
+
+function compactPacketSummaryForResponse(packetSummary) {
+  if (!packetSummary || typeof packetSummary !== "object") return packetSummary || null;
+  const packet = packetSummary.packet && typeof packetSummary.packet === "object" ? packetSummary.packet : null;
+  const rawSummary = packetSummary.packetSummary && typeof packetSummary.packetSummary === "object" ? packetSummary.packetSummary : null;
+  return {
+    objective: compactText(packetSummary.objective),
+    targetPhase: packetSummary.targetPhase || "unknown",
+    completionSummary: compactText(packetSummary.completionSummary),
+    reportSummary: compactText(packetSummary.reportSummary),
+    packet: packet ? {
+      bridge_packet_id: packet.bridge_packet_id || packet.packet_id || packet.id || undefined,
+      target_phase: packet.target_phase || undefined,
+      team_id: packet.team_id || packet.teamId || undefined,
+      task_id: packet.task_id || packet.taskId || undefined
+    } : undefined,
+    packetSummary: rawSummary ? {
+      bridge_window_id: rawSummary.bridge_window_id || rawSummary.bridgeWindowId || undefined,
+      target_phase: rawSummary.target_phase || undefined,
+      team_id: rawSummary.team_id || rawSummary.teamId || undefined,
+      task_id: rawSummary.task_id || rawSummary.taskId || undefined,
+      status: rawSummary.status || undefined
+    } : undefined
   };
 }
 
@@ -1493,16 +1623,18 @@ function unknownsFor(data) {
 }
 
 async function buildStatus(repoKey, runId, options = {}) {
-  const data = await loadCompanionData(repoKey, runId);
+  const includeDetail = Boolean(options.includeDetail);
+  const data = await loadCompanionData(repoKey, runId, {
+    events: options.events || (includeDetail ? {} : statusEventLoadOptions())
+  });
   if (!data) return null;
   const packetSummary = packetSummaryFrom(data.snapshot, data.runLedger, data.events);
   const lifecycleState = latestLifecycleState(data.snapshot || data.runLedger);
-  const latestEvent = compactEventForResponse(data.events.at(-1) || null);
+  const latestEvent = compactEventForResponse(data.events.at(-1) || null, { omitRaw: true });
   const team = teamFrom(data);
-  const includeDetail = Boolean(options.includeDetail);
   const activityFeed = data.events
     .slice(-STATUS_ACTIVITY_EVENT_LIMIT)
-    .map(event => compactEventForResponse(event));
+    .map(event => compactEventForResponse(event, { omitRaw: true }));
   const trajectory = data.trajectory
     .slice(-STATUS_TRAJECTORY_LIMIT)
     .map(step => compactTrajectoryForResponse(step));
@@ -1532,7 +1664,7 @@ async function buildStatus(repoKey, runId, options = {}) {
       projectsRoot: PROJECTS_ROOT,
       sessionObserverRoot: SESSION_OBSERVER_ROOT
     },
-    packetSummary,
+    packetSummary: compactPacketSummaryForResponse(packetSummary),
     teammates: team,
     activityFeed,
     trajectory,
@@ -1549,7 +1681,7 @@ async function buildStatus(repoKey, runId, options = {}) {
         rawRef: compactRawRef(item.rawRef),
         rawLine: undefined
       })),
-      events: data.events.slice(-STATUS_ACTIVITY_EVENT_LIMIT).map(event => compactEventForResponse(event)),
+      events: data.events.slice(-STATUS_ACTIVITY_EVENT_LIMIT).map(event => compactEventForResponse(event, { omitRaw: true })),
       trajectory
     } : compactDetail,
     streamContract: {
@@ -1563,24 +1695,45 @@ async function buildStatus(repoKey, runId, options = {}) {
 
 function compactTuiViewForProjection(view) {
   if (!view || typeof view !== "object") return view;
-  const compactRefs = (items, limit = 10) => Array.isArray(items) ? items.filter(Boolean).slice(-limit) : [];
+  const compactRefs = (items, limit = 8) => Array.isArray(items) ? items.filter(Boolean).slice(-limit) : [];
   const compactDisplayItem = item => {
     if (!item || typeof item !== "object") return item;
     const { inspector, ...rest } = item;
-    return {
+    const out = {
       ...rest,
+      title: typeof rest.title === "string" ? compactText(rest.title) : rest.title,
+      body: typeof rest.body === "string" ? compactText(rest.body) : rest.body,
+      text: typeof rest.text === "string" ? compactText(rest.text) : rest.text,
+      subtitle: typeof rest.subtitle === "string" ? compactText(rest.subtitle) : rest.subtitle,
       rawRefs: compactRefs(item.rawRefs),
       evidenceRefs: compactRefs(item.evidenceRefs),
       fileRefs: compactRefs(item.fileRefs)
     };
+    if (Array.isArray(item.items)) out.items = item.items.slice(-20).map(compactDisplayItem);
+    if (Array.isArray(item.children)) out.children = item.children.slice(-20).map(compactDisplayItem);
+    return out;
   };
+  const teamTree = Array.isArray(view.teamTree) ? view.teamTree.map(compactDisplayItem) : [];
+  const activityItems = Array.isArray(view.activityItems) ? view.activityItems.slice(0, 20).map(compactDisplayItem) : [];
+  const completion = compactDisplayItem(view.completion);
+  const visibleIds = new Set();
+  const collectIds = item => {
+    if (!item || typeof item !== "object") return;
+    if (item.id) visibleIds.add(String(item.id));
+    for (const child of [...(Array.isArray(item.items) ? item.items : []), ...(Array.isArray(item.children) ? item.children : [])]) {
+      collectIds(child);
+    }
+  };
+  [view.mainReport, completion, ...teamTree, ...activityItems].forEach(collectIds);
   const inspectorIndex = {};
-  for (const [id, payload] of Object.entries(view.inspectorIndex || {}).slice(0, 80)) {
+  for (const [id, payload] of Object.entries(view.inspectorIndex || {})) {
+    if (visibleIds.size && !visibleIds.has(String(id))) continue;
+    if (Object.keys(inspectorIndex).length >= 15) break;
     inspectorIndex[id] = {
       id: payload.id || id,
       displayKey: payload.displayKey,
       kind: payload.kind,
-      title: payload.title,
+      title: compactText(payload.title),
       rawRefs: compactRefs(payload.rawRefs, 8),
       sourceCursors: compactRefs(payload.sourceCursors, 8),
       evidenceRefs: compactRefs(payload.evidenceRefs, 8),
@@ -1590,27 +1743,55 @@ function compactTuiViewForProjection(view) {
   return {
     ...view,
     mainReport: compactDisplayItem(view.mainReport),
-    teamTree: Array.isArray(view.teamTree) ? view.teamTree.map(compactDisplayItem) : [],
-    activityItems: Array.isArray(view.activityItems) ? view.activityItems.map(compactDisplayItem) : [],
-    completion: compactDisplayItem(view.completion),
+    teamTree,
+    activityItems,
+    completion,
     inspectorIndex
   };
 }
 
 async function buildProjection(repoKey, runId) {
-  const data = await loadCompanionData(repoKey, runId);
+  const data = await loadCompanionData(repoKey, runId, { events: projectionEventLoadOptions() });
   if (!data) return null;
   const packetSummary = packetSummaryFrom(data.snapshot, data.runLedger, data.events);
   const events = data.events || [];
   const projectionEvents = events.slice(-PROJECTION_EVENT_WINDOW);
   const unknowns = unknownsFor(data);
+  const latestPacketEvent = [...events].reverse().find(event => event.source === "bridge_packet" || event.raw?.packet || event.raw?.payload?.packet);
+  const activeBridgeWindowId =
+    packetSummary.packetSummary?.bridge_window_id ||
+    packetSummary.packetSummary?.bridgeWindowId ||
+    packetSummary.packet?.bridge_window_id ||
+    packetSummary.packet?.bridgeWindowId ||
+    data.snapshot?.last_bridge_result?.bridge_window_id ||
+    data.snapshot?.last_bridge_result?.bridgeWindowId ||
+    latestPacketEvent?.bridgeWindowId;
+  const activeTeamId =
+    packetSummary.packetSummary?.team_id ||
+    packetSummary.packetSummary?.teamId ||
+    packetSummary.packet?.team_id ||
+    packetSummary.packet?.teamId ||
+    data.snapshot?.last_bridge_result?.team_id ||
+    data.snapshot?.last_bridge_result?.teamId ||
+    latestPacketEvent?.teamId;
+  const activeTaskId =
+    packetSummary.packetSummary?.task_id ||
+    packetSummary.packetSummary?.taskId ||
+    packetSummary.packet?.task_id ||
+    packetSummary.packet?.taskId ||
+    data.snapshot?.last_bridge_result?.task_id ||
+    data.snapshot?.last_bridge_result?.taskId ||
+    latestPacketEvent?.taskId;
   const tuiView = compactTuiViewForProjection(reduceToTuiView(projectionEvents, data.snapshot, data.activeOperations, {
     repoKey,
     runId,
     packetSummary,
     runLedger: data.runLedger,
     sessionBindings: data.sessionBindings,
-    unknowns
+    unknowns,
+    currentBridgeWindowId: activeBridgeWindowId || null,
+    currentTeamId: activeTeamId || null,
+    currentTaskId: activeTaskId || null
   }));
   return {
     schemaVersion: "companion_projection.v1",
@@ -1632,19 +1813,22 @@ async function buildProjection(repoKey, runId) {
       title: packetSummary.objective,
       targetPhase: packetSummary.targetPhase,
       lifecycleState: latestLifecycleState(data.snapshot || data.runLedger),
-      packetRef: _projectionRawRef(events.find(event => event.source === "bridge_packet" || event.raw?.packet || event.raw?.payload?.packet)),
+      bridgeWindowId: activeBridgeWindowId || undefined,
+      teamId: activeTeamId || undefined,
+      taskId: activeTaskId || undefined,
+      packetRef: _projectionRawRef(latestPacketEvent),
       completionSummary: packetSummary.completionSummary,
       reportSummary: packetSummary.reportSummary
     },
-    timeline: projectionEvents.slice(-100).map(projectTimelineEvent),
-    liveToolCards: projectionEvents.filter(event => event.source === "hook_tool_event").slice(-30).map(projectToolCard),
-    agentMessageCards: projectionEvents.filter(event => event.source === "agent_message" || event.source === "sdk_stream" || event.source === "outer_host").slice(-40).map(projectMessageCard),
-    artifactCards: projectionEvents.filter(event => event.source === "artifact" || event.evidenceRefs?.length).slice(-40).map(projectArtifactCard),
+    timeline: projectionEvents.slice(-15).map(projectTimelineEvent),
+    liveToolCards: projectionEvents.filter(event => event.source === "hook_tool_event").slice(-6).map(projectToolCard),
+    agentMessageCards: projectionEvents.filter(event => event.source === "agent_message" || event.source === "sdk_stream" || event.source === "outer_host").slice(-6).map(projectMessageCard),
+    artifactCards: projectionEvents.filter(event => event.source === "artifact" || event.evidenceRefs?.length).slice(-5).map(projectArtifactCard),
     completionChecklist: projectCompletionChecklist(events),
-    leaderReportCards: projectLeaderReportCards(events).slice(-20),
-    failureRetryLane: projectionEvents.filter(event => event.lane === "failures" || ["failed", "blocked", "rejected"].includes(String(event.status || ""))).slice(-40).map(projectTimelineEvent),
-    semanticCoverageMatrix: projectSemanticCoverage(events).slice(-80),
-    rawJsonRefs: projectionEvents.slice(-100).map(event => ({ eventId: event.eventId, rawRef: event.rawRef, sourceAuthority: event.runtimeEvent?.authority || "observed" })),
+    leaderReportCards: projectLeaderReportCards(events).slice(-3),
+    failureRetryLane: projectionEvents.filter(event => event.lane === "failures" || ["failed", "blocked", "rejected"].includes(String(event.status || ""))).slice(-6).map(projectTimelineEvent),
+    semanticCoverageMatrix: projectSemanticCoverage(events).slice(-10),
+    rawJsonRefs: projectionEvents.slice(-10).map(event => ({ eventId: event.eventId, rawRef: compactRawRef(event.rawRef), sourceAuthority: event.runtimeEvent?.authority || "observed" })),
     unknowns,
     tuiView
   };
@@ -1689,6 +1873,19 @@ function projectMessageCard(event) {
   };
 }
 
+function compactEvidenceForCard(value) {
+  if (!value) return null;
+  if (typeof value === "string") return compactText(value);
+  if (Array.isArray(value)) return value.slice(0, 8).map(item => compactText(item));
+  if (typeof value === "object") {
+    return {
+      summary: compactText(value),
+      keys: Object.keys(value).slice(0, 12)
+    };
+  }
+  return compactText(value);
+}
+
 function projectLeaderReportCards(events) {
   const bridgeResults = events.filter(event => bridgeResultFromEvent(event));
   const outerResults = events.filter(event => event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result");
@@ -1723,25 +1920,27 @@ function projectLeaderReportCard(event) {
   const bridgeResult = bridgeResultFromEvent(event);
   if (bridgeResult) {
     const reports = Array.isArray(bridgeResult.reports) ? bridgeResult.reports : [];
+    const evidence = bridgeResult.evidence || raw.evidence || null;
     return {
       ...projectTimelineEvent(event),
       handledBy: raw.agent_id || raw.agent_type || "main-leader",
       reportStatus: bridgeResult.status || raw.status || event.status || "unknown",
       summary: summarizeBridgeResult(bridgeResult),
       error: bridgeResult.error_or_null || raw.error_or_null || null,
-      evidence: bridgeResult.evidence || raw.evidence || null,
+      evidence: compactEvidenceForCard(evidence),
       reportCount: reports.length
     };
   }
   const leaderResult = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : null;
   const report = Array.isArray(leaderResult?.reports) ? leaderResult.reports[0] : null;
+  const evidence = leaderResult?.evidence || raw.evidence || null;
   return {
     ...projectTimelineEvent(event),
     handledBy: leaderResult?.handled_by || raw.handled_by || raw.source || undefined,
     reportStatus: leaderResult?.status || raw.status || event.status || "unknown",
     summary: report?.summary || raw.result || event.messagePreview || "",
     error: leaderResult?.error_or_null || raw.error_or_null || null,
-    evidence: leaderResult?.evidence || raw.evidence || null
+    evidence: compactEvidenceForCard(evidence)
   };
 }
 
@@ -1791,10 +1990,10 @@ function projectCompletionChecklist(events) {
   for (const item of Array.isArray(checks.checks) ? checks.checks : []) {
     if (!item || typeof item !== "object") continue;
     items.push({
-      name: item.name || "check",
+      name: compactText(item.name || "check"),
       status: item.status || "unknown",
-      subject: item.subject || "",
-      message: item.message || "",
+      subject: compactText(item.subject || ""),
+      message: compactText(item.message || ""),
       evidenceRef: item.evidence_ref || null
     });
   }
@@ -1802,10 +2001,10 @@ function projectCompletionChecklist(events) {
     for (const item of raw.items) {
       if (!item || typeof item !== "object") continue;
       items.push({
-        name: item.id || "contract_item",
+        name: compactText(item.id || "contract_item"),
         status: item.status || "unknown",
-        subject: item.text || "",
-        message: item.reason || "",
+        subject: compactText(item.text || ""),
+        message: compactText(item.reason || ""),
         evidenceRef: Array.isArray(item.evidence_refs) ? item.evidence_refs[0] || null : null
       });
     }
@@ -1828,11 +2027,11 @@ function projectSemanticCoverage(events) {
       : {};
     for (const [item, disposition] of Object.entries(coverage)) {
       rows.push({
-        item,
+        item: compactText(item),
         disposition: coverageDisposition(disposition),
         teammateId: event.actor?.teammateId || event.actor?.displayName || event.actor?.role || undefined,
-        evidenceRefs: Array.isArray(report.evidence_refs) ? report.evidence_refs : [],
-        rawRef: event.rawRef
+        evidenceRefs: Array.isArray(report.evidence_refs) ? report.evidence_refs.slice(0, 6) : [],
+        rawRef: compactRawRef(event.rawRef)
       });
     }
   }
@@ -2569,7 +2768,13 @@ async function streamRun(req, res, repoKey, runId, query) {
   };
 
   const tailer = dir ? await createTailer(dir, runSourceFiles) : [];
-  const initialEvents = await loadRunEvents(repoKey, runId);
+  const initialEvents = await loadRunEvents(repoKey, runId, {
+    readOptions: {
+      maxBytes: PROJECTION_JSONL_TAIL_MAX_BYTES,
+      maxLines: Math.max(PROJECTION_JSONL_TAIL_MAX_LINES, DEFAULT_EVENT_LIMIT * 2)
+    },
+    includeRecord: includeProjectionRecord
+  });
   writeEvents(initialEvents);
   const writeLive = async () => {
     const { events: nextEvents, warnings } = await readTailerEvents(tailer, repoKey, runId);
@@ -2759,7 +2964,7 @@ async function handleApi(req, res, url) {
         return;
       }
       if (action === "events") {
-        const events = await loadRunEvents(repoKey, runId);
+        const events = await loadRunEvents(repoKey, runId, eventLoadOptionsForQuery(url.searchParams));
         sendJson(res, 200, { repoKey, runId, ...filterEvents(events, url.searchParams) });
         return;
       }
@@ -2921,7 +3126,7 @@ async function requestHandler(req, res) {
       const runId = decodeURIComponent(legacy[1]);
       if (legacy[2] === "stream") await streamRun(req, res, repoKey, runId, url.searchParams);
       else if (legacy[2] === "events") {
-        const events = await loadRunEvents(repoKey, runId);
+        const events = await loadRunEvents(repoKey, runId, eventLoadOptionsForQuery(url.searchParams));
         sendJson(res, 200, { repoKey, runId, ...filterEvents(events, url.searchParams) });
       } else {
         sendJson(res, 200, await buildStatus(repoKey, runId));

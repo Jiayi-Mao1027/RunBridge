@@ -975,6 +975,8 @@ def _outer_leader_print_retry_reason(request: dict[str, Any], leader_result: dic
     error_type = _leader_result_error_type(leader_result)
     if error_type == "OuterLeaderTmuxNoAssistantText":
         return "tmux_outer_leader_returned_without_assistant_text"
+    if error_type == "OuterLeaderTmuxNoRuntimeProgress":
+        return "tmux_outer_leader_stalled_without_runtime_progress"
     if str(request.get("dispatch_intent") or "").strip() == "leader_decide":
         status = str(leader_result.get("status") or "").strip()
         if status == "succeeded" and not _has_explicit_no_bridge_decision(_leader_result_summary_text(leader_result)):
@@ -1021,6 +1023,7 @@ def _outer_leader_failure_allows_auto_bridge(error_type: str) -> bool:
         "OuterLeaderContractViolation",
         "OuterLeaderTmuxTerminalApiError",
         "OuterLeaderTmuxNoAssistantText",
+        "OuterLeaderTmuxNoRuntimeProgress",
         "OuterLeaderTmuxStartupFailed",
         "OuterLeaderTransportApiFailure",
         "OuterLeaderApiError",

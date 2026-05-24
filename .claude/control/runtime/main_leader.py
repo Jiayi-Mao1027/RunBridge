@@ -35,8 +35,8 @@ PHASE_BRIDGE_TOOLS = {
 }
 DEFAULT_FORBIDDEN_ACTIONS = [
     "destructive filesystem operations outside writable scopes",
-    "external network calls through Bash or project code unless explicitly approved; WebSearch/WebFetch are allowed only when present in allowed_tools and used for task-relevant research",
-    "dependency installation unless explicitly approved",
+    "external network calls through Bash or project code that are unrelated to the accepted packet, require secrets/tokens/payment/manual license acceptance, or expose private data; task-authorized public no-token acquisition and task-relevant research are allowed when the phase/tools permit them",
+    "destructive or global dependency/environment changes unless explicitly approved; task-scoped dependency repair, version pinning, cache rebuilds, or local tooling bypasses are allowed in L4 implement/execute when needed and auditable",
     "implementation content edits during L3 artifact curation unless the file is human-facing documentation already in L3 doc scope",
     "physical deletion of user/project artifacts unless the item is clearly regenerable trash, an empty duplicate, or explicitly approved",
 ]
@@ -190,7 +190,7 @@ def build_bridge_instruction_packet_for_this_invoke(
     bridge_allowed_tools = _default_bridge_tools(resolved_target_phase, contracts)
     resolved_team = _normalize_team_spec(target_phase=resolved_target_phase, phase_contracts=contracts)
     resolved_task = _normalize_task_spec(
-        task_spec,
+        _attach_runtime_followup_context(task_spec, snapshot),
         user_instruction=user_instruction,
         target_phase=resolved_target_phase,
         completion_contract=resolved_completion,
@@ -249,6 +249,130 @@ def build_bridge_instruction_packet_for_this_invoke(
     }
     packet["dispatch_contract"] = build_dispatch_contract(packet)
     return packet
+
+
+BLOCKING_REPORT_CLASSIFICATIONS = {
+    "hard_stop",
+    "blocked",
+    "execution_blocked",
+    "readiness_blocked",
+    "dependency_blocked",
+    "execution_defect",
+}
+
+
+def _attach_runtime_followup_context(task_spec: dict[str, Any] | None, snapshot: dict[str, Any]) -> dict[str, Any]:
+    source = deepcopy(task_spec or {})
+    context = _latest_blocking_followup_context(snapshot)
+    if not context:
+        return source
+    existing = source.get("runtime_followup_context")
+    if not isinstance(existing, dict):
+        existing = {}
+    else:
+        existing = deepcopy(existing)
+    existing["latest_bridge_result"] = context
+    source["runtime_followup_context"] = existing
+    return source
+
+
+def _latest_blocking_followup_context(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    latest = snapshot.get("last_bridge_result")
+    if not isinstance(latest, dict):
+        return None
+    status = str(latest.get("status") or "").strip()
+    reports = _latest_reports(latest)
+    blocking_reports = [report for report in reports if _report_is_blocking(report)]
+    error = latest.get("error_or_null") if isinstance(latest.get("error_or_null"), dict) else {}
+    blocked_teammates = error.get("blocked_teammates") if isinstance(error.get("blocked_teammates"), list) else []
+    if status not in {"failed", "partial_or_failed"} and not blocking_reports and not blocked_teammates:
+        return None
+    bridge_window_id = str(latest.get("bridge_window_id") or "")
+    return {
+        "bridge_window_id": bridge_window_id or None,
+        "status": status or None,
+        "failure_stage_or_null": latest.get("failure_stage_or_null"),
+        "target_phase": _target_phase_for_latest_bridge(snapshot, bridge_window_id),
+        "error_type": error.get("type"),
+        "blocked_teammates": [str(item) for item in blocked_teammates if str(item)],
+        "recommended_target_phase": _recommended_target_phase_from_reports(reports),
+        "blocking_report_summaries": [
+            {
+                "classification": report.get("classification"),
+                "summary": _bounded_text(report.get("summary"), 700),
+                "next_action_recommendation": _bounded_text(report.get("next_action_recommendation"), 500),
+            }
+            for report in blocking_reports[:4]
+        ],
+    }
+
+
+def _latest_reports(bridge_result: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = bridge_result.get("reports_preview")
+    if not isinstance(raw, list):
+        raw = bridge_result.get("reports")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _report_is_blocking(report: dict[str, Any]) -> bool:
+    classification = str(report.get("classification") or "").strip()
+    if classification in BLOCKING_REPORT_CLASSIFICATIONS:
+        return True
+    coverage = report.get("instruction_coverage")
+    if isinstance(coverage, dict):
+        return any(str(value).strip() in {"blocked", "hard_stop", "escalated"} for value in coverage.values())
+    return False
+
+
+def _target_phase_for_latest_bridge(snapshot: dict[str, Any], bridge_window_id: str) -> str | None:
+    if not bridge_window_id:
+        return None
+    bindings = snapshot.get("bindings") if isinstance(snapshot.get("bindings"), dict) else {}
+    windows = bindings.get("bridge_windows") if isinstance(bindings.get("bridge_windows"), dict) else {}
+    binding = windows.get(bridge_window_id) if isinstance(windows.get(bridge_window_id), dict) else {}
+    target = binding.get("target_phase")
+    if target:
+        return str(target)
+    route = snapshot.get("route") if isinstance(snapshot.get("route"), dict) else {}
+    target = route.get("target_phase")
+    return str(target) if target else None
+
+
+def _recommended_target_phase_from_reports(reports: list[dict[str, Any]]) -> str | None:
+    for report in reports:
+        text = str(report.get("next_action_recommendation") or "")
+        target = _recommended_target_phase_from_text(text)
+        if target:
+            return target
+    return None
+
+
+def _recommended_target_phase_from_text(text: str) -> str | None:
+    normalized = " ".join(str(text or "").split()).lower()
+    if not normalized:
+        return None
+    if "l4_implement_then_l4_execute" in normalized:
+        return "l4_implement"
+    phase = r"(l2_advisory|l3_bridge|l4_implement|l4_execute|l4_anomaly)"
+    patterns = [
+        rf"\bnext legal route is\s+{phase}\b",
+        rf"\broute next to(?: targeted)?\s+{phase}\b",
+        rf"\bnext to(?: targeted)?\s+{phase}\b",
+        rf"\broute to\s+{phase}\b",
+        rf"\btarget_phase[\"'` ]*[:=]\s*[\"'` ]*{phase}\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _bounded_text(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text[:limit]
 
 
 def _resolve_target_phase(snapshot: dict[str, Any], requested: str | None) -> str:
@@ -437,6 +561,8 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
                 "Coverage rule: do not mark the task complete until every checklist item is completed, explicitly deferred with a concrete reason, or escalated to main-leader/user.",
                 "Semantic identity rule: resolve or explicitly carry model/method identity, checkpoint identity, dataset identity, prompt identity, code/config basis, and inherited defaults before downstream implementation or execution. Do not silently change them.",
                 "Current intent rule: treat current_user_intent_context as the nearest active user intent for this bridge window. Confirm it, refine it, or supersede it from evidence; do not silently drop or rewrite it when recommending the next phase.",
+                "Repairability rule: do not report blocked, escalated, or hard_stop for an issue that is inside the packet boundary, allowed tools, and writable scope and can be fixed by bounded debugging, dependency repair, cache repair, loader/export repair, script/config repair, retry, or resource-aware parameter adjustment. Treat repairable operational issues as current work and keep going.",
+                "Escalation rule: ask main-leader/user or return hard_stop only when the next viable action needs a new semantic decision, broader scope, secret/token, paid access, manual click-through or license acceptance, destructive/global environment change, unavailable artifact, unresolved source identity, unsafe data exposure, or when bounded authorized repair attempts are exhausted with evidence.",
                 "Report rule: include an instruction coverage section that lists completed, deferred, blocked, and escalated checklist items.",
                 "Report rule: include a semantic identity resolution section with resolved, inherited, unknown, blocked, or escalated disposition for each required identity field.",
                 "Report rule: include a current user intent context section that states confirmed, refined, superseded, blocked, or escalated disposition and the evidence for any change.",
@@ -588,6 +714,7 @@ def _default_report_contract(target_phase: str | None = None, phase_contracts: d
     if isinstance(additions, dict):
         _extend_unique(contract, "required_sections", additions.get("required_sections"))
         _extend_unique(contract, "required_evidence", additions.get("required_evidence"))
+        _extend_unique(contract, "hard_required_sections", additions.get("hard_required_sections"))
     else:
         if str(target_phase or "") == "l4_execute":
             contract["required_sections"].append("artifact_manifests")
@@ -609,6 +736,7 @@ def _default_report_contract(target_phase: str | None = None, phase_contracts: d
             contract["required_evidence"].append("pseudocode flow for each new major technical plan or explicit not_applicable reason")
     contract["required_sections"] = _dedupe_nonempty([str(item) for item in contract.get("required_sections", [])])
     contract["required_evidence"] = _dedupe_nonempty([str(item) for item in contract.get("required_evidence", [])])
+    contract["hard_required_sections"] = _dedupe_nonempty([str(item) for item in contract.get("hard_required_sections", [])])
     if str(target_phase or "") == "l4_execute" and isinstance(phase_contracts, dict):
         manifest_fields = []
         manifest_contracts = phase_contracts.get("manifest_contracts")

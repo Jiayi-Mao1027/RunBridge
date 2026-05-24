@@ -485,10 +485,10 @@
                   <option value="host_default">New host run</option>
                   <option value="selected_run">Continue selected run</option>
                 </select>
-                <button id="leaderSendButton" type="submit" data-testid="leader-send-button">Send</button>
+                <button id="leaderSendButton" type="submit" data-testid="leader-send-button" disabled>Send</button>
               </div>
               <div class="subtext" id="leaderTargetStatus">Target run unknown.</div>
-              <div class="submit-status" id="leaderInputStatus">input proxy not checked</div>
+              <div class="submit-status" id="leaderInputStatus">loading input proxy...</div>
             </form>
           </div>
         </section>
@@ -586,6 +586,7 @@
       source: null,
       gatewayHealth: null,
       leaderHostStatus: null,
+      loading: true,
       inputPending: false,
       inputStatus: "input proxy not checked",
       inputStatusClass: "",
@@ -606,7 +607,9 @@
         result: null
       },
       streamConnected: false,
-      streamStoppedByGateway: false
+      streamStoppedByGateway: false,
+      projectionRefreshTimer: null,
+      projectionRefreshInFlight: false
     };
 
     const laneLabels = {
@@ -632,6 +635,22 @@
       const response = await fetch(path, { cache: "no-store", ...options });
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
       return response.json();
+    }
+
+    async function apiWithTimeout(path, options = {}) {
+      const { timeoutMs = 10000, label = path, ...fetchOptions } = options;
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await api(path, { ...fetchOptions, signal: controller.signal });
+      } catch (error) {
+        if (error.name === "AbortError") {
+          throw new Error(`${label} timed out after ${timeoutMs}ms`);
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeout);
+      }
     }
 
     async function apiJson(path, options = {}) {
@@ -692,6 +711,24 @@
         unknowns: state.status?.unknowns || [],
         inspectorIndex: {}
       };
+    }
+
+    function projectionIdentity(projection = state.projection) {
+      const active = projection?.activeTask || {};
+      const header = projection?.tuiView?.header || {};
+      return [
+        active.bridgeWindowId || header.bridgeWindowId || "",
+        active.teamId || "",
+        active.taskId || "",
+        active.targetPhase || header.phase || "",
+        active.title || header.taskTitle || ""
+      ].filter(Boolean).join("|");
+    }
+
+    function clearInspectorSelection() {
+      state.selectedEventSeq = null;
+      state.selectedEventId = "";
+      state.selectedItemId = "";
     }
 
     function projectionItems() {
@@ -882,7 +919,9 @@
       stopStream();
       state.runId = runId || "";
       $("runSelect").value = state.runId;
+      $("leaderRunMode").value = state.runId ? "selected_run" : "host_default";
       state.status = null;
+      state.projection = null;
       state.events.clear();
       state.rawLookups.clear();
       state.discussionBuffers.clear();
@@ -894,21 +933,44 @@
       state.selectedEventSeq = null;
       state.selectedEventId = "";
       state.selectedItemId = "";
+      if (state.gatewayHealth?.inputProxy === "outer_sdk_host") {
+        state.inputStatus = "input proxy connected; loading selected run view...";
+        state.inputStatusClass = "warn";
+      }
+      renderLeaderInput();
       if (!state.repoKey || !state.runId) {
         await refreshGatewayHealth();
         render();
         return;
       }
-      const [status, payload, projection] = await Promise.all([
-        api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`),
-        api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500&tail=1`),
-        api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/projection`)
+      const statusPath = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`;
+      const eventsPath = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=30&tail=1`;
+      const projectionPath = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/projection`;
+      const [statusResult, payloadResult, projectionResult] = await Promise.allSettled([
+        apiWithTimeout(statusPath, { timeoutMs: 8000, label: "status" }),
+        apiWithTimeout(eventsPath, { timeoutMs: 6000, label: "events" }),
+        apiWithTimeout(projectionPath, { timeoutMs: 8000, label: "projection" })
       ]);
-      state.status = status;
-      addEvents(payload.events || []);
-      mergeSourceCursors(payload.sourceCursors || {});
-      state.projection = projection;
-      await refreshGatewayHealth();
+      if (statusResult.status === "fulfilled") {
+        state.status = statusResult.value;
+      } else {
+        state.gatewayWarnings.push({ message: `status refresh failed: ${statusResult.reason?.message || statusResult.reason}` });
+      }
+      if (payloadResult.status === "fulfilled") {
+        addEvents(payloadResult.value.events || []);
+        mergeSourceCursors(payloadResult.value.sourceCursors || {});
+      } else {
+        state.gatewayWarnings.push({ message: `events refresh failed: ${payloadResult.reason?.message || payloadResult.reason}` });
+      }
+      if (projectionResult.status === "fulfilled") {
+        state.projection = projectionResult.value;
+      } else {
+        state.gatewayWarnings.push({ message: `projection refresh failed: ${projectionResult.reason?.message || projectionResult.reason}` });
+      }
+      state.gatewayWarnings = state.gatewayWarnings.slice(-20);
+      await refreshGatewayHealth().catch(error => {
+        state.gatewayWarnings.push({ message: `gateway health failed: ${error.message}` });
+      });
       render();
       startStream();
     }
@@ -935,12 +997,37 @@
         return;
       }
       try {
-        state.projection = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/projection`);
+        const previousIdentity = projectionIdentity();
+        const nextProjection = await apiWithTimeout(
+          `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/projection`,
+          { timeoutMs: 10000, label: "projection" }
+        );
+        state.projection = nextProjection;
+        const nextIdentity = projectionIdentity();
+        if (previousIdentity && nextIdentity && previousIdentity !== nextIdentity) {
+          clearInspectorSelection();
+        } else if (state.selectedItemId && !projectionItemById(state.selectedItemId)) {
+          clearInspectorSelection();
+        }
       } catch (error) {
         state.projection = null;
         state.gatewayWarnings.push({ message: `projection refresh failed: ${error.message}` });
         state.gatewayWarnings = state.gatewayWarnings.slice(-20);
       }
+    }
+
+    function scheduleProjectionRefresh() {
+      if (state.projectionRefreshTimer || state.projectionRefreshInFlight) return;
+      state.projectionRefreshTimer = window.setTimeout(async () => {
+        state.projectionRefreshTimer = null;
+        state.projectionRefreshInFlight = true;
+        try {
+          await refreshProjection();
+          render();
+        } finally {
+          state.projectionRefreshInFlight = false;
+        }
+      }, 1200);
     }
 
     function startStream() {
@@ -959,7 +1046,7 @@
         try {
           const parsed = JSON.parse(event.data);
           addEvents([parsed]);
-          refreshProjection().finally(render);
+          scheduleProjectionRefresh();
         } catch {
           setChip("streamChip", "parse error", "warn");
         }
@@ -1000,6 +1087,10 @@
       if (state.source) {
         state.source.close();
         state.source = null;
+      }
+      if (state.projectionRefreshTimer) {
+        window.clearTimeout(state.projectionRefreshTimer);
+        state.projectionRefreshTimer = null;
       }
       state.streamConnected = false;
       setChip("streamChip", label);
@@ -1233,7 +1324,9 @@
 
     function renderLeaderInput() {
       const host = state.leaderHostStatus || {};
-      const runMode = $("leaderRunMode").value || "host_default";
+      const selectedRepo = state.repoKey || $("repoSelect").value || "";
+      const selectedRun = state.runId || $("runSelect").value || "";
+      const runMode = $("leaderRunMode").value || (selectedRun ? "selected_run" : "host_default");
       $("inputProxyMeta").textContent = runMode === "host_default" && state.gatewayHealth?.inputProxy === "outer_sdk_host"
         ? "new run on send"
         : host.defaultRunId
@@ -1243,9 +1336,11 @@
       status.textContent = state.inputStatus || "";
       status.className = `submit-status ${state.inputStatusClass || ""}`.trim();
       $("leaderTargetStatus").textContent = runMode === "selected_run"
-        ? `Target: continue selected run ${state.runId || "none selected"}`
-        : `Target: create a new host run for ${state.repoKey || "selected repo"}.`;
-      $("leaderSendButton").disabled = Boolean(state.inputPending);
+        ? `Target: continue selected run ${selectedRun || "none selected"}`
+        : `Target: create a new host run for ${selectedRepo || "selected repo"}.`;
+      const inputProxyReady = state.gatewayHealth?.inputProxy === "outer_sdk_host";
+      const missingTarget = !selectedRepo || (runMode === "selected_run" && !selectedRun);
+      $("leaderSendButton").disabled = Boolean(state.inputPending || !inputProxyReady || missingTarget);
       $("leaderInputText").disabled = Boolean(state.inputPending);
       $("leaderInputKind").disabled = Boolean(state.inputPending);
       $("leaderRunMode").disabled = Boolean(state.inputPending);
@@ -2000,66 +2095,101 @@
         renderLeaderInput();
         return;
       }
+      if (state.gatewayHealth?.inputProxy !== "outer_sdk_host") {
+        state.inputStatus = "input proxy is not ready";
+        state.inputStatusClass = "failed";
+        renderLeaderInput();
+        return;
+      }
       state.inputPending = true;
       state.inputStatus = "sending to outer host...";
       state.inputStatusClass = "warn";
       renderLeaderInput();
+      const submitController = new AbortController();
+      const submitTimeout = window.setTimeout(() => submitController.abort(), 60000);
+      let acceptedStatus = "";
       try {
-        const runMode = $("leaderRunMode").value || "host_default";
-        if (runMode === "selected_run" && !state.runId) {
+        const selectedRepo = state.repoKey || $("repoSelect").value || "";
+        const selectedRun = state.runId || $("runSelect").value || "";
+        const runMode = $("leaderRunMode").value || (selectedRun ? "selected_run" : "host_default");
+        if (!selectedRepo) {
+          throw new Error("leader input requires a selected repo");
+        }
+        if (runMode === "selected_run" && !selectedRun) {
           throw new Error("continue selected run requires a selected run");
         }
         const payload = {
           text,
           input_kind: $("leaderInputKind").value || "user_prompt",
-          repo_key: state.repoKey || undefined,
-          run_id: runMode === "selected_run" ? state.runId || undefined : undefined,
+          repo_key: selectedRepo,
+          run_id: runMode === "selected_run" ? selectedRun : undefined,
           start_new_run: runMode !== "selected_run"
         };
         const response = await apiJson("/api/leader/input", {
           method: "POST",
           headers: { "content-type": "application/json; charset=utf-8" },
+          signal: submitController.signal,
           body: JSON.stringify(payload)
         });
         state.lastLeaderResponse = response;
         const leaderStatus = response.leader_result?.status || "recorded";
-        state.inputStatus = response.async
+        acceptedStatus = response.async
           ? `submitted to ${response.host?.adapter || "outer host"} / ${leaderStatus}`
           : `accepted by ${response.host?.adapter || "outer host"} / ${leaderStatus}`;
+        state.inputStatus = acceptedStatus;
         state.inputStatusClass = response.async || leaderStatus === "succeeded" ? "ok" : "warn";
         $("leaderInputText").value = "";
         state.inputPending = false;
         renderLeaderInput();
+        window.clearTimeout(submitTimeout);
         const nextRepo = response.host?.repo_key || state.repoKey;
         const nextRun = runMode === "selected_run"
           ? response.host?.run_id || state.runId
           : response.host?.run_id || response.host?.default_run_id || "";
-        if (nextRepo && nextRepo !== state.repoKey) {
-          await loadRepos();
-          await selectRepo(nextRepo, { autoSelectRun: false });
-        } else if (nextRun && nextRun !== state.runId) {
-          if (state.repoKey) {
-            const runsPayload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs`);
-            state.runs = Array.isArray(runsPayload.runs) ? runsPayload.runs : [];
-            $("runSelect").innerHTML = state.runs.length
-              ? [`<option value="">Select run...</option>`, ...state.runs.map(run => `<option value="${escapeHtml(run.runId)}">${escapeHtml(run.runId)}</option>`)].join("")
-              : `<option value="">No runs</option>`;
+        try {
+          if (nextRepo && nextRepo !== state.repoKey) {
+            await loadRepos();
+            await selectRepo(nextRepo, { autoSelectRun: false });
+          } else if (nextRun && nextRun !== state.runId) {
+            if (state.repoKey) {
+              const runsPayload = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs`);
+              state.runs = Array.isArray(runsPayload.runs) ? runsPayload.runs : [];
+              $("runSelect").innerHTML = state.runs.length
+                ? [`<option value="">Select run...</option>`, ...state.runs.map(run => `<option value="${escapeHtml(run.runId)}">${escapeHtml(run.runId)}</option>`)].join("")
+                : `<option value="">No runs</option>`;
+            }
+            await selectRun(nextRun);
+          } else if (state.repoKey && state.runId) {
+            const statusPath = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`;
+            const eventsPath = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=30&tail=1`;
+            const projectionPath = `/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/projection`;
+            const [statusResult, eventsResult, projectionResult] = await Promise.allSettled([
+              apiWithTimeout(statusPath, { timeoutMs: 8000, label: "status" }),
+              apiWithTimeout(eventsPath, { timeoutMs: 6000, label: "events" }),
+              apiWithTimeout(projectionPath, { timeoutMs: 8000, label: "projection" })
+            ]);
+            if (statusResult.status === "fulfilled") state.status = statusResult.value;
+            if (eventsResult.status === "fulfilled") {
+              addEvents(eventsResult.value.events || []);
+              mergeSourceCursors(eventsResult.value.sourceCursors || {});
+            }
+            if (projectionResult.status === "fulfilled") state.projection = projectionResult.value;
+            render();
           }
-          await selectRun(nextRun);
-        } else if (state.repoKey && state.runId) {
-          state.status = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/status`);
-          const events = await api(`/api/repos/${encodeURIComponent(state.repoKey)}/runs/${encodeURIComponent(state.runId)}/events?limit=500&tail=1`);
-          addEvents(events.events || []);
-          mergeSourceCursors(events.sourceCursors || {});
-          await refreshProjection();
+        } catch (refreshError) {
+          state.inputStatus = `${acceptedStatus}; refresh latest events separately`;
+          state.inputStatusClass = "ok";
           render();
         }
       } catch (error) {
         state.lastLeaderResponse = error.payload || null;
-        state.inputStatus = error.message || "leader input failed";
+        state.inputStatus = error.name === "AbortError"
+          ? "outer host acknowledgement timed out; check live events before resubmitting"
+          : error.message || "leader input failed";
         state.inputStatusClass = "failed";
         render();
       } finally {
+        window.clearTimeout(submitTimeout);
         state.inputPending = false;
         render();
       }
@@ -2114,8 +2244,10 @@
         console.error(error);
         setChip("streamChip", "gateway error", "warn");
         $("activityList").innerHTML = `<div class="empty">Gateway is not readable.</div>`;
+      } finally {
+        state.loading = false;
+        render();
       }
-      render();
     })();
   </script>
 </body>

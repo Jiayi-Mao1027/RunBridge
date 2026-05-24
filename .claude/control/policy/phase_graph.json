@@ -63,6 +63,7 @@
       "optional": true,
       "completion_allowed": false,
       "allowed_next_phases": [
+        "l3_bridge",
         "l4_execute",
         "l4_anomaly"
       ],
@@ -77,6 +78,7 @@
       "optional": true,
       "completion_allowed": true,
       "allowed_next_phases": [
+        "l3_bridge",
         "l4_anomaly",
         "l4_implement"
       ],

@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -51,12 +52,12 @@ class OuterLeaderTmuxTerminalError(RuntimeError):
 
 
 class TmuxReplOuterLeaderAdapter:
-    """One-shot outer leader adapter backed by Claude Code's interactive TTY path.
+    """Long-lived outer leader adapter backed by Claude Code's interactive TTY path.
 
     Claude Code's SDK/headless entrypoint can behave differently from the real
     interactive CLI entrypoint for custom provider configurations. This adapter
-    keeps the outer host HTTP contract while driving the same TTY path that the
-    user's working alias uses.
+    keeps one tmux-owned leader-orchestrator session per repo/run/main session,
+    while bridge calls launched by that leader remain one-shot bridge windows.
     """
 
     name = "claude-tmux-repl"
@@ -64,6 +65,7 @@ class TmuxReplOuterLeaderAdapter:
     def __init__(self, config: Any) -> None:
         self.config = config
         self._sequence = 0
+        self._request_lock = threading.Lock()
 
     def handle_user_input(
         self,
@@ -90,6 +92,8 @@ class TmuxReplOuterLeaderAdapter:
                 "outer_leader_options": {
                     "adapter": self.name,
                     "tty_entrypoint": "tmux",
+                    "session_lifecycle": "long_lived",
+                    "tmux_session": session_name,
                     "cli_path": cli_path,
                     "cli_source": cli_info.get("cli_source"),
                     "cli_home": (cli_info.get("env") or {}).get("HOME"),
@@ -99,14 +103,15 @@ class TmuxReplOuterLeaderAdapter:
             },
             status="streaming",
         )
+        reset_session = False
         try:
-            launch = self._launch_command(control_root, repo_root, cli_info, request)
-            self._run(["tmux", "new-session", "-d", "-s", session_name, "-x", "140", "-y", "42", launch])
-            self._wait_for_prompt(session_name, timeout=45)
-            self._run(["tmux", "send-keys", "-t", session_name, "C-l"], check=False)
-            time.sleep(0.2)
-            self._paste_prompt(session_name, prompt)
-            capture = self._wait_for_completion(session_name, prompt, request=request, timeout=_tmux_timeout_seconds())
+            with self._request_lock:
+                self._ensure_session(control_root, repo_root, cli_info, request, session_name)
+                self._run(["tmux", "send-keys", "-t", session_name, "C-l"], check=False)
+                self._run(["tmux", "clear-history", "-t", session_name], check=False)
+                time.sleep(0.2)
+                self._paste_prompt(session_name, prompt)
+                capture = self._wait_for_completion(session_name, prompt, request=request, timeout=_tmux_timeout_seconds())
             assistant_text = extract_assistant_text(capture, prompt)
             if not assistant_text:
                 tail_text = _tail_capture(capture)
@@ -204,6 +209,7 @@ class TmuxReplOuterLeaderAdapter:
                 "cleanup_required": False,
             }
         except OuterLeaderTmuxTerminalError as exc:
+            reset_session = _tmux_error_requires_session_reset(exc.error_type)
             bridge_result = (
                 _runtime_terminal_bridge_result(self.config, request)
                 if exc.error_type in {"OuterLeaderTmuxNoAssistantText", "OuterLeaderTmuxTerminalApiError"}
@@ -243,7 +249,27 @@ class TmuxReplOuterLeaderAdapter:
                     "same_provider_assumption": "outer leader and bridge team use the same API provider; if only one path fails, treat it as system transport/config/runtime evidence",
                 },
             )
+        except TimeoutError as exc:
+            reset_session = True
+            self._emit(
+                event_sink,
+                request,
+                "sdk_stream_error",
+                {"error_type": "OuterLeaderTmuxTimeout", "message": str(exc), "adapter": self.name},
+                status="failed",
+            )
+            return _blocked_result(
+                "OuterLeaderTmuxTimeout",
+                str(exc),
+                request,
+                evidence_extra={
+                    "adapter": self.name,
+                    "tmux_session": session_name,
+                    "failure_classification": _outer_leader_failure_classification("OuterLeaderTmuxTimeout"),
+                },
+            )
         except Exception as exc:
+            reset_session = True
             self._emit(
                 event_sink,
                 request,
@@ -253,7 +279,26 @@ class TmuxReplOuterLeaderAdapter:
             )
             return _blocked_result(type(exc).__name__, str(exc), request)
         finally:
-            self._run(["tmux", "kill-session", "-t", session_name], check=False)
+            if reset_session:
+                self._run(["tmux", "kill-session", "-t", session_name], check=False)
+
+    def _ensure_session(
+        self,
+        control_root: Path,
+        repo_root: Path,
+        cli_info: dict[str, Any],
+        request: dict[str, Any],
+        session_name: str,
+    ) -> None:
+        if self._session_exists(session_name):
+            try:
+                self._wait_for_prompt(session_name, timeout=_tmux_existing_session_prompt_timeout_seconds())
+                return
+            except Exception:
+                self._run(["tmux", "kill-session", "-t", session_name], check=False)
+        launch = self._launch_command(control_root, repo_root, cli_info, request)
+        self._run(["tmux", "new-session", "-d", "-s", session_name, "-x", "140", "-y", "42", launch])
+        self._wait_for_prompt(session_name, timeout=45)
 
     def _launch_command(self, control_root: Path, repo_root: Path, cli_info: dict[str, Any], request: dict[str, Any]) -> str:
         model = _leader_model(control_root)
@@ -394,6 +439,13 @@ class TmuxReplOuterLeaderAdapter:
                     error_type="OuterLeaderTmuxNoAssistantText",
                     capture=last,
                 )
+            no_progress_error = _tmux_no_runtime_progress_error(request, runtime_bridge, last)
+            if no_progress_error:
+                raise OuterLeaderTmuxTerminalError(
+                    no_progress_error,
+                    error_type="OuterLeaderTmuxNoRuntimeProgress",
+                    capture=last,
+                )
             if _looks_complete(last, prompt):
                 return last
             prompt_completion = _tmux_prompt_completion_candidate(last, prompt)
@@ -518,7 +570,7 @@ class TmuxReplOuterLeaderAdapter:
         )
 
     def _session_name(self, request: dict[str, Any]) -> str:
-        raw = f"outer_{request.get('repo_key')}_{request.get('run_id')}_{request.get('input_id')}_{uuid.uuid4().hex[:8]}"
+        raw = f"outer_{request.get('repo_key')}_{request.get('run_id')}_{request.get('main_session_id') or 'outer-main'}"
         return re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)[:120]
 
     def _emit(
@@ -927,6 +979,13 @@ def _tmux_bridge_status_grace_seconds() -> float:
     return max(10.0, value)
 
 
+def _tmux_existing_session_prompt_timeout_seconds() -> int:
+    raw = _env_int("OUTER_LEADER_TMUX_EXISTING_SESSION_PROMPT_SECONDS")
+    if raw is None:
+        return 12
+    return max(3, min(raw, 60))
+
+
 def _tmux_idle_prompt_polls() -> int:
     raw = os.environ.get("OUTER_LEADER_TMUX_IDLE_PROMPT_POLLS")
     try:
@@ -959,9 +1018,59 @@ def _outer_leader_failure_classification(error_type: str) -> str:
         return "outer_leader_transport_api_failure"
     if error_type == "OuterLeaderTmuxIdlePromptNoSubmission":
         return "outer_leader_tmux_prompt_submission_failure"
+    if error_type == "OuterLeaderTmuxNoRuntimeProgress":
+        return "outer_leader_tmux_no_runtime_progress"
     if error_type == "OuterLeaderTmuxSessionLost":
         return "outer_leader_tmux_session_lost"
     return "outer_leader_tmux_runtime_failure"
+
+
+def _tmux_error_requires_session_reset(error_type: str) -> bool:
+    return str(error_type or "") in {
+        "OuterLeaderTmuxStartupFailed",
+        "OuterLeaderTmuxSessionLost",
+        "OuterLeaderTmuxNoRuntimeProgress",
+    }
+
+
+def _tmux_no_runtime_progress_error(request: dict[str, Any], state: dict[str, Any], capture: str) -> str | None:
+    if not _tmux_request_requires_runtime_progress(request):
+        return None
+    timeout = _tmux_no_runtime_progress_timeout_seconds()
+    if timeout is None:
+        return None
+    age = state.get("request_age_seconds")
+    if age is None or float(age) < timeout:
+        return None
+    if state.get("open_bridge_windows") or state.get("bridge_activity_seen") or state.get("terminal_bridge_result_seen"):
+        return None
+    if not _tmux_active_status_visible(capture):
+        return None
+    return (
+        f"Outer leader TTY stayed active for {int(float(age))}s after operator input "
+        "without opening a bridge window or recording bridge runtime activity."
+    )
+
+
+def _tmux_request_requires_runtime_progress(request: dict[str, Any]) -> bool:
+    intent = str(request.get("dispatch_intent") or "").strip()
+    if intent in {"leader_decide", "advance_or_continue"}:
+        return True
+    input_kind = str(request.get("input_kind") or "").strip()
+    return input_kind in {"advance", "continue"}
+
+
+def _tmux_no_runtime_progress_timeout_seconds() -> float | None:
+    raw = os.environ.get("OUTER_LEADER_TMUX_NO_RUNTIME_PROGRESS_SECONDS") or os.environ.get(
+        "OUTER_LEADER_NO_RUNTIME_PROGRESS_SECONDS"
+    )
+    try:
+        value = float(raw) if raw is not None and str(raw).strip() else 180.0
+    except ValueError:
+        value = 180.0
+    if value <= 0:
+        return None
+    return max(30.0, min(value, 900.0))
 
 
 def _parse_iso_timestamp(value: Any) -> datetime | None:

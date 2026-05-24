@@ -238,13 +238,20 @@ def validate_log_manifest(
         return schema_validation
     required = required_fields if isinstance(required_fields, list) and required_fields else _log_manifest_required_fields()
     for field in required:
-        if field not in payload or _is_empty_value(payload.get(field)):
+        if _is_missing_required_manifest_field(payload, field):
             return validation_error(error_type="MissingLogManifestField", path=f"$.{field}", message=f"log manifest missing {field}")
-    environment_evidence = payload.get("environment_evidence")
-    if not isinstance(environment_evidence, dict) or not environment_evidence:
-        return validation_error(error_type="MissingLogManifestField", path="$.environment_evidence", message="log manifest requires non-empty environment_evidence")
+    if _is_empty_manifest_field(payload, "environment_evidence"):
+        return validation_error(
+            error_type="MissingLogManifestField",
+            path="$.environment_evidence",
+            message="log manifest requires non-empty environment_evidence",
+        )
     process_refs = payload.get("process_refs")
-    if not isinstance(process_refs, list) or not process_refs:
+    process_refs_empty = (
+        (isinstance(process_refs, (list, dict)) and not process_refs)
+        or (not isinstance(process_refs, (list, dict)) and _is_empty_manifest_field(payload, "process_refs"))
+    )
+    if process_refs_empty and _is_empty_manifest_field(payload, "process_refs"):
         return validation_error(error_type="MissingLogManifestField", path="$.process_refs", message="log manifest requires non-empty process_refs")
     if formal_run is True or (formal_run is None and _looks_like_l4_formal_manifest(payload)):
         formal_fields = formal_required_fields if isinstance(formal_required_fields, list) else _formal_l4_manifest_required_fields()
@@ -456,6 +463,68 @@ def _is_empty_value(value: Any) -> bool:
     if isinstance(value, (list, dict)):
         return len(value) == 0
     return False
+
+
+def _is_missing_required_manifest_field(payload: dict[str, Any], field: str) -> bool:
+    if field not in payload:
+        return not _static_only_manifest_allows_empty(payload, field)
+    return _is_empty_manifest_field(payload, field)
+
+
+def _is_empty_manifest_field(payload: dict[str, Any], field: str) -> bool:
+    value = payload.get(field)
+    if _static_only_manifest_allows_empty(payload, field):
+        return False
+    return _is_empty_value(value)
+
+
+def _static_only_manifest_allows_empty(payload: dict[str, Any], field: str) -> bool:
+    if field == "failure_reason" and _manifest_terminal_status_succeeded(payload):
+        return True
+    if field not in {"output_checkpoint_log_paths", "process_refs", "conda_env_evidence"}:
+        return False
+    text = " ".join(
+        str(payload.get(key) or "")
+        for key in (
+            "expected_outputs_or_checkpoints",
+            "terminal_status",
+            "batchbasis",
+            "stage_name",
+            "stage_kind",
+            "run_kind",
+            "execution_kind",
+            "mode",
+            "command",
+        )
+    ).casefold()
+    static_only = (
+        "static" in text
+        or "no model" in text
+        or "no checkpoint" in text
+        or "no checkpoints" in text
+        or "did not run" in text
+        or "not_applicable" in text
+        or "not applicable" in text
+    )
+    if not static_only:
+        return False
+    if field == "output_checkpoint_log_paths":
+        return isinstance(payload.get(field), list) and not payload.get(field)
+    if field == "process_refs":
+        return isinstance(payload.get(field), list) and not payload.get(field) and bool(payload.get("log_files"))
+    if field == "conda_env_evidence":
+        return _is_empty_value(payload.get(field))
+    return False
+
+
+def _manifest_terminal_status_succeeded(payload: dict[str, Any]) -> bool:
+    status = str(payload.get("terminal_status") or "").strip().casefold()
+    if not status:
+        return False
+    failed_markers = ("fail", "error", "block", "reject", "timeout", "oom")
+    if any(marker in status for marker in failed_markers):
+        return False
+    return any(marker in status for marker in ("pass", "success", "succeed", "complete", "completed", "done"))
 
 
 def _looks_like_l4_formal_manifest(payload: dict[str, Any]) -> bool:

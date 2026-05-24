@@ -263,11 +263,27 @@
       "phase_routes": [
         [
           "leader_freeze",
+          "l3_bridge"
+        ],
+        [
+          "leader_freeze",
           "l2_advisory"
         ],
         [
           "leader_freeze",
-          "l3_bridge"
+          "l4_implement"
+        ],
+        [
+          "leader_freeze",
+          "l4_execute"
+        ],
+        [
+          "leader_freeze",
+          "l4_anomaly"
+        ],
+        [
+          "leader_freeze",
+          "leader_freeze"
         ],
         [
           "l2_advisory",
@@ -299,11 +315,19 @@
         ],
         [
           "l4_implement",
+          "l3_bridge"
+        ],
+        [
+          "l4_implement",
           "l4_execute"
         ],
         [
           "l4_implement",
           "l4_anomaly"
+        ],
+        [
+          "l4_execute",
+          "l3_bridge"
         ],
         [
           "l4_execute",
@@ -972,6 +996,15 @@
       ]
     },
     {
+      "id": "completion_orphaned",
+      "from": "task_completion_started",
+      "to": "bridge_window_orphaned",
+      "event_kinds": [
+        "orphan_timeout_without_bridge_return",
+        "orphan_timeout_without_heartbeat"
+      ]
+    },
+    {
       "id": "completion_interrupted",
       "from": "task_completion_started",
       "to": "bridge_window_interrupted",
@@ -1021,6 +1054,15 @@
       ]
     },
     {
+      "id": "completion_rejected_orphaned",
+      "from": "task_completion_rejected",
+      "to": "bridge_window_orphaned",
+      "event_kinds": [
+        "orphan_timeout_without_bridge_return",
+        "orphan_timeout_without_heartbeat"
+      ]
+    },
+    {
       "id": "completion_rejected_interrupted",
       "from": "task_completion_rejected",
       "to": "bridge_window_interrupted",
@@ -1034,6 +1076,15 @@
       "to": "team_delete_started",
       "event_kinds": [
         "team_delete_started"
+      ]
+    },
+    {
+      "id": "completion_completed_orphaned",
+      "from": "task_completion_completed",
+      "to": "bridge_window_orphaned",
+      "event_kinds": [
+        "orphan_timeout_without_bridge_return",
+        "orphan_timeout_without_heartbeat"
       ]
     },
     {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
@@ -133,8 +134,7 @@ class BridgeLeaderRuntime:
                 self._return_bridge_result("bridge_result_returned_with_failure", bridge_result)
                 return bridge_result
 
-            if not self._complete_task(execution):
-                self._reject_completion(execution)
+            if not self._complete_task_with_repair(execution):
                 self._fail_task(execution, event_kind="bridge_leader_fails_task")
                 self._team_delete()
                 bridge_result = self._bridge_result("failed", "task_complete", execution)
@@ -288,10 +288,11 @@ class BridgeLeaderRuntime:
             },
         )
 
-    def _complete_task(self, execution: dict[str, Any]) -> bool:
+    def _complete_task(self, execution: dict[str, Any], *, emit_artifacts_ready: bool = True) -> bool:
         checks = self._completion_validation(execution)
         execution["_completion_checks"] = checks
-        self._event("artifacts_ready", team_id=self.team_id, task_id=self.task_id, tool_name="task_complete", payload={"artifact_refs": execution.get("artifact_refs", [])})
+        if emit_artifacts_ready:
+            self._event("artifacts_ready", team_id=self.team_id, task_id=self.task_id, tool_name="task_complete", payload={"artifact_refs": execution.get("artifact_refs", [])})
         if not completion_succeeded(checks):
             return False
         self._event(
@@ -309,6 +310,42 @@ class BridgeLeaderRuntime:
             },
         )
         return True
+
+    def _complete_task_with_repair(self, execution: dict[str, Any]) -> bool:
+        if self._complete_task(execution):
+            return True
+        first_checks = self._reject_completion(execution)
+        repair = self._repair_completion_artifacts(execution, first_checks)
+        if not repair.get("repaired"):
+            return False
+        self._event(
+            "retry_artifact_collection",
+            team_id=self.team_id,
+            task_id=self.task_id,
+            agent_id="runtime.completion_repair",
+            agent_type="runtime",
+            payload={
+                "reason": "mechanical_completion_format_repair",
+                "repair": repair,
+                "previous_completion_checks": first_checks,
+            },
+        )
+        evidence = execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {}
+        repairs = evidence.get("runtime_completion_repairs") if isinstance(evidence.get("runtime_completion_repairs"), list) else []
+        repairs.append(repair)
+        evidence = {
+            key: value
+            for key, value in evidence.items()
+            if key not in {"completion_checks", "missing_contract_items"}
+        }
+        evidence["runtime_completion_repairs"] = repairs
+        execution["evidence"] = evidence
+        execution["error_or_null"] = None
+        execution.pop("_completion_checks", None)
+        if self._complete_task(execution, emit_artifacts_ready=False):
+            return True
+        self._reject_completion(execution)
+        return False
 
     def _reject_completion(self, execution: dict[str, Any]) -> dict[str, Any]:
         checks = execution.get("_completion_checks") if isinstance(execution.get("_completion_checks"), dict) else self._completion_validation(execution)
@@ -355,6 +392,51 @@ class BridgeLeaderRuntime:
         if isinstance(normalized_refs, list):
             execution["artifact_refs"] = normalized_refs
         return validation
+
+    def _repair_completion_artifacts(self, execution: dict[str, Any], checks: dict[str, Any]) -> dict[str, Any]:
+        repair = {
+            "attempt": 1,
+            "kind": "mechanical_manifest_normalization",
+            "repaired": False,
+            "paths": [],
+            "changes": [],
+            "skipped": [],
+        }
+        if not _completion_failure_may_be_mechanical(checks):
+            repair["skipped"].append("completion_failure_not_mechanical")
+            return repair
+        refs = execution.get("artifact_refs") if isinstance(execution.get("artifact_refs"), list) else []
+        candidate_paths = _completion_manifest_candidate_paths(
+            refs,
+            base_dir=_project_root(),
+            allowed_roots=[_project_root(), self.runtime_runs_root, self.control_root],
+        )
+        if not candidate_paths:
+            repair["skipped"].append("no_readable_manifest_candidates")
+            return repair
+        path_sha: dict[str, str] = {}
+        for path in candidate_paths:
+            item = _normalize_completion_manifest_file(path)
+            if not item.get("repaired"):
+                repair["skipped"].append(item.get("reason") or str(path))
+                continue
+            path_text = str(path)
+            repair["paths"].append(path_text)
+            repair["changes"].extend(item.get("changes", []))
+            path_sha[path_text] = _sha256_file(path)
+        if not repair["paths"]:
+            return repair
+        repair["repaired"] = True
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            ref_path = _artifact_ref_path(ref, base_dir=_project_root())
+            if ref_path is None:
+                continue
+            sha = path_sha.get(str(ref_path))
+            if sha:
+                ref["sha256"] = sha
+        return repair
 
     def _artifact_context(self) -> dict[str, Any]:
         return {
@@ -545,6 +627,236 @@ def default_team_executor() -> TeamExecutor:
 
 def _project_root() -> Path:
     return Path(os.environ.get("BRIDGE_PROJECT_ROOT") or Path.cwd()).resolve()
+
+
+def _completion_failure_may_be_mechanical(checks: dict[str, Any]) -> bool:
+    failed = [
+        item
+        for item in checks.get("checks", [])
+        if isinstance(item, dict) and str(item.get("status") or "").lower() in {"fail", "block"}
+    ]
+    if not failed:
+        return False
+    mechanical_names = {"manifest_validation", "schema_validation"}
+    return any(str(item.get("name") or "") in mechanical_names for item in failed)
+
+
+def _completion_manifest_candidate_paths(
+    refs: list[Any],
+    *,
+    base_dir: Path,
+    allowed_roots: list[str | Path | None],
+) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        path = _artifact_ref_path(ref, base_dir=base_dir)
+        if path is None:
+            continue
+        if not _looks_like_manifest_json_path(path):
+            continue
+        if not _path_under_any_root(path, allowed_roots):
+            continue
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(path)
+    return paths
+
+
+def _artifact_ref_path(ref: dict[str, Any], *, base_dir: Path) -> Path | None:
+    path_text = ref.get("path")
+    if not path_text:
+        return None
+    text = str(path_text).strip()
+    marker = ".json"
+    marker_index = text.casefold().find(marker)
+    if marker_index >= 0:
+        text = text[: marker_index + len(marker)]
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    try:
+        path = path.resolve()
+    except OSError:
+        return None
+    return path if path.is_file() else None
+
+
+def _looks_like_manifest_json_path(path: Path) -> bool:
+    name = path.name.casefold()
+    return name.endswith(".json") and "manifest" in name
+
+
+def _path_under_any_root(path: Path, roots: list[str | Path | None]) -> bool:
+    for root in roots:
+        if root is None:
+            continue
+        try:
+            path.relative_to(Path(root).expanduser().resolve())
+            return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def _normalize_completion_manifest_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"repaired": False, "reason": f"{path}: unreadable_json:{exc.__class__.__name__}"}
+    if not isinstance(payload, dict):
+        return {"repaired": False, "reason": f"{path}: manifest_not_object"}
+    updated = deepcopy(payload)
+    changes: list[dict[str, str]] = []
+    _merge_sibling_formal_manifest_fields(updated, path, changes)
+    _normalize_manifest_text_field(updated, "command", "command_structured", changes)
+    _normalize_manifest_text_field(updated, "terminal_status", "terminal_status_structured", changes)
+    if not changes:
+        return {"repaired": False, "reason": f"{path}: no_mechanical_type_changes"}
+    path.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"repaired": True, "path": str(path), "changes": changes}
+
+
+def _merge_sibling_formal_manifest_fields(payload: dict[str, Any], path: Path, changes: list[dict[str, str]]) -> None:
+    if "log_manifest" not in path.name.casefold():
+        return
+    sibling = path.with_name("formal_execute_parameter_manifest.json")
+    if not sibling.is_file():
+        return
+    try:
+        sibling_payload = json.loads(sibling.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(sibling_payload, dict):
+        return
+    copied: list[str] = []
+    for field in _completion_manifest_required_field_names(payload):
+        if _completion_manifest_value_present(payload.get(field)):
+            continue
+        value = sibling_payload.get(field)
+        if not _completion_manifest_value_present(value):
+            continue
+        payload[field] = deepcopy(value)
+        copied.append(field)
+        changes.append({"field": field, "from": "formal_execute_parameter_manifest", "to": "log_manifest"})
+    if copied:
+        derived = payload.get("derived_from_manifests")
+        if not isinstance(derived, list):
+            derived = []
+        marker = sibling.name
+        if marker not in derived:
+            derived.append(marker)
+        payload["derived_from_manifests"] = derived
+
+
+def _completion_manifest_required_field_names(payload: dict[str, Any]) -> list[str]:
+    fields: list[str] = []
+    required = payload.get("required_fields")
+    if isinstance(required, list):
+        fields.extend(str(item) for item in required if str(item).strip())
+    present = payload.get("required_fields_present")
+    if isinstance(present, dict):
+        fields.extend(str(field) for field, is_present in present.items() if is_present and str(field).strip())
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for field in fields:
+        if field in seen:
+            continue
+        seen.add(field)
+        deduped.append(field)
+    return deduped
+
+
+def _completion_manifest_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, tuple, set)):
+        return bool(value)
+    return True
+
+
+def _normalize_manifest_text_field(payload: dict[str, Any], field: str, structured_field: str, changes: list[dict[str, str]]) -> None:
+    if field not in payload or isinstance(payload.get(field), str):
+        return
+    value = payload.get(field)
+    if field == "terminal_status":
+        text = _stringify_terminal_status(value)
+    elif field == "command":
+        text = _stringify_command(value)
+    else:
+        text = _stringify_manifest_value(value)
+    if not text.strip():
+        return
+    if structured_field not in payload:
+        payload[structured_field] = value
+    payload[field] = text
+    changes.append({"field": field, "from_type": type(value).__name__, "to_type": "str"})
+
+
+def _stringify_command(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        items = [_stringify_manifest_value(item) for item in value if _stringify_manifest_value(item).strip()]
+        if not items:
+            return ""
+        separator = " && " if len(items) > 1 and any(" " in item for item in items) else " "
+        return separator.join(items)
+    return _stringify_manifest_value(value)
+
+
+def _stringify_terminal_status(value: Any) -> str:
+    if isinstance(value, dict):
+        status = str(value.get("status") or value.get("state") or value.get("terminal_status") or "").strip()
+        blockers = value.get("blockers")
+        has_blockers = bool(blockers) if isinstance(blockers, list) else bool(blockers)
+        exit_code = value.get("exit_code")
+        fully_ready = value.get("fully_ready")
+        if not status:
+            if has_blockers:
+                status = "blocked"
+            elif exit_code == 0 or fully_ready is True:
+                status = "succeeded"
+            elif exit_code is not None:
+                status = "failed"
+            else:
+                status = "completed"
+        details = [status]
+        if exit_code is not None:
+            details.append(f"exit_code={exit_code}")
+        if fully_ready is not None:
+            details.append(f"fully_ready={str(bool(fully_ready)).lower()}")
+        if isinstance(blockers, list):
+            details.append(f"blockers={len(blockers)}")
+        elif blockers is not None:
+            details.append("blockers=present")
+        return " ".join(details)
+    return _stringify_manifest_value(value)
+
+
+def _stringify_manifest_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _completion_checks(contract: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:

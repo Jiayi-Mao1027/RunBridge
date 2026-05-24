@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -12,6 +13,7 @@ from typing import Any
 
 SERVER_VERSION = "0.1.0"
 PROTOCOL_VERSION = "2025-03-26"
+ORPHAN_MIN_INACTIVE_SECONDS = 300
 
 SERVER_ROOT = Path(__file__).resolve().parent
 CONTROL_ROOT = SERVER_ROOT.parent
@@ -451,6 +453,14 @@ def _mark_bridge_orphaned(arguments: dict[str, Any], runtime_runs_root: str | Pa
             "status": current_status,
             "runtime_snapshot": snapshot,
         }
+    _ensure_bridge_orphan_guard_allows_mark(
+        arguments,
+        runtime_runs_root,
+        run_id=run_id,
+        bridge_window_id=bridge_window_id,
+        snapshot=snapshot,
+        current_status=current_status,
+    )
     sub_session_id = str(arguments.get("sub_session_id") or "").strip() or _sub_session_id_from_bridge_window_id(bridge_window_id)
     if not sub_session_id:
         raise ValueError("sub_session_id is required when it cannot be derived from bridge_window_id")
@@ -489,6 +499,129 @@ def _mark_bridge_orphaned(arguments: dict[str, Any], runtime_runs_root: str | Pa
         "runtime_snapshot": dispatch_result.runtime_snapshot,
         "written_paths": dispatch_result.written_paths,
     }
+
+
+def _ensure_bridge_orphan_guard_allows_mark(
+    arguments: dict[str, Any],
+    runtime_runs_root: str | Path,
+    *,
+    run_id: str,
+    bridge_window_id: str,
+    snapshot: dict[str, Any],
+    current_status: str,
+) -> None:
+    if _truthy(arguments.get("force")):
+        return
+    min_inactive_seconds = _orphan_min_inactive_seconds(arguments)
+    run_root = Path(runtime_runs_root) / run_id
+    latest = _latest_bridge_activity(run_root, bridge_window_id)
+    if latest.get("timestamp") is None:
+        latest = _bridge_binding_activity(snapshot, bridge_window_id)
+    timestamp = latest.get("timestamp")
+    if not isinstance(timestamp, datetime):
+        return
+    age_seconds = max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+    if age_seconds >= min_inactive_seconds:
+        return
+    source = latest.get("source") or "runtime"
+    event_kind = latest.get("event_kind") or "activity"
+    raise ValueError(
+        "bridge window still has recent runtime evidence; refusing to mark orphaned "
+        f"until it has been inactive for at least {min_inactive_seconds}s "
+        f"(bridge_window_id={bridge_window_id}, current_status={current_status or 'unknown'}, "
+        f"latest_source={source}, latest_event={event_kind}, age_seconds={age_seconds:.1f})"
+    )
+
+
+def _orphan_min_inactive_seconds(arguments: dict[str, Any]) -> int:
+    raw = arguments.get("min_inactive_seconds")
+    if raw in (None, ""):
+        raw = os.environ.get("BRIDGE_ORPHAN_MIN_INACTIVE_SECONDS")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = ORPHAN_MIN_INACTIVE_SECONDS
+    return max(30, value)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _latest_bridge_activity(run_root: Path, bridge_window_id: str) -> dict[str, Any]:
+    latest: dict[str, Any] = {}
+    for source_file in (
+        "sdk_stream_events.jsonl",
+        "tool_events.jsonl",
+        "teammate_reports.jsonl",
+        "completion_checks.jsonl",
+        "agent_messages.jsonl",
+        "event_log.jsonl",
+    ):
+        for record in _read_jsonl_safely(run_root / source_file):
+            if str(record.get("bridge_window_id") or record.get("window_id") or "") != bridge_window_id and bridge_window_id not in json.dumps(record, ensure_ascii=False):
+                continue
+            timestamp = _parse_iso_timestamp(record.get("timestamp") or record.get("created_at"))
+            if not timestamp:
+                continue
+            current = latest.get("timestamp")
+            if not isinstance(current, datetime) or timestamp > current:
+                latest = {
+                    "timestamp": timestamp,
+                    "source": source_file,
+                    "event_kind": record.get("event_kind")
+                    or record.get("source_event_kind")
+                    or record.get("event_type")
+                    or record.get("raw_stream_event_type"),
+                }
+    return latest
+
+
+def _bridge_binding_activity(snapshot: dict[str, Any], bridge_window_id: str) -> dict[str, Any]:
+    bindings = snapshot.get("bindings") if isinstance(snapshot.get("bindings"), dict) else {}
+    windows = bindings.get("bridge_windows") if isinstance(bindings.get("bridge_windows"), dict) else {}
+    binding = windows.get(bridge_window_id) if isinstance(windows.get(bridge_window_id), dict) else {}
+    timestamp = _parse_iso_timestamp(binding.get("updated_at") or binding.get("created_at"))
+    return {
+        "timestamp": timestamp,
+        "source": "bridge_window_binding",
+        "event_kind": binding.get("lifecycle_status") or "binding",
+    }
+
+
+def _parse_iso_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _read_jsonl_safely(path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    return records
 
 
 def _sub_session_id_from_bridge_window_id(bridge_window_id: str) -> str:
@@ -713,6 +846,17 @@ def _ensure_main_bridge_lifecycle_started(
         raise ValueError("packet binding is incomplete")
 
     snapshot = read_runtime_snapshot(control_root, run_id, runtime_runs_root=runtime_runs_root)
+    open_windows = [
+        str(item)
+        for item in snapshot.get("lifecycle", {}).get("open_bridge_window_ids", [])
+        if str(item or "").strip()
+    ]
+    other_open_windows = [item for item in open_windows if item != bridge_window_id]
+    if other_open_windows:
+        raise ValueError(
+            "another bridge window is already open; refusing to start a second bridge window "
+            f"for the same run (bridge_window_id={bridge_window_id}, open_bridge_window_ids={other_open_windows})"
+        )
     status = snapshot.get("lifecycle", {}).get("status_index", {}).get(bridge_window_id)
     if status in {"bridge_call_started", "bridge_window_opened", "bridge_packet_accepted", "bridge_packet_rejected"}:
         return

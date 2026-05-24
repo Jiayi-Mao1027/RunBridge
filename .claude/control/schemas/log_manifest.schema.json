@@ -18,7 +18,13 @@
     "bridge_window_id": {"type": "string"},
     "task_id": {"type": "string"},
     "stage_name": {"type": "string"},
-    "command": {"type": "string"},
+    "command": {
+      "anyOf": [
+        {"type": "string"},
+        {"type": "object"},
+        {"type": "array"}
+      ]
+    },
     "cwd": {"type": "string"},
     "environment_evidence": {},
     "conda_env_evidence": {},
@@ -30,7 +36,13 @@
     "model_or_model_family": {},
     "dataset_name_split_source": {},
     "method_or_objective": {},
-    "process_refs": {"type": "array", "items": {"type": "object"}},
+    "process_refs": {
+      "anyOf": [
+        {"type": "array"},
+        {"type": "object"},
+        {"type": "string"}
+      ]
+    },
     "log_files": {"type": "array"},
     "produced_artifacts": {"type": "array"},
     "terminal_status": {"type": "string"}

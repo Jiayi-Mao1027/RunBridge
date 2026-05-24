@@ -331,6 +331,8 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
     "task_completion_started": {
         "completion_contract_satisfied": "task_completion_completed",
         "completion_contract_rejected": "task_completion_rejected",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
+        "orphan_timeout_without_heartbeat": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "task_completion_rejected": {
@@ -341,9 +343,16 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "bridge_leader_fails_task": "task_failed",
         "bridge_result_returned": "bridge_window_failed",
         "bridge_result_returned_with_failure": "bridge_window_failed",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
+        "orphan_timeout_without_heartbeat": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
-    "task_completion_completed": {"team_delete_started": "team_delete_started", "bridge_call_interrupted": "bridge_window_interrupted"},
+    "task_completion_completed": {
+        "team_delete_started": "team_delete_started",
+        "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
+        "orphan_timeout_without_heartbeat": "bridge_window_orphaned",
+        "bridge_call_interrupted": "bridge_window_interrupted",
+    },
     "task_failed": {
         "team_delete_started": "team_delete_started",
         "bridge_result_returned": "bridge_window_failed",
@@ -1202,9 +1211,18 @@ def check_event(
             base_dir=_run_root_from_snapshot(snapshot),
         )
         derived_facts["completion_validation"] = completion_validation
+        recorded_completion_ok = (
+            isinstance(checks, dict)
+            and bool(checks)
+            and _completion_contract_satisfied(contract, normalized_payload, checks)
+            and completion_succeeded(checks)
+        )
         if not isinstance(contract, dict) or not contract:
             reasons.append("completion_contract_missing")
-        elif not _completion_contract_satisfied(contract, normalized_payload, checks) or not completion_succeeded(completion_validation):
+        elif not recorded_completion_ok and (
+            not _completion_contract_satisfied(contract, normalized_payload, checks)
+            or not completion_succeeded(completion_validation)
+        ):
             reasons.append("completion_contract_not_satisfied")
         if not normalized_payload.get("completion_evidence") and not normalized_payload.get("reports") and not normalized_payload.get("artifact_refs"):
             reasons.append("completion_evidence_missing")
@@ -1810,7 +1828,7 @@ def _apply_transition_to_run(run: dict[str, Any], event: WorkflowEvent, to_statu
         attempts = run["retry_context"].setdefault("attempts", [])
         attempts.append(deepcopy(event.payload))
         run["retry_context"]["latest"] = deepcopy(event.payload)
-    bridge_window_id = None if event.event_kind == "retry_attempt_scheduled" else event.bridge_window_id
+    bridge_window_id = None if event.event_kind in CONTROL_EVENTS_WITHOUT_BRIDGE_LIFECYCLE else event.bridge_window_id
     if bridge_window_id:
         binding = run["bindings"]["bridge_windows"].setdefault(
             bridge_window_id,

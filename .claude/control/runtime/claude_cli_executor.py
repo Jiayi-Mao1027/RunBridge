@@ -72,19 +72,6 @@ TEAMMATE_AGENT_NAMES = {
     "anomaly-analyst-c",
 }
 
-RUNTIME_OWNED_TEAMMATE_MUTATING_TOOLS = {"Edit", "MultiEdit", "NotebookEdit", "Write"}
-RUNTIME_OWNED_TEAMMATE_READ_ONLY_MARKERS = (
-    "read-only",
-    "read only",
-    "no-edit",
-    "no edit",
-    "no edits",
-    "no file changes",
-    "no destructive",
-    "do not edit",
-    "do not modify",
-)
-
 PROVIDER_TRANSPORT_ERROR_TYPES = {
     "ProviderTransportApiError",
     "ProviderApiRetryTimeout",
@@ -1074,8 +1061,6 @@ def _runtime_owned_teammate_names(packet: dict[str, Any]) -> list[str]:
 
 
 def _runtime_owned_teammate_needed(packet: dict[str, Any], teammate_name: str) -> bool:
-    if teammate_name == "refresher" and _runtime_owned_read_only_scope(packet):
-        return False
     return True
 
 
@@ -1486,45 +1471,14 @@ def _runtime_owned_teammate_allowed_tools(packet: dict[str, Any], teammate_name:
     configured = teammate_spec.get("allowed_tools") if isinstance(teammate_spec, dict) else None
     if not isinstance(configured, list) or not configured:
         configured = ["Read", "Grep", "Glob", "LS"]
-    read_only_scope = _runtime_owned_read_only_scope(packet)
-    phase = str(packet.get("target_phase") or "").strip()
-    teammate_role = str(teammate_spec.get("role") or "").strip()
-    allow_l3_documentation_tools = (
-        phase == "l3_bridge"
-        and not read_only_scope
-        and teammate_name in {"curator", "refresher"}
-        and teammate_role in {"artifact_curation", "documentation_refresh"}
-    )
-    allow_l4_implementation_tools = phase == "l4_implement" and not read_only_scope
-    allow_l4_execute_tools = phase == "l4_execute" and not read_only_scope
-    allow_bash = (teammate_name == "curator" and not read_only_scope) or allow_l4_implementation_tools or allow_l4_execute_tools
     tools: list[str] = []
     for item in configured:
         tool = str(item or "").strip()
         if not tool or tool == "Agent" or tool.startswith("Agent("):
             continue
-        if tool in RUNTIME_OWNED_TEAMMATE_MUTATING_TOOLS:
-            if allow_l4_execute_tools and teammate_name == "executor" and tool == "Write":
-                pass
-            elif not (allow_l4_implementation_tools or allow_l3_documentation_tools):
-                continue
-        if tool == "Bash" and not allow_bash:
-            continue
         if tool not in tools:
             tools.append(tool)
     return tools
-
-
-def _runtime_owned_read_only_scope(packet: dict[str, Any]) -> bool:
-    text = _compact_lower_text(
-        {
-            "task_spec": packet.get("task_spec"),
-            "task_team_mapping": packet.get("task_team_mapping"),
-            "completion_contract": packet.get("completion_contract"),
-            "dispatch_contract": packet.get("dispatch_contract"),
-        }
-    )
-    return any(marker in text for marker in RUNTIME_OWNED_TEAMMATE_READ_ONLY_MARKERS)
 
 
 def _teammate_spec(packet: dict[str, Any], teammate_name: str) -> dict[str, Any]:
@@ -2139,7 +2093,7 @@ def _runtime_owned_report_blocked_teammates(reports: list[dict[str, Any]]) -> li
         if not isinstance(report, dict):
             continue
         classification = str(report.get("classification") or "").strip().lower()
-        if classification in {"hard_stop", "blocked", "execution_blocked", "readiness_blocked", "dependency_blocked"}:
+        if classification in {"hard_stop", "blocked", "execution_blocked", "readiness_blocked", "dependency_blocked", "user_decision"}:
             teammate = str(report.get("teammate_name") or report.get("agent_type") or report.get("teammate_id") or "").strip()
             blocked.append(teammate or "unknown")
             continue
@@ -2147,7 +2101,7 @@ def _runtime_owned_report_blocked_teammates(reports: list[dict[str, Any]]) -> li
             teammate = str(report.get("teammate_name") or report.get("agent_type") or report.get("teammate_id") or "").strip()
             blocked.append(teammate or "unknown")
             continue
-        if _semantic_resolution_has_blocked_or_escalated(report.get("semantic_identity_resolution")):
+        if _semantic_resolution_has_blocked_or_escalated(report.get("semantic_identity_resolution")) and _semantic_block_requires_leader_decision(report):
             teammate = str(report.get("teammate_name") or report.get("agent_type") or report.get("teammate_id") or "").strip()
             blocked.append(teammate or "unknown")
     return blocked
@@ -2172,6 +2126,67 @@ def _semantic_resolution_has_blocked_or_escalated(value: Any) -> bool:
             return True
         return any(_semantic_resolution_has_blocked_or_escalated(item) for item in value.values())
     return False
+
+
+def _semantic_block_requires_leader_decision(report: dict[str, Any]) -> bool:
+    """Separate decision blockers from action-phase operational gaps."""
+    classification = str(report.get("classification") or "").strip().lower()
+    if classification in {"execution_layer_fix", "ready_to_proceed", "acceptable_completion", "nonblocking_risk", "nonblocking_risk_or_deviation"}:
+        return False
+    text = " ".join(
+        str(value or "")
+        for value in (
+            report.get("summary"),
+            report.get("next_action_recommendation"),
+            report.get("failure_reason"),
+            report.get("blocked_reason"),
+        )
+    ).casefold()
+    decision_markers = (
+        "ask user",
+        "ask main",
+        "main-leader/user",
+        "user approval",
+        "leader approval",
+        "requires approval",
+        "needs approval",
+        "manual acceptance",
+        "manual click",
+        "click-through",
+        "paid access",
+        "token",
+        "secret",
+        "license acceptance",
+        "unavailable artifact",
+        "cannot be found",
+        "source identity",
+        "provenance approval",
+        "outside repo",
+        "scope expansion",
+        "broader scope",
+    )
+    if any(marker in text for marker in decision_markers):
+        return True
+    action_phase_markers = (
+        "route next to l4_execute",
+        "next to l4_execute",
+        "route to l4_execute",
+        "target_phase=l4_execute",
+        "route next to l4_implement",
+        "next to l4_implement",
+        "route to l4_implement",
+        "target_phase=l4_implement",
+        "rerun",
+        "retry",
+        "repair",
+        "produce",
+        "register",
+        "execute",
+        "run ",
+    )
+    if any(marker in text for marker in action_phase_markers):
+        return False
+    return True
 
 
 def _runtime_owned_transport_blocked_teammates(reports: list[dict[str, Any]]) -> list[str]:
@@ -3175,7 +3190,7 @@ def _run_claude_streaming(
                     if subtype == "api_retry" or (not isinstance(parsed, dict) and "api_retry" in line):
                         retry_count += 1
                         retry_started_at = retry_started_at or now
-                    elif etype in {"assistant", "user", "result"} and subtype not in {"init", "status", "api_retry"}:
+                    elif _sdk_payload_is_effective_progress(parsed):
                         retry_started_at = None
                         retry_count = 0
                 seen = len(stdout_parts)
@@ -3995,9 +4010,36 @@ def _sdk_payload_keys(payload: dict[str, Any]) -> list[str]:
     return sorted(str(key) for key in payload.keys())[:20]
 
 
+def _sdk_effective_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    event = payload.get("event")
+    if payload.get("type") == "stream_event" and isinstance(event, dict):
+        return event
+    return payload
+
+
+def _sdk_payload_is_effective_progress(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    payload = _sdk_effective_payload(payload)
+    subtype = str(payload.get("subtype") or "")
+    if subtype in {"init", "status", "api_retry"}:
+        return False
+    etype = str(payload.get("type") or "")
+    if etype in {"assistant", "user", "result", "content_block_delta", "content_block_start", "content_block_stop"}:
+        return True
+    if etype in {"message_start", "message_delta", "message_stop"}:
+        return True
+    if _sdk_text_delta(payload) or _sdk_input_json_delta(payload):
+        return True
+    return bool(_collect_tool_use_blocks(payload, limit=1) or _collect_tool_result_blocks(payload, limit=1))
+
+
 def _sdk_stream_event_type(payload: dict[str, Any]) -> str:
     if not isinstance(payload, dict):
         return "sdk_stream_delta"
+    payload = _sdk_effective_payload(payload)
     if payload.get("subtype") == "api_retry":
         return "sdk_stream_api_retry"
     if payload.get("type") == "content_block_delta":
@@ -4014,6 +4056,7 @@ def _sdk_stream_event_type(payload: dict[str, Any]) -> str:
 def _sdk_message_preview(payload: dict[str, Any]) -> str:
     parts: list[str] = []
     if isinstance(payload, dict):
+        payload = _sdk_effective_payload(payload)
         text_delta = _sdk_text_delta(payload)
         if text_delta:
             parts.append(text_delta)
@@ -4046,6 +4089,7 @@ def _sdk_message_preview(payload: dict[str, Any]) -> str:
 def _sdk_text_delta(payload: dict[str, Any]) -> str | None:
     if not isinstance(payload, dict):
         return None
+    payload = _sdk_effective_payload(payload)
     for key in ("text_delta", "delta_text"):
         value = payload.get(key)
         if isinstance(value, str) and value:
@@ -4061,6 +4105,7 @@ def _sdk_text_delta(payload: dict[str, Any]) -> str | None:
 def _sdk_input_json_delta(payload: dict[str, Any]) -> str | None:
     if not isinstance(payload, dict):
         return None
+    payload = _sdk_effective_payload(payload)
     for key in ("input_json_delta", "partial_json"):
         value = payload.get(key)
         if isinstance(value, str) and value:
@@ -4129,6 +4174,7 @@ def _compact_tool_result_block(block: dict[str, Any]) -> dict[str, Any]:
 def _payload_has_assistant_text(payload: dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
+    payload = _sdk_effective_payload(payload)
     if isinstance(payload.get("text"), str) and payload.get("text", "").strip():
         return True
     content = payload.get("content")
@@ -4677,6 +4723,8 @@ def _ensure_project_agent_files(project_root: Path, names: list[str]) -> dict[st
 
 def _required_agent_models(names: list[str]) -> dict[str, Any]:
     models: dict[str, str] = {}
+    frontmatter_models: dict[str, str] = {}
+    model_overrides: dict[str, dict[str, str]] = {}
     missing_model: list[str] = []
     missing_file: list[str] = []
     invalid_model: dict[str, str] = {}
@@ -4694,6 +4742,16 @@ def _required_agent_models(names: list[str]) -> dict[str, Any]:
             missing_model.append(name)
             continue
 
+        frontmatter_model = model
+        override_model = _agent_model_override(name)
+        if override_model:
+            model = override_model
+            model_overrides[name] = {
+                "frontmatter_model": frontmatter_model,
+                "effective_model": model,
+            }
+        frontmatter_models[name] = frontmatter_model
+
         if allowed_models and model not in allowed_models:
             invalid_model[name] = model
             continue
@@ -4706,6 +4764,8 @@ def _required_agent_models(names: list[str]) -> dict[str, Any]:
             "missing_file_or_frontmatter": missing_file,
             "missing_model": missing_model,
             "invalid_model": invalid_model,
+            "frontmatter_models": frontmatter_models,
+            "model_overrides": model_overrides,
             "allowed_models": sorted(allowed_models) if allowed_models else None,
             "error_or_null": {
                 "type": "RequiredAgentModelInvalid",
@@ -4718,13 +4778,28 @@ def _required_agent_models(names: list[str]) -> dict[str, Any]:
         "missing_file_or_frontmatter": [],
         "missing_model": [],
         "invalid_model": {},
+        "frontmatter_models": frontmatter_models,
+        "model_overrides": model_overrides,
         "allowed_models": sorted(allowed_models) if allowed_models else None,
         "error_or_null": None,
     }
 
 
+def _agent_model_override(name: str) -> str:
+    per_agent = os.environ.get("BRIDGE_AGENT_MODEL_OVERRIDES", "").strip()
+    if per_agent:
+        for raw_item in per_agent.split(","):
+            item = raw_item.strip()
+            if not item or "=" not in item:
+                continue
+            raw_name, raw_model = item.split("=", 1)
+            if raw_name.strip() == name and raw_model.strip():
+                return raw_model.strip()
+    return os.environ.get("BRIDGE_AGENT_MODEL_OVERRIDE", "").strip()
+
+
 def _allowed_model_names() -> set[str]:
-    raw = os.environ.get("BRIDGE_ALLOWED_MODELS", "gpt-main,sonnet-main,deepseek-main")
+    raw = os.environ.get("BRIDGE_ALLOWED_MODELS", "gpt-main,sonnet-main,deepseek-main,seepseek-main")
     raw = raw.strip()
     if raw in {"", "*", "any", "ANY"}:
         return set()

@@ -48,6 +48,7 @@ from claude_cli_executor import _runtime_owned_teammate_report_schema
 from claude_cli_executor import _runtime_owned_teammate_retry_attempts
 from claude_cli_executor import _runtime_run_root
 from claude_cli_executor import _run_claude_streaming
+from claude_cli_executor import _sdk_payload_is_effective_progress
 from claude_cli_executor import _sdk_stream_event_paths
 from claude_cli_executor import _settings_args
 from claude_cli_executor import _should_use_bare_print_mode
@@ -139,8 +140,8 @@ def build_fixture(root: Path) -> tuple[Path, Path]:
             {"name": "leader_freeze", "allowed_next_phases": ["l3_bridge", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly", "leader_freeze"]},
             {"name": "l2_advisory", "allowed_next_phases": ["l3_bridge"]},
             {"name": "l3_bridge", "allowed_next_phases": ["l3_bridge", "leader_freeze", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly"]},
-            {"name": "l4_implement", "allowed_next_phases": ["l4_execute", "l4_anomaly"]},
-            {"name": "l4_execute", "allowed_next_phases": ["l4_anomaly", "l4_implement"]},
+            {"name": "l4_implement", "allowed_next_phases": ["l3_bridge", "l4_execute", "l4_anomaly"]},
+            {"name": "l4_execute", "allowed_next_phases": ["l3_bridge", "l4_anomaly", "l4_implement"]},
             {"name": "l4_anomaly", "allowed_next_phases": ["l3_bridge", "l4_implement", "l4_execute"]},
         ]
     }
@@ -2057,7 +2058,7 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
         raise AssertionError(settings_text)
 
     old_allowed_models = os.environ.get("BRIDGE_ALLOWED_MODELS")
-    os.environ["BRIDGE_ALLOWED_MODELS"] = "gpt-main,sonnet-main,seepseek-main"
+    os.environ["BRIDGE_ALLOWED_MODELS"] = "gpt-main,sonnet-main,deepseek-main"
     try:
         mixed_model_result = _required_agent_models(
             [
@@ -2075,9 +2076,9 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
             os.environ.pop("BRIDGE_ALLOWED_MODELS", None)
         else:
             os.environ["BRIDGE_ALLOWED_MODELS"] = old_allowed_models
-    if mixed_model_result.get("error_or_null") or mixed_model_result.get("models", {}).get("chiefmate-b") != "seepseek-main":
+    if mixed_model_result.get("error_or_null") or mixed_model_result.get("models", {}).get("chiefmate-b") != "deepseek-main":
         raise AssertionError(json.dumps(mixed_model_result, ensure_ascii=False, indent=2))
-    if mixed_model_result.get("models", {}).get("anomaly-analyst-b") != "seepseek-main":
+    if mixed_model_result.get("models", {}).get("anomaly-analyst-b") != "deepseek-main":
         raise AssertionError(json.dumps(mixed_model_result, ensure_ascii=False, indent=2))
 
     original_text = "\u4e0a\u4e00\u6b21\u5c1d\u8bd5\u7cfb"
@@ -2199,6 +2200,7 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     stream_script = (
         "import json, sys\n"
         "print(json.dumps({'type':'content_block_delta','delta':{'type':'text_delta','text':'partial token=abc123 sk-demoSECRET12345'}}), flush=True)\n"
+        "print(json.dumps({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':'nested stream progress'}}}), flush=True)\n"
         "print(json.dumps({'type':'content_block_delta','delta':{'type':'input_json_delta','partial_json':'{\\\"file_path\\\":\\\"README.md\\\"}'},'content_block':{'type':'tool_use','id':'toolu_delta','name':'Read'}}), flush=True)\n"
         "print(json.dumps({'type':'assistant','content':[{'type':'text','text':'hello token=abc123 sk-demoSECRET12345'}]}), flush=True)\n"
         "print(json.dumps({'type':'tool_use','id':'toolu_1','name':'Read','input':{'file_path':'README.md','limit':10}}), flush=True)\n"
@@ -2214,6 +2216,10 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
     )
     if stream_proc.returncode != 0 or "warning password=abc123" not in stream_proc.stderr:
         raise AssertionError(json.dumps({"returncode": stream_proc.returncode, "stderr": stream_proc.stderr}, ensure_ascii=False, indent=2))
+    if not _sdk_payload_is_effective_progress({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "ok"}}}):
+        raise AssertionError("nested stream_event content deltas must reset provider retry soft timeout")
+    if _sdk_payload_is_effective_progress({"type": "stream_event", "event": {"subtype": "api_retry"}}):
+        raise AssertionError("api_retry stream events must not count as effective progress")
     parsed_stream_result = _parse_claude_payload(stream_proc.stdout, stream_proc.stderr)
     if parsed_stream_result.get("error_or_null") or parsed_stream_result.get("payload", {}).get("status") != "succeeded":
         raise AssertionError(json.dumps(parsed_stream_result, ensure_ascii=False, indent=2))
@@ -3404,6 +3410,18 @@ def run_state_graph_tests(control_root: Path, runs_root: Path) -> dict:
     if state.get("graph_node") != "bridge_window_returned":
         raise AssertionError(json.dumps(state, ensure_ascii=False, indent=2))
     graph = load_state_graph(control_root)
+    fixture_phase_graph = json.loads((control_root / "policy" / "phase_graph.json").read_text(encoding="utf-8"))
+    fixture_allowed = {
+        str(phase.get("name")): set(phase.get("allowed_next_phases", []))
+        for phase in fixture_phase_graph.get("phases", [])
+        if isinstance(phase, dict)
+    }
+    all_fixture_phases = set(fixture_allowed)
+    if not all_fixture_phases.issubset(fixture_allowed.get("l3_bridge", set())):
+        raise AssertionError(json.dumps({"l3_bridge_allowed": sorted(fixture_allowed.get("l3_bridge", set())), "all_phases": sorted(all_fixture_phases)}, ensure_ascii=False, indent=2))
+    missing_l3_route = sorted(phase for phase, allowed in fixture_allowed.items() if "l3_bridge" not in allowed)
+    if missing_l3_route:
+        raise AssertionError(json.dumps({"missing_l3_route": missing_l3_route}, ensure_ascii=False, indent=2))
     rejected_state = graph.replay_events(
         control_root,
         [
@@ -4125,8 +4143,19 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     if not _prefer_runtime_owned_teammate_fallback(l4_implement_fallback_packet, bare_print_mode=True):
         raise AssertionError(json.dumps(l4_implement_fallback_packet, ensure_ascii=False, indent=2))
     implementor_runtime_tools = _runtime_owned_teammate_allowed_tools(l4_implement_fallback_packet, "implementor")
-    if any(tool in implementor_runtime_tools for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"]):
+    if any(tool not in implementor_runtime_tools for tool in ["Bash", "Edit", "Write"]):
         raise AssertionError(json.dumps(implementor_runtime_tools, ensure_ascii=False, indent=2))
+    non_destructive_implement_packet = deepcopy(l4_implement_fallback_packet)
+    non_destructive_implement_packet["task_team_mapping"]["teammate_assignments"] = [
+        {
+            "teammate_name": "implementor",
+            "assignment": "Create a non-destructive scaffold and lightweight skeleton; no destructive actions.",
+            "expected_output": "report",
+        }
+    ]
+    non_destructive_tools = _runtime_owned_teammate_allowed_tools(non_destructive_implement_packet, "implementor")
+    if any(tool not in non_destructive_tools for tool in ["Bash", "Edit", "Write"]):
+        raise AssertionError(json.dumps(non_destructive_tools, ensure_ascii=False, indent=2))
     teammate_schema = _runtime_owned_teammate_report_schema()
     if "evidence_refs" in teammate_schema.get("required", []):
         raise AssertionError(json.dumps(teammate_schema, ensure_ascii=False, indent=2))
@@ -4168,10 +4197,7 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     if _runtime_owned_teammate_fallback_allowed(l4_execute_fallback_packet, cli_failure):
         raise AssertionError(json.dumps(l4_execute_fallback_packet, ensure_ascii=False, indent=2))
     runtime_owned_tools = _runtime_owned_teammate_allowed_tools(fallback_packet, "preflight-initial")
-    for mutating_tool in ["Edit", "MultiEdit", "NotebookEdit", "Write"]:
-        if mutating_tool in runtime_owned_tools:
-            raise AssertionError(json.dumps(runtime_owned_tools, ensure_ascii=False, indent=2))
-    if "Read" not in runtime_owned_tools or "Bash" in runtime_owned_tools:
+    if any(tool not in runtime_owned_tools for tool in ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "MultiEdit", "NotebookEdit", "Write"]):
         raise AssertionError(json.dumps(runtime_owned_tools, ensure_ascii=False, indent=2))
     curator_packet = deepcopy(fallback_packet)
     curator_packet["team_spec"]["teammate_specs"] = [
@@ -4209,7 +4235,7 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     read_only_curator_packet = deepcopy(curator_packet)
     read_only_curator_packet["task_team_mapping"]["teammate_assignments"][0]["assignment"] = "Read-only curation assessment; no edits and no destructive operations."
     read_only_curator_tools = _runtime_owned_teammate_allowed_tools(read_only_curator_packet, "curator")
-    if "Bash" in read_only_curator_tools or any(tool in read_only_curator_tools for tool in ["Edit", "Write"]):
+    if any(tool not in read_only_curator_tools for tool in ["Bash", "Edit", "Write"]):
         raise AssertionError(json.dumps(read_only_curator_tools, ensure_ascii=False, indent=2))
     read_only_team_packet = deepcopy(fallback_packet)
     read_only_team_packet["team_spec"]["teammate_specs"] = [
@@ -4224,7 +4250,7 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     ]
     read_only_team_packet["dispatch_contract"] = build_dispatch_contract(read_only_team_packet)
     read_only_fallback_names = _runtime_owned_teammate_names(read_only_team_packet)
-    if read_only_fallback_names != ["curator", "preflight-initial"]:
+    if read_only_fallback_names != ["curator", "preflight-initial", "refresher"]:
         raise AssertionError(json.dumps(read_only_fallback_names, ensure_ascii=False, indent=2))
     idle_no_report_capture = "\n──── refresher ──\n❯\n? for shortcuts\n"
     if not _tmux_runtime_teammate_idle_without_report(idle_no_report_capture, "return json"):
@@ -4299,6 +4325,20 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     bad_manifest = validate_log_manifest({"run_id": "run_demo", "bridge_window_id": "bw", "task_id": "task", "terminal_status": "completed"})
     if bad_manifest.get("valid") or bad_manifest.get("error_type") != "SchemaValidationFailed":
         raise AssertionError(json.dumps(bad_manifest, ensure_ascii=False, indent=2))
+    environment_path_manifest = validate_log_manifest(
+        {
+            "run_id": "run_demo",
+            "bridge_window_id": "bw",
+            "task_id": "task",
+            "command": "python collect_evidence.py",
+            "cwd": ".",
+            "environment_evidence": "artifacts/run_demo/environment_evidence.log",
+            "process_refs": "artifacts/run_demo/process_events.jsonl",
+            "terminal_status": "completed",
+        }
+    )
+    if not environment_path_manifest.get("valid"):
+        raise AssertionError(json.dumps(environment_path_manifest, ensure_ascii=False, indent=2))
     formal_missing_memory = validate_log_manifest(
         {
             "run_id": "run_demo",
@@ -4319,6 +4359,110 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     )
     if formal_missing_memory.get("valid") or formal_missing_memory.get("error_type") != "MissingFormalRunEvidence":
         raise AssertionError(json.dumps(formal_missing_memory, ensure_ascii=False, indent=2))
+    static_only_manifest = validate_log_manifest(
+        {
+            "run_id": "run_demo",
+            "bridge_window_id": "bw",
+            "task_id": "task",
+            "stage_name": "static_validation",
+            "teammate_or_agent_name": "executor",
+            "timestamps": {"started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:01Z"},
+            "command": {
+                "primary": "python3 -m pytest -q tests/test_scaffold_static.py",
+                "mode": "static_validation",
+            },
+            "cwd": ".",
+            "environment_evidence": {"python": "3"},
+            "conda_env_evidence": "",
+            "checkpoint_path_or_id": "not_applicable_static_only_no_model_load",
+            "config_paths": ["configs/model/local_llama31_8b_base.yaml"],
+            "prompt_or_template_path_or_id": "not_applicable_static_only_no_model_load",
+            "output_checkpoint_log_paths": [],
+            "batchbasis": "not_applicable_static_only_no_model_load",
+            "requested_or_upstream_batch_setting": "not_applicable_static_only_no_model_load",
+            "smoke_derived_basis": "not_applicable_static_only_no_model_load",
+            "final_per_device_batch_size": "not_applicable_static_only_no_model_load",
+            "microbatch_size": "not_applicable_static_only_no_model_load",
+            "gradient_accumulation": "not_applicable_static_only_no_model_load",
+            "sequence_length": "not_applicable_static_only_no_model_load",
+            "precision": "not_applicable_static_only_no_model_load",
+            "effective_batch_size": "not_applicable_static_only_no_model_load",
+            "adjustment_reason": "not_applicable_static_only_no_model_load",
+            "gpu_id_or_device_ids": "not used",
+            "selected_gpu_total_free_memory": "not_applicable_static_only_no_model_load",
+            "competing_process_summary": "not_applicable_static_only_no_model_load",
+            "smoke_memory_observed": "not applicable; smoke did not run",
+            "warmup_memory_observed": "not applicable; warmup did not run",
+            "formal_memory_observed": "not applicable; formal model execution did not run",
+            "model_or_model_family": "local Llama 3.1 8B base",
+            "checkpoint_semantic_label": "base checkpoint; not instruct",
+            "dataset_name_split_source": "not_applicable_static_only_no_model_load",
+            "dataset_count": "not_applicable_static_only_no_model_load",
+            "method_or_objective": "static validation",
+            "early_stop_behavior": "not_applicable_static_only_no_model_load",
+            "metric_or_objective_basis": "static validation",
+            "inherited_defaults": "not_applicable_static_only_no_model_load",
+            "process_refs": {
+                "terminal_statuses": {"pytest_static": 0},
+                "note": "structured process evidence is allowed for static execute manifests",
+            },
+            "log_files": ["artifacts/run_demo/static_validation.log"],
+            "produced_artifacts": ["artifacts/run_demo/log_manifest.json"],
+            "expected_outputs_or_checkpoints": "no model checkpoints expected or produced; report plus log manifest only",
+            "terminal_status": "PASS: static validation only",
+            "failure_reason": None,
+            "reuse_or_dependency_notes": "not_applicable_static_only_no_model_load",
+        },
+        required_fields=[
+            "run_id",
+            "bridge_window_id",
+            "task_id",
+            "stage_name",
+            "teammate_or_agent_name",
+            "timestamps",
+            "command",
+            "cwd",
+            "environment_evidence",
+            "conda_env_evidence",
+            "checkpoint_path_or_id",
+            "config_paths",
+            "prompt_or_template_path_or_id",
+            "output_checkpoint_log_paths",
+            "batchbasis",
+            "requested_or_upstream_batch_setting",
+            "smoke_derived_basis",
+            "final_per_device_batch_size",
+            "microbatch_size",
+            "gradient_accumulation",
+            "sequence_length",
+            "precision",
+            "effective_batch_size",
+            "adjustment_reason",
+            "gpu_id_or_device_ids",
+            "selected_gpu_total_free_memory",
+            "competing_process_summary",
+            "smoke_memory_observed",
+            "warmup_memory_observed",
+            "formal_memory_observed",
+            "model_or_model_family",
+            "checkpoint_semantic_label",
+            "dataset_name_split_source",
+            "dataset_count",
+            "method_or_objective",
+            "early_stop_behavior",
+            "metric_or_objective_basis",
+            "inherited_defaults",
+            "process_refs",
+            "log_files",
+            "produced_artifacts",
+            "expected_outputs_or_checkpoints",
+            "terminal_status",
+            "failure_reason",
+            "reuse_or_dependency_notes",
+        ],
+    )
+    if not static_only_manifest.get("valid"):
+        raise AssertionError(json.dumps(static_only_manifest, ensure_ascii=False, indent=2))
     bad_event = event(
         "bridge_result_returned",
         "bw_guardrail",

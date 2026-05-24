@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from artifact_refs import normalize_artifact_refs, validate_artifact_refs
+from artifact_refs import artifact_ref_is_log_manifest, normalize_artifact_refs, validate_artifact_refs
 from output_guardrails import validate_bridge_result, validate_log_manifest, validate_teammate_report
 
 
@@ -120,6 +120,8 @@ def _coverage_checks(task_spec: dict[str, Any], reports: list[dict[str, Any]]) -
         disposition = _coverage_disposition(coverage.get(key))
         if not disposition:
             disposition = _fuzzy_coverage_disposition(key, coverage)
+        if not disposition:
+            disposition = _coverage_narrative_disposition(key, reports)
         if disposition in accepted:
             checks.append(_check("semantic_coverage", PASS, key, evidence_ref=f"coverage:{key}"))
         else:
@@ -130,6 +132,11 @@ def _coverage_checks(task_spec: dict[str, Any], reports: list[dict[str, Any]]) -
 def _report_contract_checks(report_contract: dict[str, Any], reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     required_sections = [str(item) for item in report_contract.get("required_sections", [])] if isinstance(report_contract.get("required_sections"), list) else []
+    hard_required_sections = {
+        str(item)
+        for item in report_contract.get("hard_required_sections", [])
+        if isinstance(report_contract.get("hard_required_sections"), list) and str(item)
+    }
     for section in required_sections:
         if section in {"summary", "instruction_coverage"}:
             if any(report.get(section) for report in reports if isinstance(report, dict)):
@@ -145,7 +152,9 @@ def _report_contract_checks(report_contract: dict[str, Any], reports: list[dict[
             if any(section in report for report in reports if isinstance(report, dict)):
                 checks.append(_check("report_contract", PASS, section))
             else:
-                checks.append(_check("report_contract", WARN, section, message="required section not explicitly present"))
+                status = FAIL if section in hard_required_sections else WARN
+                message = "hard-required report section missing" if status == FAIL else "required section not explicitly present"
+                checks.append(_check("report_contract", status, section, message=message))
     return checks
 
 
@@ -189,6 +198,16 @@ def _validation_requirement_check(
 ) -> dict[str, Any]:
     lowered = requirement.casefold()
     refs = artifact_validation.get("normalized_refs", []) if isinstance(artifact_validation.get("normalized_refs"), list) else []
+    if _looks_like_execution_handoff_requirement(lowered):
+        handoff_ok, missing = _execution_handoff_evidence_present(execution)
+        message = "" if handoff_ok else f"handoff evidence missing: {', '.join(missing[:12])}"
+        return _check(
+            "manifest_validation",
+            PASS if handoff_ok else BLOCK,
+            requirement,
+            message=message,
+            evidence_ref="report:formal_handoff" if handoff_ok else None,
+        )
     if "manifest" in lowered:
         manifest_refs = [ref for ref in refs if _ref_looks_like_log_manifest(ref)]
         if manifest_refs:
@@ -211,6 +230,118 @@ def _validation_requirement_check(
     if execution.get("validation_passed") is False:
         return _check("contract_validation", BLOCK, requirement, message="validation requirement failed")
     return _check("contract_validation", PASS, requirement)
+
+
+def _looks_like_execution_handoff_requirement(lowered_requirement: str) -> bool:
+    return (
+        "execution entrypoint" in lowered_requirement
+        and "non-dry-run command" in lowered_requirement
+        and ("data/input manifest" in lowered_requirement or "data/input manifests" in lowered_requirement)
+    )
+
+
+def _execution_handoff_evidence_present(execution: dict[str, Any]) -> tuple[bool, list[str]]:
+    reports = execution.get("reports") if isinstance(execution.get("reports"), list) else []
+    best_missing: list[str] | None = None
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        handoff = report.get("formal_handoff") if isinstance(report.get("formal_handoff"), dict) else {}
+        readiness = report.get("execution_readiness") if isinstance(report.get("execution_readiness"), dict) else {}
+        if not handoff and not readiness:
+            continue
+        missing = _missing_execution_handoff_fields(handoff, readiness)
+        if not missing:
+            return True, []
+        if best_missing is None or len(missing) < len(best_missing):
+            best_missing = missing
+    return False, best_missing or ["formal_handoff", "execution_readiness"]
+
+
+def _missing_execution_handoff_fields(handoff: dict[str, Any], readiness: dict[str, Any]) -> list[str]:
+    blocker = _first_handoff_text(handoff, readiness, "blocker_reason", "approved_blocker_reason", "blocked_reason")
+    if blocker:
+        return []
+
+    commands = _handoff_text_values(
+        handoff,
+        "commands",
+        "command",
+        "formal_command",
+        "execute_command",
+        "command_sequence",
+        "formal_non_dry_run_commands",
+        "non_dry_run_commands",
+        "formal_train_command",
+        "formal_training_command",
+    )
+    commands.extend(_handoff_text_values(readiness, "commands", "command"))
+    command_text = " ".join(commands)
+    combined = " ".join(
+        part
+        for part in (
+            _jsonish_text(handoff),
+            _jsonish_text(readiness),
+            command_text,
+        )
+        if part
+    ).casefold()
+
+    missing: list[str] = []
+    if not commands:
+        missing.append("formal_command")
+    if not _first_handoff_text(handoff, readiness, "cwd", "workdir", "working_directory"):
+        missing.append("cwd")
+    if "config" not in combined and "configs/" not in combined:
+        missing.append("configs")
+    if not any(marker in combined for marker in ("input_manifest", "input-manifest", "data_input", "data/input", "split_manifest", "manifest.jsonl")):
+        missing.append("data_input_manifest")
+    if not any(marker in combined for marker in ("expected_output", "expected_outputs", "expected_artifact", "expected_artifacts", "outputs/")):
+        missing.append("expected_outputs")
+    if any(_command_claims_dry_run(command) for command in commands):
+        missing.append("non_dry_run_command")
+    return missing
+
+
+def _handoff_text_values(source: dict[str, Any], *keys: str) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    values.append(item.strip())
+    return values
+
+
+def _first_handoff_text(source_a: dict[str, Any], source_b: dict[str, Any], *keys: str) -> str:
+    sources = (source_a, source_b)
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _jsonish_text(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(value or "")
+
+
+def _command_claims_dry_run(command: str) -> bool:
+    text = str(command or "").casefold()
+    if "dry_run_only=true" in text or "dry-run-only=true" in text:
+        return True
+    if "--dry-run=false" in text or "--dry_run=false" in text or "--dry-run 0" in text or "--dry_run 0" in text:
+        return False
+    return "--dry-run" in text or "--dry_run" in text
 
 
 def _manifest_field_evidence_present(
@@ -267,23 +398,19 @@ def _manifest_missing_fields_from_refs(
     fields = required_fields or ["run_id", "bridge_window_id", "task_id", "command", "cwd", "terminal_status"]
     missing: list[str] = []
     for field in fields:
-        if not any(field in manifest and not _empty_manifest_value(manifest.get(field)) for manifest in manifests):
+        if not any(not _missing_required_manifest_field(manifest, field) for manifest in manifests):
             missing.append(field)
     return missing
 
 
+def _missing_required_manifest_field(manifest: dict[str, Any], field: str) -> bool:
+    if field not in manifest:
+        return not _static_only_manifest_allows_empty(manifest, field)
+    return _empty_manifest_field(manifest, field)
+
+
 def _ref_looks_like_log_manifest(ref: dict[str, Any]) -> bool:
-    haystack = json.dumps(
-        {
-            "ref_type": ref.get("ref_type"),
-            "id": ref.get("id"),
-            "path": ref.get("path"),
-            "safe_preview": ref.get("safe_preview"),
-        },
-        ensure_ascii=False,
-        default=str,
-    ).casefold().replace("\\", "/")
-    return "manifest" in haystack and ("log" in haystack or str(ref.get("ref_type") or "").casefold() == "log_manifest")
+    return artifact_ref_is_log_manifest(ref)
 
 
 def _load_manifest_ref_payload(ref: dict[str, Any], *, base_dir: str | Path | None) -> dict[str, Any] | None:
@@ -302,6 +429,13 @@ def _load_manifest_ref_payload(ref: dict[str, Any], *, base_dir: str | Path | No
     return payload if isinstance(payload, dict) else None
 
 
+def _empty_manifest_field(manifest: dict[str, Any], field: str) -> bool:
+    value = manifest.get(field)
+    if _static_only_manifest_allows_empty(manifest, field):
+        return False
+    return _empty_manifest_value(value)
+
+
 def _empty_manifest_value(value: Any) -> bool:
     if value is None:
         return True
@@ -310,6 +444,56 @@ def _empty_manifest_value(value: Any) -> bool:
     if isinstance(value, (list, dict, tuple, set)):
         return len(value) == 0
     return False
+
+
+def _static_only_manifest_allows_empty(manifest: dict[str, Any], field: str) -> bool:
+    if field == "failure_reason" and _manifest_terminal_status_succeeded(manifest):
+        return True
+    if field not in {"output_checkpoint_log_paths", "process_refs", "conda_env_evidence"}:
+        return False
+    text = " ".join(
+        str(manifest.get(key) or "")
+        for key in (
+            "expected_outputs_or_checkpoints",
+            "terminal_status",
+            "batchbasis",
+            "stage_name",
+            "stage_kind",
+            "run_kind",
+            "execution_kind",
+            "mode",
+            "command",
+        )
+    ).casefold()
+    static_only = (
+        "static" in text
+        or "no model" in text
+        or "no checkpoint" in text
+        or "no checkpoints" in text
+        or "did not run" in text
+        or "not_applicable" in text
+        or "not applicable" in text
+    )
+    if not static_only:
+        return False
+    value = manifest.get(field)
+    if field == "output_checkpoint_log_paths":
+        return isinstance(value, list) and not value
+    if field == "process_refs":
+        return isinstance(value, list) and not value and bool(manifest.get("log_files"))
+    if field == "conda_env_evidence":
+        return _empty_manifest_value(value)
+    return False
+
+
+def _manifest_terminal_status_succeeded(manifest: dict[str, Any]) -> bool:
+    status = str(manifest.get("terminal_status") or "").strip().casefold()
+    if not status:
+        return False
+    failed_markers = ("fail", "error", "block", "reject", "timeout", "oom")
+    if any(marker in status for marker in failed_markers):
+        return False
+    return any(marker in status for marker in ("pass", "success", "succeed", "complete", "completed", "done"))
 
 
 def _merged_coverage(reports: list[dict[str, Any]]) -> dict[str, Any]:
@@ -347,6 +531,40 @@ def _fuzzy_coverage_disposition(item: str, coverage: dict[str, Any]) -> str:
     return ""
 
 
+def _coverage_narrative_disposition(item: str, reports: list[dict[str, Any]]) -> str:
+    target_tokens = _coverage_match_tokens(_coverage_match_key(item))
+    if len(target_tokens) < 5:
+        return ""
+    narrative_tokens = _coverage_match_tokens(_report_coverage_narrative(reports))
+    if not narrative_tokens:
+        return ""
+    shared = target_tokens & narrative_tokens
+    ratio = len(shared) / len(target_tokens)
+    if len(shared) >= max(4, int(0.55 * len(target_tokens))):
+        return "completed"
+    if len(shared) >= 8 and ratio >= 0.45:
+        return "completed"
+    return ""
+
+
+def _report_coverage_narrative(reports: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        for key in ("summary", "next_action_recommendation", "classification"):
+            value = report.get(key)
+            if value:
+                parts.append(str(value))
+        for key in ("evidence", "current_user_intent_context"):
+            value = report.get(key)
+            if isinstance(value, dict):
+                for nested in value.values():
+                    if isinstance(nested, (str, int, float, bool)):
+                        parts.append(str(nested))
+    return " ".join(parts)
+
+
 def _coverage_match_key(value: Any) -> str:
     text = " ".join(str(value or "").split()).casefold()
     text = re.sub(r"\s+([,.;:!?/)\]\}])", r"\1", text)
@@ -355,12 +573,29 @@ def _coverage_match_key(value: Any) -> str:
 
 
 def _coverage_match_tokens(text: str) -> set[str]:
-    tokens = re.findall(r"[a-z0-9_]+", text.casefold())
-    stopwords = {"a", "an", "the"}
+    tokens = re.findall(r"[a-z0-9]+", text.casefold().replace("_", " "))
+    stopwords = {"a", "an", "the", "and", "or", "is", "are", "to", "with", "this", "that", "in", "has", "have", "only", "but"}
+    aliases = {
+        "implementation": "implement",
+        "implemented": "implement",
+        "implementing": "implement",
+        "execution": "execute",
+        "executed": "execute",
+        "executing": "execute",
+        "performed": "perform",
+        "performing": "perform",
+        "proceeding": "proceed",
+        "proceeds": "proceed",
+        "requires": "require",
+        "required": "require",
+        "artifacts": "artifact",
+        "outputs": "output",
+    }
     normalized: set[str] = set()
     for token in tokens:
         if token in stopwords:
             continue
+        token = aliases.get(token, token)
         if len(token) > 4 and token.endswith("s"):
             token = token[:-1]
         normalized.add(token)
@@ -378,13 +613,7 @@ def _coverage_tokens_match(target: set[str], candidate: set[str]) -> bool:
 
 
 def _compound_negative_coverage_disposition(target: str, coverage: dict[str, Any]) -> str:
-    if target.count("do not") < 2 and "don't" not in target:
-        return ""
-    clauses = [
-        clause.strip(" ,;")
-        for clause in re.split(r"(?:[,;]\s*|\s+and\s+)(?=(?:do not|don't)\b)", target)
-        if clause.strip(" ,;")
-    ]
+    clauses = _negative_coverage_clauses(target)
     if len(clauses) < 2:
         return ""
 
@@ -423,6 +652,29 @@ def _compound_negative_coverage_disposition(target: str, coverage: dict[str, Any
     if any(disposition == "escalated" for disposition in dispositions):
         return "escalated"
     return "deferred"
+
+
+def _negative_coverage_clauses(target: str) -> list[str]:
+    normalized = _coverage_match_key(target).replace("don't", "do not").strip(" ,.;:")
+    if normalized.count("do not") >= 2:
+        return [
+            clause.strip(" ,;")
+            for clause in re.split(r"(?:[,;]\s*|\s+and\s+)(?=do not\b)", normalized)
+            if clause.strip(" ,;")
+        ]
+
+    match = re.search(r"\bdo not\s+(.+?)\s+or\s+([a-z0-9_]+)(?:\s+(.+))?$", normalized)
+    if not match:
+        return []
+    left = match.group(1).strip(" ,;")
+    right = match.group(2).strip(" ,;")
+    shared_tail = (match.group(3) or "").strip(" ,;")
+    left_tokens = _coverage_match_tokens(left)
+    if not (1 <= len(left_tokens) <= 3):
+        return []
+    left_clause = " ".join(part for part in ("do not", left, shared_tail) if part).strip()
+    right_clause = " ".join(part for part in ("do not", right, shared_tail) if part).strip()
+    return [left_clause, right_clause]
 
 
 def _coverage_clause_tokens_match(target: set[str], candidate: set[str]) -> bool:

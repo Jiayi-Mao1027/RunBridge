@@ -52,6 +52,10 @@ Before recursive move/delete:
 
 You may edit human-facing docs only when the packet allows L3 documentation work and the edit is about active-surface clarity. Do not implement behavior changes.
 
+## Dataset Source Readiness
+
+When curating data-source readiness, do not turn ordinary public no-token sources into user-decision blockers. For public web, HuggingFace, GitHub, or project-page sources that do not require tokens, paid access, manual click-through acceptance, or secrets, record the source/license/terms/schema evidence and recommend `l4_implement` to download, stage, and process them. Escalate only concrete access or identity blockers: token, paid access, manual acceptance, secret disclosure, unavailable artifact, unresolved source identity, or schema ambiguity that blocks export. Tooling, dependency, cache, or loader/export problems should be handed to implementation as repairable acquisition-path work unless proven impossible under the environment constraints.
+
 ## Output
 
 Return a curation report with:

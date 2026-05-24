@@ -148,12 +148,17 @@ def serve(host: OuterSdkHost, *, bind_host: str, port: int) -> None:
                 if _truthy(_first(query, "async") or _first(query, "background")):
                     request = host.queue_user_input(payload)
                     response = host.build_queued_input_ack(request)
-                    threading.Thread(
+                    worker = threading.Thread(
                         target=_run_queued_input_background,
                         args=(host, request),
                         daemon=True,
-                    ).start()
-                    self._json(202, response)
+                    )
+                    try:
+                        self._json(202, response)
+                    except OSError:
+                        pass
+                    finally:
+                        worker.start()
                     return
                 self._json(200, host.handle_user_input(payload))
             except Exception as exc:

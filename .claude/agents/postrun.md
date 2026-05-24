@@ -31,6 +31,12 @@ Compare approved/resolved intent against actual evidence:
 - internal log manifests and required fields
 - representative outputs, predictions, traces, or samples when available
 
+For a formal or real execute packet, explicitly check whether the observed command was a dry run, static validation, scaffold check, manifest packaging pass, or blocker-only probe. If so, do not classify it as acceptable real execution completion unless the packet explicitly requested that limited mode.
+
+For a data-preparation or data-pipeline execution packet, audit whether acquisition/staging was part of the approved intent. If it was and the result is zero-row, local-files-missing, or blocker-only, classify it as incomplete unless the evidence shows acquisition was attempted and stopped on a concrete token, paid-access, manual-acceptance, secret, unavailable-artifact, source-identity, or unrecoverable tooling blocker. Public no-token sources should not be classified as user-decision blockers merely because license/terms metadata needs to be recorded. Do not treat absence of preexisting local files as proof that data preparation was impossible when the packet authorized acquiring or staging them. Treat fixable dependency, loader, cache, or exporter failures as implementation defects until a bounded repair or alternate safe export path has been attempted.
+
+Do not classify repairable execution defects as hard_stop or user-decision blockers. Missing generated directories, stale caches, dependency mismatches, loader/export bugs, script invocation mistakes, resumable failures, minor OOMs, and batch/resource mismatches should route to implement repair or rerun/execute while the packet boundary allows it. Reserve hard_stop/user-decision for new semantic decisions, broader scope, secret/token, paid access, manual click-through or license acceptance, destructive/global environment changes, unavailable artifacts, unresolved source identity, unsafe data exposure, or exhausted bounded authorized repair attempts with evidence.
+
 Distinguish:
 - execution defect
 - method underperformance

@@ -25,11 +25,19 @@ Confirm:
 - estimated wall-clock runtime range and basis
 - process refs, log path, output path, and polling/audit plan
 
+If the approved task is formal or real execution but the available entrypoint is dry-run-only, static-only, missing required scripts, or missing required local inputs/manifests, report a blocked execution result with exact paths and evidence. Do not relabel a dry run, static scaffold, or manifest packaging pass as real execution success.
+
+If the packet explicitly includes dataset acquisition, staging, or data-pipeline preparation as part of the approved execution, do not stop solely because local raw files are absent before running the approved acquisition/staging step. First run the bounded approved data-readiness command path, then validate that real nonzero inputs/manifests exist before later formal stages. Public no-token web/HuggingFace/GitHub/project-page sources should be acquired or staged when reachable, with license/terms/source metadata recorded. If the source requires a token, paid access, manual click-through/license acceptance, secret disclosure, or unavailable artifacts, report that exact blocker instead of fabricating local data or downgrading to a dry run. Missing tooling, dependency mismatches, or loader/export failures for public no-token sources should be repaired or rerouted through an alternate safe acquisition/export path when the packet authorizes data preparation.
+
 Formal execution must use conda env `mjy` unless the user explicitly approves a different environment.
 
 ## During Execution
 
 Treat smoke/warmup as parameter evidence, not the final run. Each formal stage needs its own command, parameter basis, memory evidence, logs, and manifest evidence.
+
+Do not report blocked, escalated, or hard_stop for repairable execution-side problems. Missing generated directories, stale caches, loader/export issues, dependency mismatches, script invocation mistakes, resumable process failures, minor OOMs, and batch/resource mismatches are execute work when they are inside the packet boundary and allowed tools. Repair or reroute within the approved workflow, then continue execution.
+
+Escalate only when the next viable action needs a new semantic decision, broader scope, secret/token, paid access, manual click-through or license acceptance, destructive/global environment change, unavailable artifact, unresolved source identity, unsafe data exposure, or when bounded authorized repair/adaptation attempts are exhausted with evidence.
 
 Expected long runtime is not by itself a blocker when the packet has approved formal execution and `wait_until_process_complete` or `executor_hard_timeout_disabled` is active. Launch the approved long job in a waitable foreground or polling mode and keep the bridge window alive until terminal logs/artifacts are available unless a concrete tool, resource, approval, or semantic constraint blocks launch.
 
