@@ -25,6 +25,14 @@ First identify:
 - artifacts needed by the next phase
 - semantic identities that downstream roles must inherit or resolve
 
+Every invocation also has a standing consistency duty, even when the packet's
+main task does not explicitly ask for it. Compare the current docs, active
+artifacts, manifests, reports, and latest runtime evidence for stale or
+conflicting project-state claims that could mislead downstream phases. If you
+find drift, either curate it within scope or report a concrete documentation or
+active-surface follow-up; do not wait for the main leader to separately remind
+you to look for it.
+
 Then classify the active surface:
 - keep current code/config/docs/data/logs/checkpoints/outputs needed for the next phase
 - archive stale, duplicate, ambiguous, superseded, non-current, or misleading material

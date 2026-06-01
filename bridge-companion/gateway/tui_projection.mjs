@@ -37,7 +37,11 @@ export function reduceToTuiView(events = [], snapshot = null, activeOperations =
     inspectorIndex: rawInspectorIndex
   });
   const teamEvents = currentBridgeWindowId
-    ? orderedEvents.filter(event => eventBridgeWindowId(event) === currentBridgeWindowId)
+    ? orderedEvents.filter(event => {
+      const bridgeWindowId = eventBridgeWindowId(event);
+      if (bridgeWindowId) return bridgeWindowId === currentBridgeWindowId;
+      return event.source === "sdk_stream" && teammateToolUseSummaries(event).length > 0;
+    })
     : orderedEvents;
   const teamTree = buildTeamTree(teamEvents, scopedActiveOperations(activeOperations, currentBridgeWindowId), projectionContext);
   const mainReport = buildMainReport(orderedEvents, snapshot, projectionContext);
@@ -475,12 +479,12 @@ function normalizeRenderItem(item) {
 
 function buildHeader(events, snapshot, context) {
   const latest = [...events].reverse().find(event => importanceForLatest(event) >= IMPORTANCE_THRESHOLD) || events.at(-1) || null;
-  const lifecycleState = latestLifecycleState(snapshot, events, context.currentBridgeWindowId);
+  const lifecycleState = context.lifecycleStateOverride || latestLifecycleState(snapshot, events, context.currentBridgeWindowId);
   return {
     title: "RunBridge",
     repoKey: context.repoKey || snapshot?.repo_key || events.find(event => event.repoKey)?.repoKey || "unknown",
     runId: context.runId || snapshot?.run_id || events.find(event => event.runId)?.runId || "unknown",
-    bridgeWindowId: context.currentBridgeWindowId || null,
+    bridgeWindowId: context.currentBridgeWindowId || context.observedUncommittedBridgeWindowId || null,
     taskTitle: taskTitleFrom(context.packetSummary, snapshot),
     phase: snapshot?.current_phase || context.packetSummary?.targetPhase || "unknown",
     lifecycleState,
@@ -491,8 +495,7 @@ function buildHeader(events, snapshot, context) {
 }
 
 function buildMainReport(events, snapshot, context) {
-  const latestReport = [...events].reverse().find(isBridgeResultReportEvent)
-    || [...events].reverse().find(isLeaderReportEvent);
+  const latestReport = latestMainReportEvent(events);
   const snapshotResult = snapshot?.last_bridge_result && typeof snapshot.last_bridge_result === "object"
     ? snapshot.last_bridge_result
     : null;
@@ -512,8 +515,8 @@ function buildMainReport(events, snapshot, context) {
     summary: compact(summary, 4000),
     body: compact(summary, 4000),
     task: taskTitleFrom(context.packetSummary, snapshot),
-    currentState: latestLifecycleState(snapshot, events, context.currentBridgeWindowId),
-    nextStep: nextStepForLifecycle(latestLifecycleState(snapshot, events, context.currentBridgeWindowId)),
+    currentState: context.lifecycleStateOverride || latestLifecycleState(snapshot, events, context.currentBridgeWindowId),
+    nextStep: nextStepForLifecycle(context.lifecycleStateOverride || latestLifecycleState(snapshot, events, context.currentBridgeWindowId)),
     rawRefs: rawRefsValue,
     evidenceRefs: latestReport ? evidenceRefs(latestReport) : [],
     inspector: {
@@ -522,6 +525,29 @@ function buildMainReport(events, snapshot, context) {
       snapshotRefs: snapshot?.snapshot_refs || {}
     }
   };
+}
+
+function latestMainReportEvent(events) {
+  const reports = [...events].reverse().filter(event => isBridgeResultReportEvent(event) || isLeaderReportEvent(event));
+  return (
+    reports.find(event => isStructuredLeaderReportEvent(event) && !isLowInformationMainReportEvent(event))
+    || reports.find(event => !isLowInformationMainReportEvent(event))
+    || reports.find(isStructuredLeaderReportEvent)
+    || reports[0]
+    || null
+  );
+}
+
+function isStructuredLeaderReportEvent(event) {
+  if (isBridgeResultReportEvent(event)) return true;
+  const payload = event?.raw?.payload && typeof event.raw.payload === "object" ? event.raw.payload : {};
+  const leader = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : {};
+  return Array.isArray(leader.reports) && leader.reports.length > 0;
+}
+
+function isLowInformationMainReportEvent(event) {
+  const summary = leaderReportSummary(event);
+  return /\bNO_BRIDGE_DECISION\b/i.test(summary);
 }
 
 function buildTeamTree(events, activeOperations, context) {
@@ -609,6 +635,36 @@ function buildTeamTree(events, activeOperations, context) {
           member.currentAction = event.kind === "tool_failed" ? "tool failed" : "waiting";
         }
       }
+      pushQuality(member, "tool_activity");
+      pushRaw(member, event);
+      continue;
+    }
+    if (event.source === "sdk_stream" && (event.kind === "sdk_tool_declared" || event.kind === "sdk_tool_result" || event.toolInputDelta)) {
+      const key = actorKey(event);
+      const member = ensure(key, {
+        teammateId: event.actor?.teammateId || key,
+        role: event.actor?.role || key
+      });
+      const tool = {
+        ...toolSummaryForTeam(event),
+        status: event.kind === "sdk_tool_declared" ? "running" : toolStatus(event)
+      };
+      if (event.kind === "sdk_tool_declared" || event.toolInputDelta) {
+        updateMemberState(member, "active");
+        member.currentAction = `${tool.toolName}${tool.target ? ` ${tool.target}` : ""}`;
+        member.currentTool = tool.toolName;
+        member.currentTarget = tool.target || null;
+        member.currentToolUseId = tool.toolUseId;
+      } else {
+        member.state = tool.status === "failed" ? "failed" : "idle";
+        member.lastCompletedTool = tool;
+        if (!member.currentTool || tool.toolUseId === member.currentToolUseId) {
+          member.currentTool = null;
+          member.currentTarget = null;
+          member.currentAction = tool.status === "failed" ? "tool failed" : "waiting";
+        }
+      }
+      member.toolDetailAvailability = "sdk_stream";
       pushQuality(member, "tool_activity");
       pushRaw(member, event);
       continue;
@@ -909,24 +965,51 @@ function leaderReportHandledBy(event) {
 function leaderReportSummary(event) {
   const bridge = bridgeResultFromEvent(event);
   if (bridge) {
-    const reports = Array.isArray(bridge.reports) ? bridge.reports : [];
-    const reportLines = reports
-      .map((report, index) => {
-        const name = report?.teammate_name || report?.agent_type || report?.role || `report ${index + 1}`;
-        return `${name}: ${report?.summary || "report recorded"}`;
-      })
-      .filter(Boolean);
     const header = [
       `BridgeResult status=${bridge.status || "unknown"}`,
-      `report_count=${reports.length}`
+      `report_count=${leaderReportsFromBridge(bridge).length}`
     ].join("; ");
-    return compact([header, ...reportLines].join("\n\n"), 4000);
+    return compact([header, ...leaderReportLines(leaderReportsFromBridge(bridge))].join("\n\n"), 4000);
   }
   const raw = event.raw || {};
   const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
   const leader = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : {};
-  const report = Array.isArray(leader.reports) ? leader.reports[0] : null;
-  return compact(report?.summary || raw.result || event.messagePreview || leader.error_or_null?.message || "leader result recorded", 4000);
+  const reports = Array.isArray(leader.reports) ? leader.reports : [];
+  if (reports.length) {
+    if (reports.length === 1) return compact(reports[0]?.summary || reports[0]?.message || "leader result recorded", 4000);
+    const header = [
+      `LeaderResult status=${leader.status || raw.status || event.status || "unknown"}`,
+      leader.handled_by ? `handled_by=${leader.handled_by}` : "",
+      `report_count=${reports.length}`
+    ].filter(Boolean).join("; ");
+    return compact([header, ...leaderReportLines(reports)].join("\n\n"), 4000);
+  }
+  return compact(raw.result || event.messagePreview || leader.error_or_null?.message || "leader result recorded", 4000);
+}
+
+function leaderReportsFromBridge(bridge) {
+  if (Array.isArray(bridge?.reports) && bridge.reports.length) return bridge.reports;
+  if (Array.isArray(bridge?.reports_preview)) return bridge.reports_preview;
+  return [];
+}
+
+function leaderReportLines(reports) {
+  return reports
+    .map((report, index) => {
+      if (!report || typeof report !== "object") return "";
+      const name =
+        report.teammate_or_source ||
+        report.teammate_name ||
+        report.teammateName ||
+        report.teammate_id ||
+        report.teammateId ||
+        report.agent_type ||
+        report.role ||
+        report.source ||
+        `report ${index + 1}`;
+      return `${name}: ${report.summary || report.message || "report recorded"}`;
+    })
+    .filter(Boolean);
 }
 
 function bridgeResultFromEvent(event) {
@@ -947,6 +1030,7 @@ function latestLifecycleState(snapshot, events, bridgeWindowId = null) {
   const open = Array.isArray(lifecycle.open_bridge_window_ids) ? lifecycle.open_bridge_window_ids[0] : null;
   const statusIndex = lifecycle.status_index && typeof lifecycle.status_index === "object" ? lifecycle.status_index : {};
   if (bridgeWindowId && statusIndex[bridgeWindowId]) return statusIndex[bridgeWindowId];
+  if (bridgeWindowId) return "not_in_run_ledger";
   if (open && statusIndex[open]) return statusIndex[open];
   const latestTransition = [...events].reverse().find(event =>
     event.kind === "lifecycle_transition"
@@ -1005,7 +1089,19 @@ function assignmentDisplayKey(event, to) {
 function teammateReportSummary(event) {
   const raw = event.raw || {};
   const report = raw.report && typeof raw.report === "object" ? raw.report : raw;
-  const teammateId = raw.teammate_id || event.actor?.teammateId || event.actor?.displayName || event.actor?.role || "teammate";
+  const teammateId =
+    report.teammate_id ||
+    report.teammateId ||
+    report.teammate_name ||
+    report.teammateName ||
+    report.agent_type ||
+    report.agentType ||
+    report.role ||
+    raw.teammate_id ||
+    event.actor?.teammateId ||
+    event.actor?.displayName ||
+    event.actor?.role ||
+    "teammate";
   const completed = Array.isArray(raw.completed_items) ? raw.completed_items : Array.isArray(report.completed_items) ? report.completed_items : [];
   const open = Array.isArray(raw.open_items) ? raw.open_items : Array.isArray(report.open_items) ? report.open_items : [];
   const blocked = Array.isArray(raw.blocked_items) ? raw.blocked_items : Array.isArray(report.blocked_items) ? report.blocked_items : [];

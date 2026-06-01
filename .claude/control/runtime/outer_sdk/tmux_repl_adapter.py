@@ -16,6 +16,7 @@ import uuid
 
 from .adapters import OuterLeaderEventSink
 from .claude_agent_adapter import (
+    _ensure_loopback_provider_no_proxy,
     _env_int,
     _leader_model,
     _leader_prompt,
@@ -303,6 +304,7 @@ class TmuxReplOuterLeaderAdapter:
     def _launch_command(self, control_root: Path, repo_root: Path, cli_info: dict[str, Any], request: dict[str, Any]) -> str:
         model = _leader_model(control_root)
         settings_path = _outer_leader_settings_path(control_root, cli_info, repo_root)
+        outer_claude_session_id, outer_claude_session_mode = _outer_claude_session_launch(request)
         env = {
             "CLAUDE_CONTROL_ROOT": str(control_root),
             "BRIDGE_RUNTIME_REPO_KEY": str(request.get("repo_key") or ""),
@@ -314,8 +316,12 @@ class TmuxReplOuterLeaderAdapter:
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONIOENCODING": "utf-8",
         }
+        if outer_claude_session_id:
+            env["BRIDGE_OUTER_CLAUDE_SESSION_ID"] = outer_claude_session_id
+            env["CLAUDE_CONTROL_OUTER_CLAUDE_SESSION_ID"] = outer_claude_session_id
         env.update(_settings_env(settings_path))
         env.update({str(key): str(value) for key, value in (cli_info.get("env") or {}).items()})
+        _ensure_loopback_provider_no_proxy(env)
         env["ANTHROPIC_MODEL"] = model
         env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
         env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
@@ -334,6 +340,11 @@ class TmuxReplOuterLeaderAdapter:
         setting_sources = _outer_leader_setting_sources(cli_info)
         if setting_sources:
             parts.extend(["--setting-sources", _q(",".join(setting_sources))])
+        if outer_claude_session_id:
+            if outer_claude_session_mode == "resume":
+                parts.extend(["--resume", _q(outer_claude_session_id)])
+            elif outer_claude_session_mode == "session_id":
+                parts.extend(["--session-id", _q(outer_claude_session_id)])
         parts.extend(
             [
                 "--agent",
@@ -433,7 +444,11 @@ class TmuxReplOuterLeaderAdapter:
             runtime_bridge = _runtime_bridge_completion_state(self.config, request)
             if runtime_bridge.get("terminal_bridge_result_seen") and not _tmux_bridge_status_should_wait(runtime_bridge):
                 return last
-            if _tmux_waiting_on_bridge_status(last) and not _tmux_bridge_status_should_wait(runtime_bridge):
+            if (
+                _tmux_waiting_on_bridge_status(last)
+                and _tmux_generic_bridge_status_requires_runtime_bridge(request)
+                and not _tmux_bridge_status_should_wait(runtime_bridge)
+            ):
                 raise OuterLeaderTmuxTerminalError(
                     "Claude TTY displayed bridge activity, but runtime did not record a bridge call within the bridge-status grace window.",
                     error_type="OuterLeaderTmuxNoAssistantText",
@@ -789,6 +804,8 @@ def _is_transient_tui_status(text: str) -> bool:
     normalized = str(text or "").strip().lstrip("●").strip().lower()
     if not normalized:
         return False
+    if _is_tui_progress_bar_line(normalized):
+        return True
     if "ctrl+o to expand" in normalized:
         return True
     if "/effort" in normalized:
@@ -805,6 +822,15 @@ def _is_transient_tui_status(text: str) -> bool:
     return False
 
 
+def _is_tui_progress_bar_line(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", _clean_line(_strip_ansi(str(text or ""))).strip())
+    if not normalized or "%" not in normalized:
+        return False
+    # Claude TUI can briefly leave a bare progress meter such as
+    # "▱▱▱▱ 1%" in the pane. It is status chrome, not assistant text.
+    return bool(re.fullmatch(r"[\u2500-\u25ff\u2580-\u259f.#=\-<>|/\\]+\d{1,3}%", normalized))
+
+
 def _is_tui_progress_report_text(text: str) -> bool:
     lines = [_clean_line(line).strip() for line in _strip_ansi(str(text or "")).splitlines()]
     meaningful = [line for line in lines if line]
@@ -812,6 +838,8 @@ def _is_tui_progress_report_text(text: str) -> bool:
         return False
     non_progress: list[str] = []
     for line in meaningful:
+        if _is_tui_progress_bar_line(line):
+            continue
         normalized = re.sub(r"^[^\w]+", "", line).strip()
         lowered = normalized.lower().replace("…", "...")
         if not lowered:
@@ -835,6 +863,12 @@ def _tmux_waiting_on_bridge_status(text: str) -> bool:
         if "ctrl+o to expand" in line and ("calling bridge" in line or "called bridge" in line):
             return True
     return False
+
+
+def _tmux_generic_bridge_status_requires_runtime_bridge(request: dict[str, Any]) -> bool:
+    intent = str(request.get("dispatch_intent") or "").strip()
+    input_kind = str(request.get("input_kind") or "").strip()
+    return intent != "inspect_only" and input_kind not in {"inspect", "inspect_only", "status"}
 
 
 def _tmux_no_assistant_signature(capture: str) -> str:
@@ -1289,6 +1323,7 @@ def _bridge_result_backed_leader_result(
             }
         )
     reports.append({"summary": _limit_text(summary, REPORT_TEXT_LIMIT), "source": "runtime_snapshot.last_bridge_result"})
+    reports.extend(_bridge_result_report_summaries(bridge_result))
     return {
         "status": status,
         "handled_by": "claude-tmux-repl",
@@ -1316,6 +1351,46 @@ def _bridge_result_backed_leader_result(
         "error_or_null": bridge_error if status != "succeeded" else None,
         "cleanup_required": bool(bridge_result.get("cleanup_required")),
     }
+
+
+def _bridge_result_report_summaries(bridge_result: dict[str, Any]) -> list[dict[str, Any]]:
+    preview = bridge_result.get("reports_preview")
+    if not isinstance(preview, list):
+        return []
+    reports: list[dict[str, Any]] = []
+    for index, item in enumerate(preview[:6]):
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("summary") or "").strip()
+        if not summary:
+            continue
+        source = str(
+            item.get("teammate_name")
+            or item.get("teammate")
+            or item.get("teammate_id")
+            or _nested_text(item, ("evidence", "teammate"))
+            or _nested_text(item, ("evidence", "teammate_id"))
+            or item.get("agent_type")
+            or item.get("source")
+            or f"bridge_report_{index + 1}"
+        )
+        reports.append(
+            {
+                "summary": _limit_text(summary, REPORT_TEXT_LIMIT),
+                "source": f"runtime_snapshot.last_bridge_result.reports[{index}]",
+                "teammate_or_source": source,
+            }
+        )
+    return reports
+
+
+def _nested_text(value: dict[str, Any], path: tuple[str, ...]) -> str:
+    cursor: Any = value
+    for key in path:
+        if not isinstance(cursor, dict):
+            return ""
+        cursor = cursor.get(key)
+    return str(cursor or "").strip()
 
 
 def _bridge_result_should_override_success(bridge_result: dict[str, Any] | None) -> bool:
@@ -1499,6 +1574,33 @@ def _now_iso() -> str:
 
 def _q(value: str) -> str:
     return shlex.quote(str(value))
+
+
+def _outer_claude_session_launch(request: dict[str, Any]) -> tuple[str, str]:
+    session_id = str(
+        request.get("outer_claude_session_id")
+        or request.get("outerClaudeSessionId")
+        or request.get("claude_session_id")
+        or request.get("claudeSessionId")
+        or ""
+    ).strip()
+    if not session_id and _looks_like_uuid(request.get("main_session_id")):
+        session_id = str(request.get("main_session_id") or "").strip()
+    if not _looks_like_uuid(session_id):
+        return "", ""
+    mode = str(request.get("outer_claude_session_mode") or request.get("outerClaudeSessionMode") or "").strip()
+    if mode not in {"resume", "session_id"}:
+        source = str(request.get("outer_claude_session_source") or request.get("outerClaudeSessionSource") or "").strip()
+        mode = "resume" if source in {"session_bindings", "payload_outer_claude_session_id"} else "session_id"
+    return session_id, mode
+
+
+def _looks_like_uuid(value: Any) -> bool:
+    try:
+        uuid.UUID(str(value or "").strip())
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _ensure_env_api_key_alias(env: dict[str, str]) -> None:

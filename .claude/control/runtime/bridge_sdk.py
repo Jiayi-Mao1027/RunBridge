@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import threading
 import time
 from typing import Any
 import uuid
@@ -28,8 +29,22 @@ PROVIDER_TRANSPORT_ERROR_TYPES = {
     "ProviderTransportConnectionRefused",
     "ProviderTransportRateLimited",
     "ProviderTransportReset",
+    "ProviderApiRetryTimeout",
     "ProviderGateTimeout",
 }
+
+_BRIDGE_CALL_COALESCE_LOCK = threading.Lock()
+_BRIDGE_CALLS_IN_FLIGHT: dict[str, "_BridgeCallState"] = {}
+_BRIDGE_CALLS_RECENT: dict[str, tuple[float, dict[str, Any]]] = {}
+_BRIDGE_CALL_RECENT_TTL_SECONDS = 3600
+
+
+class _BridgeCallState:
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.owner_thread = threading.get_ident()
+        self.result: dict[str, Any] | None = None
+        self.exception: BaseException | None = None
 
 
 def call_bridge_sdk(
@@ -48,44 +63,146 @@ def call_bridge_sdk(
     record_main_lifecycle=False to avoid duplicate main-leader events.
     """
     current_packet = deepcopy(packet)
-    attempts: list[dict[str, Any]] = []
-    max_attempts = _bridge_leader_retry_max_attempts(current_packet)
-    original_bridge_window_id = str(current_packet.get("binding", {}).get("bridge_window_id") or "")
-    attempt_index = 1
-    while True:
-        binding = current_packet.get("binding", {})
-        if record_main_lifecycle or attempt_index > 1:
-            _record_main_bridge_start(control_root, current_packet, runtime_runs_root=runtime_runs_root, persist=persist)
-        result = _call_bridge_once(
-            control_root,
-            current_packet,
-            runtime_runs_root=runtime_runs_root,
-            team_executor=team_executor,
-            persist=persist,
-            record_main_lifecycle=record_main_lifecycle or attempt_index > 1,
-        )
-        attempts.append(_bridge_leader_retry_attempt(attempt_index, current_packet, result))
-        if not _bridge_leader_failure_retryable(result, current_packet) or attempt_index >= max_attempts:
-            return _with_bridge_leader_retry_evidence(result, attempts, max_attempts=max_attempts)
+    coalesce_key = _bridge_call_coalesce_key(current_packet)
+    coalesce_state: _BridgeCallState | None = None
+    coalesce_owner = False
+    if coalesce_key:
+        coalesce_state, coalesce_owner, recent_result = _claim_bridge_call(coalesce_key)
+        if recent_result is not None:
+            return _coalesced_bridge_result(recent_result, coalesce_key, source="recent_completed")
+        if coalesce_state is not None and not coalesce_owner:
+            return _await_coalesced_bridge_call(coalesce_state, coalesce_key)
 
-        next_packet = _clone_packet_for_bridge_leader_retry(current_packet, attempt_index + 1)
-        delay_ms = _bridge_leader_retry_delay_ms(current_packet, attempt_index)
-        _record_bridge_leader_retry_scheduled(
-            control_root,
-            current_packet,
-            next_packet,
-            result,
-            attempt=attempt_index + 1,
-            max_attempts=max_attempts,
-            delay_ms=delay_ms,
-            original_bridge_window_id=original_bridge_window_id,
-            runtime_runs_root=runtime_runs_root,
-            persist=persist,
-        )
-        if delay_ms > 0:
-            time.sleep(delay_ms / 1000.0)
-        current_packet = next_packet
-        attempt_index += 1
+    result: dict[str, Any] | None = None
+    exc_info: BaseException | None = None
+    attempts: list[dict[str, Any]] = []
+    try:
+        max_attempts = _bridge_leader_retry_max_attempts(current_packet)
+        original_bridge_window_id = str(current_packet.get("binding", {}).get("bridge_window_id") or "")
+        attempt_index = 1
+        while True:
+            binding = current_packet.get("binding", {})
+            if record_main_lifecycle or attempt_index > 1:
+                _record_main_bridge_start(control_root, current_packet, runtime_runs_root=runtime_runs_root, persist=persist)
+            result = _call_bridge_once(
+                control_root,
+                current_packet,
+                runtime_runs_root=runtime_runs_root,
+                team_executor=team_executor,
+                persist=persist,
+                record_main_lifecycle=record_main_lifecycle or attempt_index > 1,
+            )
+            attempts.append(_bridge_leader_retry_attempt(attempt_index, current_packet, result))
+            if not _bridge_leader_failure_retryable(result, current_packet) or attempt_index >= max_attempts:
+                result = _with_bridge_leader_retry_evidence(result, attempts, max_attempts=max_attempts)
+                return result
+
+            next_packet = _clone_packet_for_bridge_leader_retry(current_packet, attempt_index + 1)
+            delay_ms = _bridge_leader_retry_delay_ms(current_packet, attempt_index)
+            _record_bridge_leader_retry_scheduled(
+                control_root,
+                current_packet,
+                next_packet,
+                result,
+                attempt=attempt_index + 1,
+                max_attempts=max_attempts,
+                delay_ms=delay_ms,
+                original_bridge_window_id=original_bridge_window_id,
+                runtime_runs_root=runtime_runs_root,
+                persist=persist,
+            )
+            if delay_ms > 0:
+                time.sleep(delay_ms / 1000.0)
+            current_packet = next_packet
+            attempt_index += 1
+    except BaseException as exc:
+        exc_info = exc
+        raise
+    finally:
+        if coalesce_key and coalesce_state is not None and coalesce_owner:
+            _release_bridge_call(coalesce_key, coalesce_state, result=result, exception=exc_info)
+
+
+def _bridge_call_coalesce_key(packet: dict[str, Any]) -> str | None:
+    binding = packet.get("binding") if isinstance(packet.get("binding"), dict) else {}
+    run_id = str(binding.get("run_id") or packet.get("run_id") or "").strip()
+    bridge_window_id = str(binding.get("bridge_window_id") or "").strip()
+    if not run_id or not bridge_window_id:
+        return None
+    return f"{run_id}:{bridge_window_id}"
+
+
+def _claim_bridge_call(coalesce_key: str) -> tuple[_BridgeCallState, bool, dict[str, Any] | None]:
+    now = time.time()
+    with _BRIDGE_CALL_COALESCE_LOCK:
+        _prune_recent_bridge_calls(now)
+        recent = _BRIDGE_CALLS_RECENT.get(coalesce_key)
+        if recent is not None:
+            return _BridgeCallState(), False, deepcopy(recent[1])
+        active = _BRIDGE_CALLS_IN_FLIGHT.get(coalesce_key)
+        if active is not None:
+            return active, False, None
+        state = _BridgeCallState()
+        _BRIDGE_CALLS_IN_FLIGHT[coalesce_key] = state
+        return state, True, None
+
+
+def _await_coalesced_bridge_call(state: _BridgeCallState, coalesce_key: str) -> dict[str, Any]:
+    state.event.wait()
+    if state.exception is not None:
+        raise state.exception
+    if state.result is None:
+        return {
+            "status": "failed",
+            "reports": [],
+            "artifact_refs": [],
+            "evidence": {"coalesced_duplicate_bridge_call": True, "coalesce_key": coalesce_key},
+            "error_or_null": {
+                "type": "BridgeCallCoalesceMissingResult",
+                "message": "coalesced bridge call completed without a stored result",
+            },
+            "cleanup_required": False,
+        }
+    return _coalesced_bridge_result(state.result, coalesce_key, source="in_flight")
+
+
+def _release_bridge_call(
+    coalesce_key: str,
+    state: _BridgeCallState,
+    *,
+    result: dict[str, Any] | None,
+    exception: BaseException | None,
+) -> None:
+    with _BRIDGE_CALL_COALESCE_LOCK:
+        if result is not None:
+            state.result = deepcopy(result)
+            _BRIDGE_CALLS_RECENT[coalesce_key] = (time.time(), deepcopy(result))
+        state.exception = exception
+        _BRIDGE_CALLS_IN_FLIGHT.pop(coalesce_key, None)
+        _prune_recent_bridge_calls(time.time())
+        state.event.set()
+
+
+def _coalesced_bridge_result(result: dict[str, Any], coalesce_key: str, *, source: str) -> dict[str, Any]:
+    updated = deepcopy(result)
+    evidence = updated.get("evidence") if isinstance(updated.get("evidence"), dict) else {}
+    updated["evidence"] = {
+        **evidence,
+        "coalesced_duplicate_bridge_call": True,
+        "coalesce_key": coalesce_key,
+        "coalesce_source": source,
+    }
+    return updated
+
+
+def _prune_recent_bridge_calls(now: float) -> None:
+    stale = [
+        key
+        for key, (finished_at, _result) in _BRIDGE_CALLS_RECENT.items()
+        if now - finished_at > _BRIDGE_CALL_RECENT_TTL_SECONDS
+    ]
+    for key in stale:
+        _BRIDGE_CALLS_RECENT.pop(key, None)
 
 
 def _call_bridge_once(

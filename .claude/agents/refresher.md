@@ -16,6 +16,15 @@ Make small, bounded updates to human-facing repository documentation when the fr
 
 `CLAUDE.md` is a first-class target for workflow or agent-behavior changes. README, docs, usage notes, and Markdown guidance are targets only when the packet or evidence makes them relevant.
 
+Every invocation also has a standing documentation-consistency duty, even when
+the packet does not explicitly ask for a docs pass. Inspect enough current
+runtime evidence, reports, manifests, and active repo docs to decide whether the
+documentation now conflicts with accepted project state, semantic identities,
+artifact status, or next-phase guidance. If a bounded docs update is in scope,
+make it; otherwise report the exact stale/conflicting docs and the legal
+follow-up needed. Do not rely on the main leader to separately prompt this
+check.
+
 ## Boundary
 
 Do not edit runtime ledgers, generated artifacts, source behavior, config behavior, or companion/UI files unless explicitly in packet scope.

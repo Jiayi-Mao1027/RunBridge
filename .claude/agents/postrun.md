@@ -29,9 +29,16 @@ Compare approved/resolved intent against actual evidence:
 - whether executor used the highest semantics-preserving batch/memory configuration actual available VRAM could support, targeting more than 70GB observed on typical 80GB GPUs when feasible and high utilization on other GPU sizes
 - process refs, terminal logs, produced artifacts, checkpoints, and metrics
 - internal log manifests and required fields
+- formal completion evidence, comparing the approved target quantity with the observed terminal quantity from stable evidence such as exit code, logs, losses, checkpoints, output counts, or a not_applicable reason for non-countable work
 - representative outputs, predictions, traces, or samples when available
 
 For a formal or real execute packet, explicitly check whether the observed command was a dry run, static validation, scaffold check, manifest packaging pass, or blocker-only probe. If so, do not classify it as acceptable real execution completion unless the packet explicitly requested that limited mode.
+
+For a formal or real execute packet, exit code 0 plus a missing, unreadable, stale, or nonmatching manifest is an execution defect. The manifest must match the current run/window/task and contain the required identity, command, cwd, parameter, GPU/memory, semantic, refs, timestamp, and terminal-status evidence. Do not use an older manifest, a filename, or natural-language summary as a substitute. Recommend bounded execute packaging repair or rerun/execute; route to anomaly only after the formal evidence package is complete and the result itself is contradictory, suspicious, or causally unclear.
+
+For a formal or real execute packet, missing formal completion evidence is an execute packaging defect. If the evidence package proves the observed terminal quantity met the approved formal target, recommend packaging repair rather than rerun. If the observed terminal quantity is lower than the approved target, classify the result as incomplete or partial execution unless the packet explicitly approved the weaker boundary.
+
+For a formal or real execute packet, also compare the approved formal handoff against the observed formal parameters. GPU choice, per-device batch, microbatching, accumulation, precision, and memory-efficient toggles are execution-side resource knobs. Evaluation sample count, benchmark family/subset coverage, max generation length, sequence/truncation basis, prompt/template, metric set, model, checkpoint, and method identity are semantic scope. If executor shrank semantic scope to a bounded/tiny run, first-step-sized run, one-example-per-family run, or otherwise weaker formal boundary without explicit packet approval, do not classify it as acceptable completion. Classify it as incomplete/partial execution or rerun/execute with the approved semantics; if resources make that impossible, report the concrete blocker instead of accepting the smaller result.
 
 For a data-preparation or data-pipeline execution packet, audit whether acquisition/staging was part of the approved intent. If it was and the result is zero-row, local-files-missing, or blocker-only, classify it as incomplete unless the evidence shows acquisition was attempted and stopped on a concrete token, paid-access, manual-acceptance, secret, unavailable-artifact, source-identity, or unrecoverable tooling blocker. Public no-token sources should not be classified as user-decision blockers merely because license/terms metadata needs to be recorded. Do not treat absence of preexisting local files as proof that data preparation was impossible when the packet authorized acquiring or staging them. Treat fixable dependency, loader, cache, or exporter failures as implementation defects until a bounded repair or alternate safe export path has been attempted.
 
@@ -51,8 +58,10 @@ Return:
 - audited artifacts/logs/manifests
 - semantic match or mismatch
 - environment/GPU/parameter audit
+- semantic-scope preservation audit: approved versus observed dataset coverage, sample count, generation length, sequence/truncation, prompt/template, metric, model, checkpoint, and method settings
 - prelaunch memory-shortfall handling audit when relevant
 - OOM adaptation audit when relevant
+- formal completion audit: approved target quantity versus observed terminal quantity, evidence source, and whether any gap is packaging-only or incomplete execution
 - outcome classification
 - evidence for the classification
 - unresolved uncertainty

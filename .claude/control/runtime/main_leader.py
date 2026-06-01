@@ -12,7 +12,7 @@ from loader import ControlPaths, load_json_file
 from policy_compiler import compile_policy
 from repo_runtime import get_repo_runtime_root
 from team_planner import RiskBasedTeamSelector
-from workflow_runtime import SCHEMA_VERSION, build_runtime_snapshot
+from workflow_runtime import SCHEMA_VERSION, build_runtime_snapshot, reconcile_run_ledger_if_stale
 from dispatch_contract import build_agent_dispatch, build_dispatch_contract
 
 
@@ -125,6 +125,15 @@ def read_runtime_snapshot(
             "updated_at": now,
             "closed_at": None,
         }
+    else:
+        run_ledger = reconcile_run_ledger_if_stale(
+            control_root,
+            run_id,
+            repo_key=repo_key,
+            runtime_runs_root=runtime_runs_root,
+            run_ledger=run_ledger,
+            persist=True,
+        )
     snapshot = build_runtime_snapshot(paths, run_ledger)
     if synthetic:
         snapshot["synthetic"] = True
@@ -597,6 +606,19 @@ def _build_task_team_mapping(task_spec: dict[str, Any], team_spec: dict[str, Any
 
 
 def _phase_assignment_instructions(target_phase: str, teammate_name: str, phase_contracts: dict[str, Any] | None = None) -> list[str]:
+    if target_phase == "l2_advisory":
+        return [
+            "L2 three-seat review rule: chiefmate-a, chiefmate-b, and chiefmate-c must each provide independent advisory judgment and challenge weak peer convergence.",
+            "L2 factual confidence loop: explicitly test weak assumptions, contradictions, and confidence; peer agreement alone is not enough evidence.",
+            "L2 research rule: use credible papers or primary technical sources when claims depend on model, training, evaluation, or external technical behavior.",
+            "L2 pseudocode rule: include pseudocode flow for each new major technical plan, or state an explicit not_applicable reason.",
+        ]
+    if target_phase == "l4_anomaly":
+        return [
+            "L4 anomaly no-preassigned-lane rule: do not accept pre-biased causal lanes; complete independent diagnosis from the full packet context before peer review.",
+            "L4 anomaly evidence rule: inspect original answers, outputs, predictions, traces, or result samples when available; do not diagnose from aggregate metrics alone.",
+            "L4 anomaly causality rule: peer agreement does not prove causality; actively challenge weak causal convergence and identify missing evidence.",
+        ]
     if target_phase != "l4_execute":
         return []
     manifest_fields = (
@@ -604,9 +626,24 @@ def _phase_assignment_instructions(target_phase: str, teammate_name: str, phase_
         if isinstance(phase_contracts, dict) and isinstance(phase_contracts.get("manifest_contracts"), dict)
         else []
     )
+    instructions = [
+        (
+            "L4 execute pre-idle resource check: before treating teammate idle or completion as finish-ready, "
+            "check current GPU resource utilization for each formal GPU stage against actual selected-device availability, "
+            "batch or microbatch basis, and semantics-preserving adaptation options. If utilization is materially low "
+            "and packet-bound resource knobs remain, keep execute working; otherwise report the low-utilization disposition "
+            "as best-available, deviation, or blocker with evidence. Do not apply a fixed numeric threshold; use the "
+            "executor/postrun guidance and the actual model, stage, and device constraints."
+        ),
+        (
+            "L4 execute completion evidence rule: do not wait indefinitely on optional target-project manifest fields. "
+            "Use owned PID/pidfile/foreground wait/exit code/log terminal markers for polling, and write approved target "
+            "quantity versus observed terminal quantity into formal_completion_evidence."
+        )
+    ]
     if manifest_fields:
-        return [f"Formal log manifest required fields: {_json_list(manifest_fields)}"]
-    return []
+        instructions.append(f"Formal log manifest required fields: {_json_list(manifest_fields)}")
+    return instructions
 
 
 def _phase_config(phase_contracts: dict[str, Any] | None, target_phase: str) -> dict[str, Any]:

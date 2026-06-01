@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from .adapters import OuterLeaderAdapter, build_outer_leader_adapter
 HOST_EVENT_SCHEMA_VERSION = "outer_sdk_host_event.v1"
 PAYLOAD_TEXT_LIMIT = 2000
 REPORT_TEXT_LIMIT = 20000
+STARTUP_DIAGNOSTICS_CACHE_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +72,7 @@ class OuterSdkHost:
         self._print_fallback_adapter = print_fallback_adapter
         self.started_at = _now_iso()
         self.host_instance_id = f"outer_host_{uuid.uuid4().hex[:12]}"
+        self._startup_diagnostics_cache: tuple[float, dict[str, Any]] | None = None
         repo_key = self._repo_key()
         self.default_run_id = _initial_default_run_id(config, repo_key)
         self._activate_default_run("outer_host_started")
@@ -97,7 +100,7 @@ class OuterSdkHost:
             return leader_result
         except Exception as exc:
             leader_result = _outer_leader_exception_result(request, None, exc)
-            self._write_host_event("outer_leader_result", {"request": request, "leader_result": leader_result})
+            self._write_outer_leader_result(request, None, leader_result)
             return leader_result
 
     def _accept_normalized_user_input(self, request: dict[str, Any]):
@@ -156,6 +159,9 @@ class OuterSdkHost:
                 "host_instance_id": self.host_instance_id,
                 "repo_key": request["repo_key"],
                 "main_session_id": request["main_session_id"],
+                "outer_claude_session_id": request.get("outer_claude_session_id") or None,
+                "outer_claude_session_mode": request.get("outer_claude_session_mode") or None,
+                "outer_claude_session_source": request.get("outer_claude_session_source") or None,
                 "input_kind": request["input_kind"],
             },
             "runtime": {
@@ -172,6 +178,9 @@ class OuterSdkHost:
     def _leader_result_for_request(self, request: dict[str, Any], runtime_result: Any) -> dict[str, Any]:
         if not runtime_result.ok:
             return _runtime_rejected_leader_result(runtime_result)
+        precomputed = self._maybe_precomputed_latest_bridge_report(request)
+        if precomputed is not None:
+            return precomputed
         leader_result = self.adapter.handle_user_input(
             dict(request),
             event_sink=lambda event_type, payload, status="streaming", sequence=None: self.emit_sdk_observed_event(
@@ -182,8 +191,71 @@ class OuterSdkHost:
                 sequence=sequence,
             ),
         )
+        leader_decide_violation = self._leader_decide_contract_violation(request, leader_result)
+        if leader_decide_violation:
+            guarded = _leader_decide_contract_failure(request, leader_result, leader_decide_violation)
+            self._write_host_event(
+                "outer_leader_contract_violation",
+                {
+                    "request": request,
+                    "leader_result": guarded,
+                    "contract_violation": leader_decide_violation,
+                },
+            )
+            return guarded
+        leader_result = self._maybe_latest_bridge_report_fallback(request, leader_result)
+        if leader_result.get("handled_by") == "outer_sdk_host_latest_bridge_reports":
+            return leader_result
+        if _outer_leader_auto_bridge_before_print_retry(request, leader_result):
+            auto_bridge_result = self._maybe_auto_bridge_after_outer_leader(request, leader_result)
+            if auto_bridge_result is not leader_result:
+                return auto_bridge_result
         leader_result = self._maybe_retry_outer_leader_with_print(request, leader_result)
+        leader_result = self._maybe_latest_bridge_report_fallback(request, leader_result)
+        if leader_result.get("handled_by") == "outer_sdk_host_latest_bridge_reports":
+            return leader_result
         return self._maybe_auto_bridge_after_outer_leader(request, leader_result)
+
+    def _maybe_latest_bridge_report_fallback(self, request: dict[str, Any], leader_result: dict[str, Any]) -> dict[str, Any]:
+        fallback = _latest_bridge_report_fallback_result(self.config, request, leader_result)
+        if fallback is None:
+            return leader_result
+        self._write_host_event(
+            "outer_leader_latest_bridge_report_fallback",
+            {
+                "request": request,
+                "leader_result": fallback,
+                "previous_leader_result": _bound(leader_result),
+            },
+        )
+        return fallback
+
+    def _maybe_precomputed_latest_bridge_report(self, request: dict[str, Any]) -> dict[str, Any] | None:
+        if not _latest_bridge_report_precompute_requested(request):
+            return None
+        seed_result = {
+            "status": "blocked",
+            "handled_by": "outer_sdk_host_precheck",
+            "reports": [],
+            "artifact_refs": [],
+            "evidence": {"reason": "inspect_only_requested_existing_latest_bridge_reports"},
+            "error_or_null": {
+                "type": "OuterLeaderLatestBridgeReportsRequested",
+                "message": "Inspect-only request explicitly asked to report from existing latest bridge reports.",
+            },
+            "cleanup_required": False,
+        }
+        fallback = _latest_bridge_report_fallback_result(self.config, request, seed_result)
+        if fallback is None:
+            return None
+        self._write_host_event(
+            "outer_leader_latest_bridge_report_precomputed",
+            {
+                "request": request,
+                "leader_result": fallback,
+            },
+        )
+        return fallback
 
     def _maybe_retry_outer_leader_with_print(self, request: dict[str, Any], leader_result: dict[str, Any]) -> dict[str, Any]:
         if not _outer_leader_print_retry_needed(self.config, self.adapter.name, request, leader_result):
@@ -257,6 +329,9 @@ class OuterSdkHost:
                 "host_instance_id": self.host_instance_id,
                 "repo_key": request["repo_key"],
                 "main_session_id": request["main_session_id"],
+                "outer_claude_session_id": request.get("outer_claude_session_id") or None,
+                "outer_claude_session_mode": request.get("outer_claude_session_mode") or None,
+                "outer_claude_session_source": request.get("outer_claude_session_source") or None,
                 "input_kind": request["input_kind"],
             },
             "runtime": {
@@ -414,6 +489,19 @@ class OuterSdkHost:
         open_windows = lifecycle.get("open_bridge_window_ids")
         if open_windows:
             return {"should_auto_bridge": False, "reason": "open_bridge_window_exists", "open_bridge_window_ids": open_windows}
+        readiness = snapshot.get("phase_exit_readiness") if isinstance(snapshot.get("phase_exit_readiness"), dict) else {}
+        phase_exit_retry = _phase_exit_blockers_allow_auto_bridge_retry(readiness, target_phase=target_phase)
+        phase_exit_reroute = _phase_exit_blockers_allow_auto_bridge_terminal_reroute(
+            readiness,
+            snapshot,
+            target_phase=target_phase,
+        )
+        if readiness.get("exit_ready") is False and not phase_exit_retry and not phase_exit_reroute:
+            return {
+                "should_auto_bridge": False,
+                "reason": "phase_exit_not_ready",
+                "phase_exit_readiness": readiness,
+            }
         return {
             "should_auto_bridge": True,
             "reason": decision_reason,
@@ -421,6 +509,9 @@ class OuterSdkHost:
             "run_id": run_id,
             "current_phase": snapshot.get("current_phase"),
             "target_phase": target_phase,
+            "phase_exit_ready": readiness.get("exit_ready"),
+            "phase_exit_retry_from_terminal_bridge_result": phase_exit_retry,
+            "phase_exit_reroute_from_terminal_bridge_result": phase_exit_reroute,
         }
 
     def _run_auto_bridge(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -507,7 +598,13 @@ class OuterSdkHost:
                 )
             except Exception:
                 snapshot = load_json_file(runs_root / run / "runtime_snapshot.json", default={}) or {}
-        startup_diagnostics = _startup_diagnostics(self.config.control_root, self.config.repo_root)
+        startup_diagnostics = self._cached_startup_diagnostics()
+        outer_session = _outer_claude_session_for_run(
+            self.config.control_root,
+            resolved_repo_key,
+            str(run or ""),
+            str((snapshot if isinstance(snapshot, dict) else {}).get("main_session_id") or ""),
+        )
         return {
             "schema_version": "outer_sdk_host_status.v1",
             "mode": "outer_sdk_host",
@@ -515,12 +612,30 @@ class OuterSdkHost:
             "repo_key": resolved_repo_key,
             "run_id": run,
             "default_run_id": self.default_run_id,
+            "main_session_id": _run_main_session_id(self.config.control_root, resolved_repo_key, str(run or "")) or None,
+            "outer_claude_session_id": outer_session.get("outer_claude_session_id") or None,
+            "outer_claude_session_source": outer_session.get("outer_claude_session_source") or None,
             "host_instance_id": self.host_instance_id,
             "started_at": self.started_at,
             "runtime_runs_root": str(runs_root),
             "startup_diagnostics": startup_diagnostics,
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
         }
+
+    def _cached_startup_diagnostics(self) -> dict[str, Any]:
+        now = time.monotonic()
+        cached = self._startup_diagnostics_cache
+        if cached is not None:
+            cached_at, value = cached
+            if now - cached_at <= STARTUP_DIAGNOSTICS_CACHE_SECONDS:
+                return dict(value)
+        diagnostics = _startup_diagnostics(self.config.control_root, self.config.repo_root)
+        if isinstance(diagnostics, dict):
+            self._startup_diagnostics_cache = (now, diagnostics)
+            return dict(diagnostics)
+        fallback = {"schema_version": "outer_leader_startup_diagnostics.v1", "error": "invalid_startup_diagnostics"}
+        self._startup_diagnostics_cache = (now, fallback)
+        return dict(fallback)
 
     def _normalize_input(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -536,16 +651,13 @@ class OuterSdkHost:
         run_id = explicit_run_id or self.default_run_id
         if explicit_run_id and explicit_run_id != self.default_run_id:
             self.default_run_id = explicit_run_id
-        main_session_id = str(
-            payload.get("main_session_id")
-            or payload.get("mainSessionId")
-            or self.config.default_main_session_id
-            or f"outer_{run_id}"
-        ).strip()
+        session_binding = _resolve_outer_session_binding(self.config, repo_key, run_id, payload)
+        main_session_id = session_binding["main_session_id"]
         input_kind = str(payload.get("input_kind") or payload.get("kind") or "user_prompt").strip()
         event_kind = "user_answer_received" if input_kind in {"user_answer", "clarification_answer"} else "user_prompt_submitted"
         target_phase = payload.get("target_phase") or payload.get("targetPhase")
         dispatch_intent = _dispatch_intent(payload, input_kind=input_kind, target_phase=target_phase)
+        auto_bridge_raw = _payload_optional(payload, "auto_bridge", "autoBridge")
         now = _now_iso()
         return {
             "schema_version": "outer_user_input.v1",
@@ -553,13 +665,16 @@ class OuterSdkHost:
             "repo_key": repo_key,
             "run_id": run_id,
             "main_session_id": main_session_id,
+            "outer_claude_session_id": session_binding.get("outer_claude_session_id") or "",
+            "outer_claude_session_mode": session_binding.get("outer_claude_session_mode") or "",
+            "outer_claude_session_source": session_binding.get("outer_claude_session_source") or "",
             "input_kind": input_kind,
             "event_kind": event_kind,
             "text": text,
             "safe_preview": _safe_preview(text),
             "target_phase": target_phase,
             "dispatch_intent": dispatch_intent,
-            "auto_bridge": _truthy(payload.get("auto_bridge") or payload.get("autoBridge")),
+            "auto_bridge": _truthy(auto_bridge_raw) if auto_bridge_raw is not None else None,
             "task_spec": _payload_dict(payload, "task_spec", "taskSpec"),
             "created_at": now,
             "source": str(payload.get("source") or "outer_sdk_host_api"),
@@ -577,7 +692,7 @@ class OuterSdkHost:
             status="running",
         )
         payload_key = "answer" if request["event_kind"] == "user_answer_received" else "user_instruction"
-        return dispatch_workflow_event(
+        result = dispatch_workflow_event(
             self.config.control_root,
             {
                 "run_id": run_id,
@@ -591,6 +706,9 @@ class OuterSdkHost:
                     payload_key: request["text"],
                     "input_id": request["input_id"],
                     "input_kind": request["input_kind"],
+                    "outer_claude_session_id": request.get("outer_claude_session_id") or None,
+                    "outer_claude_session_mode": request.get("outer_claude_session_mode") or None,
+                    "outer_claude_session_source": request.get("outer_claude_session_source") or None,
                     "target_phase": request.get("target_phase"),
                     "dispatch_intent": request.get("dispatch_intent"),
                     "task_spec": request.get("task_spec") or {},
@@ -601,9 +719,38 @@ class OuterSdkHost:
             runtime_runs_root=runs_root,
             persist=True,
         )
+        if result.ok:
+            self._record_outer_leader_session_binding(request)
+        return result
+
+    def _record_outer_leader_session_binding(self, request: dict[str, Any]) -> None:
+        session_id = str(request.get("outer_claude_session_id") or "").strip()
+        if not _looks_like_uuid(session_id):
+            return
+        repo_key = str(request.get("repo_key") or self._repo_key())
+        run_id = str(request.get("run_id") or "")
+        if not run_id:
+            return
+        record = {
+            "timestamp": _now_iso(),
+            "run_id": run_id,
+            "repo_key": repo_key,
+            "main_session_id": request.get("main_session_id"),
+            "session_id": session_id,
+            "session_kind": "outer_leader",
+            "agent_id": "leader-orchestrator",
+            "agent_type": "main-leader",
+            "source": "outer_sdk_host",
+            "input_id": request.get("input_id"),
+            "outer_claude_session_mode": request.get("outer_claude_session_mode") or "",
+            "outer_claude_session_source": request.get("outer_claude_session_source") or "",
+        }
+        append_jsonl(get_repo_runtime_root(self.config.control_root, repo_key) / run_id / "session_bindings.jsonl", record)
 
     def _activate_default_run(self, event_kind: str) -> None:
         repo_key = self._repo_key()
+        main_session_id = _run_main_session_id(self.config.control_root, repo_key, self.default_run_id)
+        outer_session = _outer_claude_session_for_run(self.config.control_root, repo_key, self.default_run_id, main_session_id)
         update_active_run_registry(
             self.config.control_root,
             repo_key=repo_key,
@@ -618,7 +765,9 @@ class OuterSdkHost:
                 "repo_key": repo_key,
                 "host_instance_id": self.host_instance_id,
                 "default_run_id": self.default_run_id,
-                "main_session_id": self.config.default_main_session_id,
+                "main_session_id": main_session_id or self.config.default_main_session_id,
+                "outer_claude_session_id": outer_session.get("outer_claude_session_id") or None,
+                "outer_claude_session_source": outer_session.get("outer_claude_session_source") or None,
                 "started_at": self.started_at,
                 "safe_preview": f"{event_kind}:{self.default_run_id}",
             },
@@ -682,6 +831,9 @@ class OuterSdkHost:
             "run_id": request.get("run_id"),
             "repo_key": request.get("repo_key"),
             "session_id": request.get("main_session_id"),
+            "outer_claude_session_id": request.get("outer_claude_session_id") or None,
+            "outer_claude_session_mode": request.get("outer_claude_session_mode") or None,
+            "outer_claude_session_source": request.get("outer_claude_session_source") or None,
             "agent_id": event_payload.get("agent_id") or "leader-orchestrator",
             "agent_type": "main-leader",
             "status": status or ("recorded" if getattr(runtime_result, "ok", False) else "blocked"),
@@ -750,6 +902,9 @@ class OuterSdkHost:
                 "repo_root": str(self.config.repo_root) if self.config.repo_root else "",
                 "run_id": request.get("run_id"),
                 "main_session_id": request.get("main_session_id"),
+                "outer_claude_session_id": request.get("outer_claude_session_id") or "",
+                "outer_claude_session_mode": request.get("outer_claude_session_mode") or "",
+                "outer_claude_session_source": request.get("outer_claude_session_source") or "",
                 "input_id": request.get("input_id"),
                 "input_kind": request.get("input_kind"),
                 "event_kind": request.get("event_kind"),
@@ -957,6 +1112,160 @@ def _leader_result_error_type(leader_result: dict[str, Any]) -> str:
     return ""
 
 
+def _latest_bridge_report_fallback_result(
+    config: OuterSdkHostConfig,
+    request: dict[str, Any],
+    previous_leader_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not _latest_bridge_report_fallback_allowed(request, previous_leader_result):
+        return None
+    repo_key = str(request.get("repo_key") or "").strip()
+    run_id = str(request.get("run_id") or "").strip()
+    if not repo_key or not run_id:
+        return None
+    snapshot = _latest_snapshot_with_bridge_reports(config, repo_key, run_id)
+    bridge_result = snapshot.get("last_bridge_result") if isinstance(snapshot.get("last_bridge_result"), dict) else {}
+    report_summaries = _bridge_result_report_summaries(bridge_result)
+    if not report_summaries:
+        return None
+    bridge_status = str(bridge_result.get("status") or "unknown").strip() or "unknown"
+    bridge_window_id = bridge_result.get("bridge_window_id") or bridge_result.get("binding", {}).get("bridge_window_id")
+    bridge_error = bridge_result.get("error_or_null") if isinstance(bridge_result.get("error_or_null"), dict) else None
+    report_count = bridge_result.get("report_count") or len(report_summaries)
+    summary = (
+        "Outer leader produced no usable assistant text for an inspect-only request, so the host returned the latest "
+        "runtime bridge reports instead of dropping the main-control report. "
+        f"latest_bridge_status={bridge_status}; bridge_window_id={bridge_window_id or 'unknown'}; report_count={report_count}."
+    )
+    if bridge_error:
+        summary = f"{summary} original_bridge_error={bridge_error.get('type') or 'BridgeError'}."
+    reports = [{"summary": summary, "source": "outer_sdk_host_latest_bridge_reports"}]
+    reports.extend(report_summaries)
+    artifact_refs = bridge_result.get("artifact_refs") if isinstance(bridge_result.get("artifact_refs"), list) else None
+    if artifact_refs is None:
+        artifact_refs = bridge_result.get("artifact_refs_preview") if isinstance(bridge_result.get("artifact_refs_preview"), list) else []
+    return {
+        "status": "succeeded",
+        "handled_by": "outer_sdk_host_latest_bridge_reports",
+        "reports": reports,
+        "artifact_refs": artifact_refs,
+        "evidence": {
+            "repo_key": repo_key,
+            "run_id": run_id,
+            "input_id": request.get("input_id"),
+            "dispatch_intent": request.get("dispatch_intent"),
+            "snapshot_ref": str(get_repo_runtime_root(config.control_root, repo_key) / run_id / "runtime_snapshot.json"),
+            "bridge_result_status": bridge_status,
+            "bridge_window_id": bridge_window_id,
+            "bridge_error_or_null": bridge_error,
+            "previous_leader_result": _bound(previous_leader_result),
+        },
+        "error_or_null": None,
+        "cleanup_required": False,
+    }
+
+
+def _latest_bridge_report_fallback_allowed(request: dict[str, Any], leader_result: dict[str, Any]) -> bool:
+    if str(request.get("dispatch_intent") or "").strip() != "inspect_only":
+        return False
+    status = str(leader_result.get("status") or "").strip()
+    if status == "succeeded":
+        return False
+    if leader_result.get("reports"):
+        return False
+    return _leader_result_error_type(leader_result) in {
+        "OuterLeaderTmuxNoAssistantText",
+        "OuterLeaderTmuxNoRuntimeProgress",
+        "OuterLeaderPrintNoAssistantText",
+        "OuterLeaderPrintTimeout",
+        "OuterLeaderPrintCliFailed",
+        "OuterLeaderLatestBridgeReportsRequested",
+    }
+
+
+def _latest_bridge_report_precompute_requested(request: dict[str, Any]) -> bool:
+    if str(request.get("dispatch_intent") or "").strip() != "inspect_only":
+        return False
+    text = str(request.get("text") or request.get("safe_preview") or "").lower()
+    if not text:
+        return False
+    markers = (
+        "latest bridge",
+        "last_bridge_result",
+        "teammate report",
+        "teammate_reports",
+        "main-control report",
+        "main control report",
+        "do not open a new bridge",
+        "do not rerun",
+        "don't rerun",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _latest_snapshot_with_bridge_reports(config: OuterSdkHostConfig, repo_key: str, run_id: str) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {}
+    try:
+        candidate = read_runtime_snapshot(config.control_root, run_id, repo_key=repo_key)
+        if isinstance(candidate, dict):
+            snapshot = candidate
+    except Exception:
+        snapshot = {}
+    run_root = get_repo_runtime_root(config.control_root, repo_key) / run_id
+    file_snapshot = load_json_file(run_root / "runtime_snapshot.json", default={}) or {}
+    if _bridge_result_has_reports(file_snapshot.get("last_bridge_result")) and not _bridge_result_has_reports(snapshot.get("last_bridge_result")):
+        return file_snapshot
+    return snapshot or file_snapshot
+
+
+def _bridge_result_has_reports(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return bool(value.get("reports") or value.get("reports_preview"))
+
+
+def _bridge_result_report_summaries(bridge_result: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_reports = bridge_result.get("reports") if isinstance(bridge_result.get("reports"), list) else None
+    if raw_reports is None:
+        raw_reports = bridge_result.get("reports_preview") if isinstance(bridge_result.get("reports_preview"), list) else []
+    reports: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_reports[:8]):
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("summary") or item.get("message") or "").strip()
+        if not summary:
+            continue
+        teammate = (
+            item.get("teammate")
+            or item.get("teammate_name")
+            or item.get("teammate_id")
+            or item.get("agent_id")
+            or _nested_text(item, ("evidence", "teammate"))
+            or _nested_text(item, ("evidence", "teammate_id"))
+            or _nested_text(item, ("evidence_summary", "teammate"))
+        )
+        report = {
+            "summary": summary,
+            "source": f"runtime_snapshot.last_bridge_result.reports[{index}]",
+        }
+        if teammate:
+            report["teammate_or_source"] = teammate
+        if item.get("classification"):
+            report["classification"] = item.get("classification")
+        reports.append(report)
+    return reports
+
+
+def _nested_text(value: dict[str, Any], path: tuple[str, ...]) -> str:
+    cursor: Any = value
+    for key in path:
+        if not isinstance(cursor, dict):
+            return ""
+        cursor = cursor.get(key)
+    text = str(cursor or "").strip()
+    return text
+
+
 def _outer_leader_print_retry_needed(config: OuterSdkHostConfig, adapter_name: str, request: dict[str, Any], leader_result: dict[str, Any]) -> bool:
     if not _outer_leader_print_retry_enabled():
         return False
@@ -982,6 +1291,16 @@ def _outer_leader_print_retry_reason(request: dict[str, Any], leader_result: dic
         if status == "succeeded" and not _has_explicit_no_bridge_decision(_leader_result_summary_text(leader_result)):
             return "leader_decide_returned_without_bridge_or_no_bridge_decision"
     return ""
+
+
+def _outer_leader_auto_bridge_before_print_retry(request: dict[str, Any], leader_result: dict[str, Any]) -> bool:
+    if not _auto_bridge_enabled(request):
+        return False
+    if str(request.get("dispatch_intent") or "").strip() != "advance_or_continue":
+        return False
+    if not _outer_leader_print_retry_reason(request, leader_result):
+        return False
+    return _outer_leader_failure_allows_auto_bridge(_leader_result_error_type(leader_result))
 
 
 def _outer_leader_print_retry_enabled() -> bool:
@@ -1027,16 +1346,222 @@ def _outer_leader_failure_allows_auto_bridge(error_type: str) -> bool:
         "OuterLeaderTmuxStartupFailed",
         "OuterLeaderTransportApiFailure",
         "OuterLeaderApiError",
+        "OuterLeaderPrintTimeout",
+        "OuterLeaderPrintCliFailed",
+        "OuterLeaderPrintNoAssistantText",
     }
 
 
 def _auto_bridge_enabled(request: dict[str, Any]) -> bool:
-    if _truthy(request.get("auto_bridge")):
+    explicit = request.get("auto_bridge")
+    if _truthy(explicit):
         return True
-    raw = os.environ.get("OUTER_HOST_AUTO_BRIDGE") or os.environ.get("BRIDGE_OUTER_HOST_AUTO_BRIDGE")
-    if raw is None:
+    if _falsey(explicit):
         return False
-    return raw.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    raw = os.environ.get("OUTER_HOST_AUTO_BRIDGE") or os.environ.get("BRIDGE_OUTER_HOST_AUTO_BRIDGE")
+    if raw is not None:
+        return raw.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return str(request.get("dispatch_intent") or "").strip() == "advance_or_continue"
+
+
+def _phase_exit_blockers_allow_auto_bridge_retry(readiness: dict[str, Any], *, target_phase: str) -> bool:
+    if not isinstance(readiness, dict) or readiness.get("exit_ready") is not False:
+        return False
+    if not _phase_exit_blockers_are_terminal_bridge_result(readiness):
+        return False
+    if readiness.get("blocking_bridge_window_ids"):
+        return False
+    latest_target = str(readiness.get("latest_bridge_target_phase") or "").strip()
+    latest_status = str(readiness.get("latest_bridge_result_status") or "").strip()
+    latest_lifecycle = str(readiness.get("latest_bridge_lifecycle_status") or "").strip()
+    if latest_status == "needs_user_answer" and latest_lifecycle == "user_answer_received":
+        return True
+    if latest_target and target_phase and latest_target != target_phase:
+        return False
+    return latest_status in {"failed", "partial_or_failed", "partial"} and latest_lifecycle in {
+        "bridge_window_failed",
+        "bridge_window_partial_returned",
+        "bridge_call_failed",
+    }
+
+
+def _phase_exit_blockers_allow_auto_bridge_terminal_reroute(
+    readiness: dict[str, Any],
+    snapshot: dict[str, Any],
+    *,
+    target_phase: str,
+) -> bool:
+    if not isinstance(readiness, dict) or readiness.get("exit_ready") is not False:
+        return False
+    if not target_phase:
+        return False
+    if not _phase_exit_blockers_are_terminal_bridge_result(readiness):
+        return False
+    if readiness.get("blocking_bridge_window_ids"):
+        return False
+    latest_status = str(readiness.get("latest_bridge_result_status") or "").strip()
+    latest_lifecycle = str(readiness.get("latest_bridge_lifecycle_status") or "").strip()
+    if latest_status not in {"failed", "partial_or_failed", "partial"}:
+        return False
+    if latest_lifecycle not in {"bridge_window_failed", "bridge_window_partial_returned", "bridge_call_failed"}:
+        return False
+    allowed_routes = {str(item).strip() for item in snapshot.get("allowed_routes", []) if str(item).strip()}
+    return target_phase in allowed_routes
+
+
+def _phase_exit_blockers_are_terminal_bridge_result(readiness: dict[str, Any]) -> bool:
+    reasons = {str(item) for item in readiness.get("blocking_reasons", []) if str(item)}
+    allowed_terminal_reasons = {
+        "latest_bridge_result_not_successful",
+        "latest_bridge_lifecycle_not_returned",
+        "latest_bridge_result_not_current_phase",
+    }
+    return bool(reasons) and reasons.issubset(allowed_terminal_reasons)
+
+
+def _resolve_outer_session_binding(
+    config: OuterSdkHostConfig,
+    repo_key: str,
+    run_id: str,
+    payload: dict[str, Any],
+) -> dict[str, str]:
+    explicit_main = _first_text(payload, "main_session_id", "mainSessionId")
+    explicit_native = _first_text(
+        payload,
+        "outer_claude_session_id",
+        "outerClaudeSessionId",
+        "claude_session_id",
+        "claudeSessionId",
+        "cc_session_id",
+        "ccSessionId",
+    )
+    if explicit_native and not _looks_like_uuid(explicit_native):
+        raise ValueError("outer Claude session id must be a Claude Code UUID")
+    explicit_mode = _first_text(payload, "outer_claude_session_mode", "outerClaudeSessionMode").lower()
+    existing_main = _run_main_session_id(config.control_root, repo_key, run_id)
+    default_main = str(config.default_main_session_id or "").strip()
+    default_native = default_main if _looks_like_uuid(default_main) else ""
+
+    if existing_main:
+        main_session_id = existing_main
+        main_source = "run_runtime"
+    elif explicit_main:
+        main_session_id = explicit_main
+        main_source = "payload_main_session_id"
+    elif explicit_native:
+        main_session_id = explicit_native
+        main_source = "payload_outer_claude_session_id"
+    elif default_native:
+        main_session_id = default_native
+        main_source = "config_default_main_session_id"
+    else:
+        main_session_id = str(uuid.uuid4())
+        main_source = "generated_claude_session_id"
+
+    stored_native = _latest_outer_claude_session_id(config.control_root, repo_key, run_id, main_session_id)
+    if explicit_native:
+        outer_claude_session_id = explicit_native
+        native_source = "payload_outer_claude_session_id"
+    elif stored_native:
+        outer_claude_session_id = stored_native
+        native_source = "session_bindings"
+    elif _looks_like_uuid(main_session_id):
+        outer_claude_session_id = main_session_id
+        native_source = main_source
+    elif main_session_id:
+        outer_claude_session_id = str(uuid.uuid4())
+        native_source = "generated_outer_claude_session_id"
+    else:
+        outer_claude_session_id = ""
+        native_source = ""
+
+    mode = ""
+    if outer_claude_session_id:
+        if explicit_mode in {"resume", "session_id"}:
+            mode = explicit_mode
+        elif explicit_native or stored_native or (native_source == "run_runtime" and _looks_like_uuid(main_session_id)):
+            mode = "resume"
+        else:
+            mode = "session_id"
+
+    return {
+        "main_session_id": main_session_id,
+        "main_session_source": main_source,
+        "outer_claude_session_id": outer_claude_session_id,
+        "outer_claude_session_mode": mode,
+        "outer_claude_session_source": native_source,
+    }
+
+
+def _outer_claude_session_for_run(control_root: Path, repo_key: str, run_id: str, main_session_id: str | None = None) -> dict[str, str]:
+    if not run_id:
+        return {"outer_claude_session_id": "", "outer_claude_session_source": ""}
+    run_main = str(main_session_id or "").strip() or _run_main_session_id(control_root, repo_key, run_id)
+    stored_native = _latest_outer_claude_session_id(control_root, repo_key, run_id, run_main)
+    if stored_native:
+        return {"outer_claude_session_id": stored_native, "outer_claude_session_source": "session_bindings"}
+    if _looks_like_uuid(run_main):
+        return {"outer_claude_session_id": run_main, "outer_claude_session_source": "main_session_id"}
+    return {"outer_claude_session_id": "", "outer_claude_session_source": ""}
+
+
+def _run_main_session_id(control_root: Path, repo_key: str, run_id: str) -> str:
+    if not run_id:
+        return ""
+    run_root = get_repo_runtime_root(control_root, repo_key) / run_id
+    for name in ("run_ledger.json", "runtime_snapshot.json"):
+        data = load_json_file(run_root / name, default={})
+        if not isinstance(data, dict):
+            continue
+        candidate = str(data.get("main_session_id") or data.get("mainSessionId") or "").strip()
+        if candidate:
+            return candidate
+    return ""
+
+
+def _latest_outer_claude_session_id(control_root: Path, repo_key: str, run_id: str, main_session_id: str | None = None) -> str:
+    if not run_id:
+        return ""
+    run_root = get_repo_runtime_root(control_root, repo_key) / run_id
+    main = str(main_session_id or "").strip()
+    fallback = ""
+    records: list[dict[str, Any]] = []
+    records.extend(_read_jsonl_safely(run_root / "session_bindings.jsonl")[-1000:])
+    records.extend(_read_jsonl_safely(control_root.parent / "runtime_state" / "session_observer" / "session_bindings.jsonl")[-1000:])
+    for record in reversed(records):
+        if str(record.get("run_id") or run_id).strip() != run_id:
+            continue
+        session_id = str(record.get("session_id") or "").strip()
+        if not _looks_like_uuid(session_id):
+            continue
+        kind = str(record.get("session_kind") or "").strip()
+        agent_type = str(record.get("agent_type") or "").strip()
+        record_main = str(record.get("main_session_id") or "").strip()
+        is_outer_leader = kind in {"main_leader", "outer_leader"} or agent_type in {"main-leader", "leader-orchestrator", "outer-leader"}
+        if main and record_main == main and is_outer_leader:
+            return session_id
+        if not fallback and is_outer_leader:
+            fallback = session_id
+    return fallback
+
+
+def _first_text(payload: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _looks_like_uuid(value: Any) -> bool:
+    try:
+        uuid.UUID(str(value or "").strip())
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _latest_run_id(runs_root: Path) -> str | None:
@@ -1150,6 +1675,14 @@ def _truthy(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "new"}
 
 
+def _falsey(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"0", "false", "no", "n", "off", "disabled"}
+
+
 def _dispatch_intent(payload: dict[str, Any], *, input_kind: str, target_phase: Any) -> str:
     explicit = str(payload.get("dispatch_intent") or payload.get("dispatchIntent") or "").strip()
     if explicit in {"advance_or_continue", "inspect_only", "leader_decide", "user_answer"}:
@@ -1172,6 +1705,13 @@ def _payload_dict(payload: dict[str, Any], *keys: str) -> dict[str, Any]:
         if isinstance(value, dict):
             return value
     return {}
+
+
+def _payload_optional(payload: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in payload:
+            return payload.get(key)
+    return None
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:

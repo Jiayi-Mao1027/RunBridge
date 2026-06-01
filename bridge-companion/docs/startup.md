@@ -36,7 +36,6 @@ cd /data03/liang/mjy/safe_opd
 python3 ../.claude/control/runtime/outer_sdk_host.py \
   --control-root ../.claude/control \
   --repo-root . \
-  --main-session-id outer-main \
   --adapter auto
 ```
 
@@ -62,10 +61,12 @@ Run the long-lived outer host separately from Companion:
 
 ```powershell
 cd C:\Users\admin\Desktop\Structure-config-1\<target-repo>
-python ..\.claude\control\runtime\outer_sdk_host.py --control-root ..\.claude\control --repo-root . --main-session-id outer-main --adapter auto
+python ..\.claude\control\runtime\outer_sdk_host.py --control-root ..\.claude\control --repo-root . --adapter auto
 ```
 
 The host derives the Claude launch wrapper from the target repo structure: it first looks for `../.claude` relative to `--repo-root`, sets the Claude subprocess `HOME` to that parent directory, and loads `../.claude/mcp.json`. You do not need to export an interactive `claude_mjy` alias for the host.
+
+Run recovery is keyed by the selected RunBridge `run_id`. The outer host resolves that run's native Claude Code session UUID from runtime truth and relaunches Claude with `--resume <session-id>` when it must recreate the outer leader. New runs use `--session-id <session-id>`. Avoid fixed placeholders such as `outer-main`; `--continue` is also not suitable because it follows the most recent cwd session rather than the selected run.
 
 Before sending any model request, verify the effective startup plan:
 

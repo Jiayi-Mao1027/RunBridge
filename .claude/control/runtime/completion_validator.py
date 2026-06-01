@@ -71,8 +71,10 @@ def validate_bridge_completion(
     if execution.get("validation_passed") is False:
         checks.append(_check("contract_validation", BLOCK, "validation_passed", message="executor explicitly reported validation_passed=false"))
     for requirement in validation_requirements:
-        checks.append(_validation_requirement_check(str(requirement), execution, artifact_validation, base_dir=base_dir, contract=contract, control_root=control_root))
+        checks.append(_validation_requirement_check(str(requirement), packet, execution, artifact_validation, base_dir=base_dir, contract=contract, control_root=control_root))
 
+    checks.extend(_self_disqualifying_handoff_checks(packet, execution, validation_requirements))
+    checks.extend(_execute_semantic_scope_checks(packet, execution, validation_requirements))
     checks.extend(_coverage_checks(task_spec, reports))
     checks.extend(_report_contract_checks(report_contract, reports))
     checks.extend(_lifecycle_checks(packet, execution))
@@ -85,7 +87,7 @@ def validate_bridge_completion(
     failed_validations = [
         str(item.get("subject") or item.get("name"))
         for item in checks
-        if item.get("name") in {"contract_validation", "manifest_validation"} and item.get("status") in {FAIL, BLOCK}
+        if item.get("name") in {"contract_validation", "manifest_validation", "execute_resource_utilization"} and item.get("status") in {FAIL, BLOCK}
     ]
     return {
         "validated_by": "completion_validator.v1",
@@ -117,6 +119,9 @@ def _coverage_checks(task_spec: dict[str, Any], reports: list[dict[str, Any]]) -
     accepted = {"completed", "deferred", "blocked", "escalated"}
     for item in checklist:
         key = str(item)
+        if _coverage_item_is_non_actionable_fragment(key):
+            checks.append(_check("semantic_coverage", WARN, key, message="coverage item is a heading or parser fragment"))
+            continue
         disposition = _coverage_disposition(coverage.get(key))
         if not disposition:
             disposition = _fuzzy_coverage_disposition(key, coverage)
@@ -189,6 +194,7 @@ def _failure_disposition_checks(execution: dict[str, Any]) -> list[dict[str, Any
 
 def _validation_requirement_check(
     requirement: str,
+    packet: dict[str, Any],
     execution: dict[str, Any],
     artifact_validation: dict[str, Any],
     *,
@@ -208,7 +214,27 @@ def _validation_requirement_check(
             message=message,
             evidence_ref="report:formal_handoff" if handoff_ok else None,
         )
-    if "manifest" in lowered:
+    if _looks_like_implementation_owned_validation_requirement(lowered):
+        validation_ok, missing = _implementation_owned_validation_evidence_present(execution)
+        message = "" if validation_ok else f"implementation-owned validation evidence missing: {', '.join(missing[:12])}"
+        return _check(
+            "implementation_validation",
+            PASS if validation_ok else BLOCK,
+            requirement,
+            message=message,
+            evidence_ref="report:implementation_validation" if validation_ok else None,
+        )
+    if _looks_like_execute_resource_utilization_requirement(lowered):
+        resource_ok, missing = _execute_resource_utilization_evidence_present(execution, refs=refs, base_dir=base_dir)
+        message = "" if resource_ok else f"execute resource-utilization evidence missing: {', '.join(missing[:12])}"
+        return _check(
+            "execute_resource_utilization",
+            PASS if resource_ok else BLOCK,
+            requirement,
+            message=message,
+            evidence_ref="report_or_manifest:execute_resource_utilization" if resource_ok else None,
+        )
+    if _looks_like_log_manifest_requirement(lowered):
         manifest_refs = [ref for ref in refs if _ref_looks_like_log_manifest(ref)]
         if manifest_refs:
             required_fields = []
@@ -219,6 +245,7 @@ def _validation_requirement_check(
                 refs=manifest_refs,
                 base_dir=base_dir,
                 required_fields=required_fields,
+                expected_binding=_expected_manifest_binding(packet),
                 control_root=control_root or Path(__file__).resolve().parents[1],
                 formal_run=True,
             )
@@ -232,12 +259,581 @@ def _validation_requirement_check(
     return _check("contract_validation", PASS, requirement)
 
 
+def _looks_like_log_manifest_requirement(lowered_requirement: str) -> bool:
+    if "manifest" not in lowered_requirement:
+        return False
+    if any(marker in lowered_requirement for marker in ("mechanical gaps", "absent manifests", "missing files", "routed to")):
+        return False
+    explicit_markers = (
+        "log manifest",
+        "log manifests",
+        "formal log",
+        "internal manifest",
+        "internal manifests",
+        "manifest required fields",
+        "manifest_required_fields",
+        "required manifest fields",
+        "complete manifest",
+    )
+    return any(marker in lowered_requirement for marker in explicit_markers)
+
+
 def _looks_like_execution_handoff_requirement(lowered_requirement: str) -> bool:
     return (
         "execution entrypoint" in lowered_requirement
         and "non-dry-run command" in lowered_requirement
         and ("data/input manifest" in lowered_requirement or "data/input manifests" in lowered_requirement)
     )
+
+
+def _looks_like_implementation_owned_validation_requirement(lowered_requirement: str) -> bool:
+    return (
+        "implementation-owned" in lowered_requirement
+        and any(marker in lowered_requirement for marker in ("dry-run", "dry run", "smoke", "warmup", "first-step", "first step"))
+        and ("before execute" in lowered_requirement or "execute handoff" in lowered_requirement)
+    )
+
+
+def _looks_like_execute_resource_utilization_requirement(lowered_requirement: str) -> bool:
+    return (
+        "resource-utilization" in lowered_requirement
+        or (
+            "gpu" in lowered_requirement
+            and "utilization" in lowered_requirement
+            and any(marker in lowered_requirement for marker in ("team idle", "finish-ready", "selected-device", "selected device"))
+        )
+    )
+
+
+_GPU_AVAILABILITY_MARKERS = (
+    "selected_gpu_total_free_memory",
+    "gpu_id_or_device_ids",
+    "gpu_id",
+    "selected-device",
+    "selected device",
+    "available vram",
+    "available memory",
+    "free memory",
+    "nvidia-smi",
+)
+
+_GPU_OBSERVED_MARKERS = (
+    "formal_memory_observed",
+    "warmup_memory_observed",
+    "smoke_memory_observed",
+    "observed vram",
+    "memory observed",
+    "process_refs",
+    "pid",
+    "nvidia-smi",
+)
+
+_BATCH_BASIS_MARKERS = (
+    "batchbasis",
+    "batch basis",
+    "per_device",
+    "per-device",
+    "microbatch",
+    "gradient_accumulation",
+    "effective_batch",
+    "batch size",
+)
+
+_RESOURCE_DISPOSITION_MARKERS = (
+    "resource-utilization sanity",
+    "resource utilization sanity",
+    "resource utilization",
+    "observed-vs-available",
+    "observed vs available",
+    "resource adaptation",
+    "resource_adaptation",
+    "best-available",
+    "best available",
+    "deviation",
+    "blocker",
+    "no further semantics-preserving",
+    "no semantic downshift",
+    "no semantic down-shift",
+    "no semantic downshift used",
+    "no weaker semantic",
+    "utilization acceptable",
+    "low-utilization",
+    "lower-than-target",
+    "highest semantics-preserving",
+)
+
+
+def _execute_resource_utilization_evidence_present(
+    execution: dict[str, Any],
+    *,
+    refs: list[dict[str, Any]] | None = None,
+    base_dir: str | Path | None = None,
+) -> tuple[bool, list[str]]:
+    manifests = _load_log_manifest_payloads(refs or [], base_dir=base_dir)
+    report_text = _jsonish_text({"reports": execution.get("reports"), "evidence": execution.get("evidence")}).casefold()
+    manifest_text = _jsonish_text(manifests).casefold()
+    combined = f"{report_text}\n{manifest_text}"
+    if _resource_check_not_applicable(combined):
+        return True, []
+    missing: list[str] = []
+    if not _text_has_any(combined, _GPU_AVAILABILITY_MARKERS):
+        missing.append("selected_gpu_availability")
+    if not _text_has_any(combined, _GPU_OBSERVED_MARKERS):
+        missing.append("observed_vram_or_process_evidence")
+    if not _text_has_any(combined, _BATCH_BASIS_MARKERS):
+        missing.append("batch_or_microbatch_basis")
+    disposition_text = f"{report_text}\n{_resource_disposition_text(manifests).casefold()}"
+    if not _text_has_any(disposition_text, _RESOURCE_DISPOSITION_MARKERS):
+        missing.append("resource_utilization_disposition")
+    return not missing, missing
+
+
+def _load_log_manifest_payloads(refs: list[dict[str, Any]], *, base_dir: str | Path | None) -> list[dict[str, Any]]:
+    manifests: list[dict[str, Any]] = []
+    for ref in refs:
+        if not isinstance(ref, dict) or not _ref_looks_like_log_manifest(ref):
+            continue
+        payload = _load_manifest_ref_payload(ref, base_dir=base_dir)
+        if isinstance(payload, dict):
+            manifests.append(payload)
+    return manifests
+
+
+def _text_has_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _resource_check_not_applicable(text: str) -> bool:
+    static_markers = (
+        "not_applicable_static_only_no_model_load",
+        "static validation",
+        "no model load",
+        "formal model execution did not run",
+        "cpu only",
+        "cpu-only",
+        "no gpu",
+        "gpu not used",
+    )
+    accelerator_markers = ("cuda", "nvidia", "vram")
+    return any(marker in text for marker in static_markers) and not any(marker in text for marker in accelerator_markers)
+
+
+def _resource_disposition_text(manifests: list[dict[str, Any]]) -> str:
+    fields = (
+        "resource_utilization_sanity_check",
+        "resource_utilization_disposition",
+        "observed_vs_available_vram",
+        "resource_adaptation_evidence",
+        "adjustment_reason",
+        "residual_uncertainty",
+        "failure_reason",
+        "reuse_or_dependency_notes",
+        "terminal_status",
+    )
+    values: list[Any] = []
+    for manifest in manifests:
+        if not isinstance(manifest, dict):
+            continue
+        for field in fields:
+            value = manifest.get(field)
+            if value not in (None, "", [], {}):
+                values.append(value)
+    return _jsonish_text(values)
+
+
+def _self_disqualifying_handoff_checks(packet: dict[str, Any], execution: dict[str, Any], validation_requirements: list[Any]) -> list[dict[str, Any]]:
+    target_phase = str(packet.get("target_phase") or "")
+    requirement_enabled = any("self-disqualifying" in str(item).casefold() for item in validation_requirements)
+    if target_phase != "l4_implement" and not requirement_enabled:
+        return []
+
+    if _packet_explicitly_accepts_weaker_handoff(packet):
+        return [_check("handoff_self_disqualification", PASS, "explicit_weaker_boundary")]
+
+    reports = execution.get("reports") if isinstance(execution.get("reports"), list) else []
+    offenders: list[str] = []
+    for index, report in enumerate(reports):
+        if not isinstance(report, dict):
+            continue
+        if _report_self_disqualifies_execute_handoff(report):
+            teammate = str(report.get("teammate_name") or report.get("agent_type") or report.get("role") or f"reports[{index}]")
+            offenders.append(teammate)
+
+    if offenders:
+        return [
+            _check(
+                "handoff_self_disqualification",
+                BLOCK,
+                ", ".join(offenders[:8]),
+                message=(
+                    "l4_implement report contains a proceed/execute handoff caveat that says the produced output "
+                    "is proxy/readiness-only, placeholder/scaffold-only, synthetic, not formal benchmark evidence, "
+                    "or acceptable only after a later weaker-boundary decision"
+                ),
+            )
+        ]
+    return [_check("handoff_self_disqualification", PASS, "reports")]
+
+
+def _execute_semantic_scope_checks(packet: dict[str, Any], execution: dict[str, Any], validation_requirements: list[Any]) -> list[dict[str, Any]]:
+    target_phase = str(packet.get("target_phase") or "")
+    requirement_enabled = any("semantic scope" in str(item).casefold() for item in validation_requirements)
+    if target_phase != "l4_execute" and not requirement_enabled:
+        return []
+
+    if _packet_explicitly_accepts_bounded_execute_scope(packet):
+        return [_check("execute_semantic_scope", PASS, "explicit_weaker_boundary")]
+
+    reports = execution.get("reports") if isinstance(execution.get("reports"), list) else []
+    offenders: list[str] = []
+    for index, report in enumerate(reports):
+        if not isinstance(report, dict):
+            continue
+        if _report_semantically_shrinks_formal_execute(report):
+            teammate = str(report.get("teammate_name") or report.get("agent_type") or report.get("role") or f"reports[{index}]")
+            offenders.append(teammate)
+
+    if offenders:
+        return [
+            _check(
+                "execute_semantic_scope",
+                BLOCK,
+                ", ".join(offenders[:8]),
+                message=(
+                    "l4_execute report marks a weaker formal run acceptable after shrinking semantic scope "
+                    "such as evaluation sample count, benchmark family coverage, generation length, sequence/truncation, "
+                    "metric, model, checkpoint, method, or prompt/template settings without explicit packet approval"
+                ),
+            )
+        ]
+    return [_check("execute_semantic_scope", PASS, "reports")]
+
+
+def _packet_explicitly_accepts_weaker_handoff(packet: dict[str, Any]) -> bool:
+    task_spec = packet.get("task_spec") if isinstance(packet.get("task_spec"), dict) else {}
+    contract = packet.get("completion_contract") if isinstance(packet.get("completion_contract"), dict) else {}
+    text = _jsonish_text(
+        {
+            "task_spec": task_spec,
+            "completion_contract": contract,
+            "semantic": packet.get("semantic"),
+            "target_phase": packet.get("target_phase"),
+        }
+    ).casefold()
+    negative_markers = (
+        "do not accept proxy",
+        "do not accept produced proxy",
+        "not accept proxy",
+        "proxy metrics are not acceptable",
+        "proxy/readiness metrics are not acceptable",
+    )
+    if any(marker in text for marker in negative_markers):
+        return False
+    explicit_markers = (
+        "proxy-only acceptable",
+        "proxy only acceptable",
+        "proxy/readiness acceptable",
+        "proxy readiness acceptable",
+        "accept proxy/readiness",
+        "accept proxy readiness",
+        "approved proxy/readiness",
+        "approved proxy readiness",
+        "weaker boundary approved",
+        "readiness-only milestone",
+        "readiness only milestone",
+        "scaffold-only milestone",
+        "static-only milestone",
+        "dry-run-only milestone",
+    )
+    return any(marker in text for marker in explicit_markers)
+
+
+def _packet_explicitly_accepts_bounded_execute_scope(packet: dict[str, Any]) -> bool:
+    task_spec = packet.get("task_spec") if isinstance(packet.get("task_spec"), dict) else {}
+    contract = packet.get("completion_contract") if isinstance(packet.get("completion_contract"), dict) else {}
+    text = _jsonish_text(
+        {
+            "task_spec": task_spec,
+            "completion_contract": contract,
+            "semantic": packet.get("semantic"),
+            "target_phase": packet.get("target_phase"),
+        }
+    ).casefold()
+    negative_markers = (
+        "do not reduce semantic scope",
+        "do not shrink semantic scope",
+        "do not reduce evaluation",
+        "do not reduce generation",
+        "preserve approved semantic scope",
+        "preserve the approved formal command",
+    )
+    if any(marker in text for marker in negative_markers):
+        return False
+    explicit_markers = (
+        "bounded formal approved",
+        "bounded formal acceptable",
+        "reduced evaluation scope approved",
+        "reduced semantic scope approved",
+        "weaker formal boundary approved",
+        "tiny formal run approved",
+        "one example per family approved",
+        "1 example per family approved",
+        "generation_max_new_tokens=1 approved",
+        "max_eval_examples=3 approved",
+    )
+    return any(marker in text for marker in explicit_markers)
+
+
+def _report_self_disqualifies_execute_handoff(report: dict[str, Any]) -> bool:
+    readiness = report.get("execution_readiness") if isinstance(report.get("execution_readiness"), dict) else {}
+    readiness_relevant = readiness
+    if readiness:
+        readiness_relevant = {
+            key: value
+            for key, value in readiness.items()
+            if key
+            in {
+                "status",
+                "readiness_classification",
+                "blocker_reason",
+                "approved_blocker_reason",
+                "blocked_reason",
+                "must_fix_items",
+                "blockers",
+                "unresolved_risks",
+                "risk",
+            }
+        }
+        for caveat_key in ("caveat", "nonblocking_risk"):
+            caveat = readiness.get(caveat_key)
+            if caveat and not _is_implementation_validation_only_caveat(caveat):
+                readiness_relevant[caveat_key] = caveat
+    relevant = {
+        "classification": report.get("classification"),
+        "next_action_recommendation": report.get("next_action_recommendation"),
+        "execution_readiness": readiness_relevant,
+        "formal_handoff": report.get("formal_handoff"),
+        "readiness_classification": report.get("readiness_classification"),
+        "must_fix_items": report.get("must_fix_items"),
+        "blockers": report.get("blockers"),
+        "unresolved_risks": report.get("unresolved_risks"),
+    }
+    text = _jsonish_text(relevant).casefold()
+    if not text:
+        return False
+    if _is_implementation_validation_only_caveat(relevant) and _report_has_formal_execute_handoff(report):
+        return False
+    strong_markers = (
+        "proxy_readiness_not_formal_benchmark",
+        "not_ready_for_acceptance_as_benchmark",
+        "not formal benchmark evidence",
+        "not accepted as formal benchmark evidence",
+        "not acceptable as formal benchmark evidence",
+        "not ready for acceptance as benchmark",
+        "not ready for acceptance as a benchmark",
+        "proxy/readiness-only",
+        "proxy readiness-only",
+        "proxy/readiness only",
+        "proxy readiness only",
+        "proxy-only",
+        "proxy only",
+        "readiness-only backend",
+        "readiness only backend",
+        "placeholder evaluator",
+        "placeholder output",
+        "placeholder metric",
+        "scaffold-only",
+        "scaffold only",
+        "synthetic metric",
+        "synthetic metrics",
+        "weaker proxy boundary",
+        "weaker boundary",
+        "requires real generation/evaluator",
+        "missing real generation/evaluator",
+        "without real generation/evaluator",
+        "\"formal_benchmark_metrics_available\": false",
+    )
+    if any(marker in text for marker in strong_markers):
+        return True
+    if "proxy" in text and "not formal" in text and "benchmark" in text:
+        return True
+    if "readiness" in text and "not formal" in text and ("benchmark" in text or "deliverable" in text):
+        return True
+    if "only if" in text and ("acceptable" in text or "approved" in text) and ("proxy" in text or "weaker" in text):
+        return True
+    return False
+
+
+def _is_implementation_validation_only_caveat(value: Any) -> bool:
+    text = _jsonish_text(value).casefold()
+    if not text:
+        return False
+    if any(marker in text for marker in ("proxy", "placeholder", "scaffold", "synthetic", "missing real", "requires real")):
+        return False
+    if any(marker in text for marker in ("not acceptable", "not accepted", "cannot proceed", "blocked")):
+        return False
+    validation_markers = (
+        "implementation",
+        "debug",
+        "readiness",
+        "smoke",
+        "first-step",
+        "first step",
+        "warmup",
+        "validation",
+    )
+    formal_markers = ("not formal", "not a formal", "not the formal")
+    completion_markers = ("completion", "deliverable", "benchmark")
+    return (
+        any(marker in text for marker in validation_markers)
+        and any(marker in text for marker in formal_markers)
+        and any(marker in text for marker in completion_markers)
+    )
+
+
+def _report_has_formal_execute_handoff(report: dict[str, Any]) -> bool:
+    classification = str(report.get("classification") or report.get("readiness_classification") or "").casefold()
+    if classification in {"user_decision", "hard_stop"}:
+        return False
+    readiness = report.get("execution_readiness") if isinstance(report.get("execution_readiness"), dict) else {}
+    if _jsonish_text(readiness).casefold().find("blocked") >= 0:
+        return False
+    handoff = report.get("formal_handoff") if isinstance(report.get("formal_handoff"), dict) else {}
+    entrypoint = report.get("formal_entrypoint") if isinstance(report.get("formal_entrypoint"), dict) else {}
+    handoff_text = _jsonish_text({"formal_handoff": handoff, "formal_entrypoint": entrypoint}).casefold()
+    has_command = bool(_direct_command_like_values(handoff) or _direct_command_like_values(entrypoint)) or any(
+        marker in handoff_text for marker in ("formal_command", "command", "entrypoint", "run_experiment", "python3 -m", "python3 ")
+    )
+    has_outputs = any(marker in handoff_text for marker in ("expected_output", "branch_scores", "run_manifest", "output"))
+    return has_command and has_outputs
+
+
+def _report_semantically_shrinks_formal_execute(report: dict[str, Any]) -> bool:
+    relevant = {
+        "classification": report.get("classification"),
+        "next_action_recommendation": report.get("next_action_recommendation"),
+        "execution_readiness": report.get("execution_readiness"),
+        "formal_run": report.get("formal_run"),
+        "postrun_audit": report.get("postrun_audit"),
+        "formal_handoff": report.get("formal_handoff"),
+        "artifact_manifests": report.get("artifact_manifests"),
+        "evidence": report.get("evidence"),
+        "batchbasis": report.get("batchbasis"),
+        "unresolved_risks": report.get("unresolved_risks"),
+    }
+    text = _jsonish_text(relevant).casefold()
+    if not text:
+        return False
+
+    acceptable = any(marker in text for marker in ("acceptable_completion", "ready_to_proceed", "accept this l4_execute", "formal_benchmark_completed"))
+    if not acceptable:
+        return False
+
+    shrink_markers = (
+        "bounded formal",
+        "tiny formal",
+        "first-step-sized",
+        "first step sized",
+        "very small max_eval_examples",
+        "one example per family",
+        "1 example per family",
+        "only 1 example",
+        "max_eval_examples=3",
+        "\"max_eval_examples\": 3",
+        "generation_max_new_tokens=1",
+        "\"generation_max_new_tokens\": 1",
+        "max-new-tokens 1",
+        "max_new_tokens=1",
+        "reduced evaluation scope",
+        "reduced semantic scope",
+        "weaker formal boundary",
+    )
+    if any(marker in text for marker in shrink_markers):
+        return True
+    if "formal_benchmark_completed" in text and "short run" in text and ("sample count" in text or "generation" in text):
+        return True
+    return False
+
+
+def _implementation_owned_validation_evidence_present(execution: dict[str, Any]) -> tuple[bool, list[str]]:
+    reports = execution.get("reports") if isinstance(execution.get("reports"), list) else []
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        handoff = report.get("formal_handoff") if isinstance(report.get("formal_handoff"), dict) else {}
+        readiness = report.get("execution_readiness") if isinstance(report.get("execution_readiness"), dict) else {}
+        blocker = _first_handoff_text(
+            handoff,
+            readiness,
+            "blocker_reason",
+            "approved_blocker_reason",
+            "blocked_reason",
+            "implementation_validation_blocker",
+        )
+        if blocker:
+            return True, []
+        if _report_has_implementation_owned_validation(report):
+            return True, []
+    return False, ["implementation_validation", "dryrun_smoke_warmup_or_first_step_evidence"]
+
+
+def _report_has_implementation_owned_validation(report: dict[str, Any]) -> bool:
+    positive_keys = {
+        "implementation_validation",
+        "implementation_owned_validation",
+        "debug_validation",
+        "readiness_validation",
+        "dry_run_evidence",
+        "dryrun_evidence",
+        "smoke_evidence",
+        "warmup_evidence",
+        "first_step_evidence",
+        "startup_evidence",
+        "validation_commands",
+    }
+    for key in positive_keys:
+        if _nonempty_validation_value(report.get(key)):
+            return True
+    for section_name in ("execution_readiness", "formal_handoff", "evidence"):
+        section = report.get(section_name)
+        if isinstance(section, dict):
+            for key in positive_keys:
+                if _nonempty_validation_value(section.get(key)):
+                    return True
+    combined = _jsonish_text(report).casefold()
+    validation_marker = any(
+        marker in combined
+        for marker in (
+            "dry-run",
+            "dry_run",
+            "dry run",
+            "smoke",
+            "warmup",
+            "first-step",
+            "first_step",
+            "first step",
+            "startup check",
+            "one-step",
+            "one step",
+        )
+    )
+    result_marker = any(
+        marker in combined
+        for marker in ("passed", "succeeded", "completed", "ok", "loaded", "memory", "gpu", "oom", "exit_code", "exit code")
+    )
+    return validation_marker and result_marker
+
+
+def _nonempty_validation_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (str, bytes)):
+        return bool(value.strip() if isinstance(value, str) else value)
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
 
 
 def _execution_handoff_evidence_present(execution: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -267,15 +863,35 @@ def _missing_execution_handoff_fields(handoff: dict[str, Any], readiness: dict[s
         handoff,
         "commands",
         "command",
+        "recommended_command",
+        "recommended_commands",
         "formal_command",
+        "formal_execute_command",
+        "formal_rerun_command",
+        "formal_m6_rerun_command",
         "execute_command",
+        "execute_handoff_command",
+        "non_dry_run_command",
+        "formal_non_dry_run_command",
         "command_sequence",
         "formal_non_dry_run_commands",
         "non_dry_run_commands",
         "formal_train_command",
         "formal_training_command",
     )
-    commands.extend(_handoff_text_values(readiness, "commands", "command"))
+    commands.extend(
+        _handoff_text_values(
+            readiness,
+            "commands",
+            "command",
+            "recommended_command",
+            "formal_execute_command",
+            "formal_rerun_command",
+            "formal_m6_rerun_command",
+            "non_dry_run_command",
+            "formal_non_dry_run_command",
+        )
+    )
     command_text = " ".join(commands)
     combined = " ".join(
         part
@@ -309,11 +925,76 @@ def _handoff_text_values(source: dict[str, Any], *keys: str) -> list[str]:
         value = source.get(key)
         if isinstance(value, str) and value.strip():
             values.append(value.strip())
+        elif isinstance(value, dict):
+            values.extend(_command_like_values(value))
         elif isinstance(value, list):
             for item in value:
                 if isinstance(item, str) and item.strip():
                     values.append(item.strip())
+                elif isinstance(item, dict):
+                    values.extend(_command_like_values(item))
+    if any(_is_command_like_key(key) for key in keys):
+        values.extend(_direct_command_like_values(source))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _command_like_values(source: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    if not isinstance(source, dict):
+        return values
+    for key, value in source.items():
+        if _is_command_like_key(str(key)):
+            values.extend(_leaf_text_values(value))
+            continue
+        if isinstance(value, dict):
+            values.extend(_command_like_values(value))
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    values.extend(_command_like_values(item))
     return values
+
+
+def _direct_command_like_values(source: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    if not isinstance(source, dict):
+        return values
+    for key, value in source.items():
+        if _is_command_like_key(str(key)):
+            values.extend(_leaf_text_values(value))
+    return values
+
+
+def _is_command_like_key(key: str) -> bool:
+    normalized = str(key or "").casefold().replace("-", "_")
+    return (
+        normalized in {"cmd"}
+        or "command" in normalized
+        or "entrypoint" in normalized
+    )
+
+
+def _leaf_text_values(value: Any) -> list[str]:
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if isinstance(value, dict):
+        values: list[str] = []
+        for nested in value.values():
+            values.extend(_leaf_text_values(nested))
+        return values
+    if isinstance(value, list):
+        values: list[str] = []
+        for item in value:
+            values.extend(_leaf_text_values(item))
+        return values
+    return []
 
 
 def _first_handoff_text(source_a: dict[str, Any], source_b: dict[str, Any], *keys: str) -> str:
@@ -350,6 +1031,7 @@ def _manifest_field_evidence_present(
     refs: list[dict[str, Any]] | None = None,
     base_dir: str | Path | None = None,
     required_fields: list[str] | None = None,
+    expected_binding: dict[str, str] | None = None,
     control_root: str | Path | None = None,
     formal_run: bool | None = None,
 ) -> tuple[bool, list[str]]:
@@ -357,6 +1039,7 @@ def _manifest_field_evidence_present(
         refs or [],
         base_dir=base_dir,
         required_fields=required_fields or [],
+        expected_binding=expected_binding or {},
         control_root=control_root,
         formal_run=formal_run,
     )
@@ -370,6 +1053,7 @@ def _manifest_missing_fields_from_refs(
     *,
     base_dir: str | Path | None,
     required_fields: list[str],
+    expected_binding: dict[str, str],
     control_root: str | Path | None = None,
     formal_run: bool | None = None,
 ) -> list[str] | None:
@@ -400,7 +1084,34 @@ def _manifest_missing_fields_from_refs(
     for field in fields:
         if not any(not _missing_required_manifest_field(manifest, field) for manifest in manifests):
             missing.append(field)
+    binding_mismatches = _manifest_binding_mismatches(manifests, expected_binding)
+    missing.extend(binding_mismatches)
     return missing
+
+
+def _expected_manifest_binding(packet: dict[str, Any]) -> dict[str, str]:
+    binding = packet.get("binding") if isinstance(packet.get("binding"), dict) else {}
+    task_spec = packet.get("task_spec") if isinstance(packet.get("task_spec"), dict) else {}
+    expected = {
+        "run_id": binding.get("run_id") or packet.get("run_id"),
+        "bridge_window_id": binding.get("bridge_window_id") or packet.get("bridge_window_id"),
+        "task_id": binding.get("task_id") or binding.get("task_id_or_null") or task_spec.get("task_id") or task_spec.get("task_id_or_null"),
+    }
+    return {key: str(value) for key, value in expected.items() if value not in (None, "")}
+
+
+def _manifest_binding_mismatches(manifests: list[dict[str, Any]], expected_binding: dict[str, str]) -> list[str]:
+    expected = {key: value for key, value in expected_binding.items() if key in {"run_id", "bridge_window_id", "task_id"} and value}
+    if not expected:
+        return []
+    if any(all(str(manifest.get(field) or "") == value for field, value in expected.items()) for manifest in manifests):
+        return []
+    mismatched = sorted(
+        field
+        for field, value in expected.items()
+        if not any(str(manifest.get(field) or "") == value for manifest in manifests)
+    )
+    return [f"{field}_matches_packet" for field in mismatched] or ["manifest_binding_matches_packet"]
 
 
 def _missing_required_manifest_field(manifest: dict[str, Any], field: str) -> bool:
@@ -449,6 +1160,8 @@ def _empty_manifest_value(value: Any) -> bool:
 def _static_only_manifest_allows_empty(manifest: dict[str, Any], field: str) -> bool:
     if field == "failure_reason" and _manifest_terminal_status_succeeded(manifest):
         return True
+    if field == "output_checkpoint_log_paths" and _manifest_allows_empty_output_checkpoint_log_paths(manifest):
+        return True
     if field not in {"output_checkpoint_log_paths", "process_refs", "conda_env_evidence"}:
         return False
     text = " ".join(
@@ -486,6 +1199,59 @@ def _static_only_manifest_allows_empty(manifest: dict[str, Any], field: str) -> 
     return False
 
 
+def _manifest_allows_empty_output_checkpoint_log_paths(manifest: dict[str, Any]) -> bool:
+    value = manifest.get("output_checkpoint_log_paths")
+    if not isinstance(value, list) or value:
+        return False
+    if not _manifest_terminal_status_succeeded(manifest):
+        return False
+    produced = (
+        manifest.get("expected_outputs_or_checkpoints")
+        or manifest.get("produced_artifacts")
+        or manifest.get("artifacts")
+        or manifest.get("log_files")
+    )
+    if _empty_manifest_value(produced):
+        return False
+    output_text = _manifest_text(produced).casefold()
+    checkpoint_markers = (
+        "checkpoint",
+        "checkpoints",
+        "ckpt",
+        "model.safetensors",
+        "pytorch_model",
+        ".pt",
+        ".pth",
+    )
+    if any(marker in output_text for marker in checkpoint_markers):
+        return False
+    stage_text = _manifest_text(
+        {
+            "stage_name": manifest.get("stage_name"),
+            "stage_kind": manifest.get("stage_kind"),
+            "run_kind": manifest.get("run_kind"),
+            "execution_kind": manifest.get("execution_kind"),
+            "mode": manifest.get("mode"),
+            "method_or_objective": manifest.get("method_or_objective"),
+            "metric_or_objective_basis": manifest.get("metric_or_objective_basis"),
+        }
+    ).casefold()
+    non_checkpoint_markers = ("diagnostic", "evaluation", "eval", "benchmark", "audit", "analysis", "inference")
+    training_markers = ("train", "finetune", "fine-tune", "checkpoint")
+    if any(marker in stage_text for marker in training_markers) and not any(
+        marker in stage_text for marker in non_checkpoint_markers
+    ):
+        return False
+    return True
+
+
+def _manifest_text(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(value or "")
+
+
 def _manifest_terminal_status_succeeded(manifest: dict[str, Any]) -> bool:
     status = str(manifest.get("terminal_status") or "").strip().casefold()
     if not status:
@@ -514,6 +1280,20 @@ def _coverage_disposition(value: Any) -> str:
                 return str(value.get(key)).strip()
         return ""
     return str(value or "").strip()
+
+
+def _coverage_item_is_non_actionable_fragment(item: str) -> bool:
+    text = _coverage_match_key(item).strip(" -")
+    if not text:
+        return True
+    tokens = _coverage_match_tokens(text)
+    if text.endswith(":") and len(tokens) <= 4:
+        return True
+    if re.search(r"\be\.g\.?$", text):
+        return True
+    if len(tokens) <= 1:
+        return True
+    return False
 
 
 def _fuzzy_coverage_disposition(item: str, coverage: dict[str, Any]) -> str:
@@ -549,6 +1329,7 @@ def _coverage_narrative_disposition(item: str, reports: list[dict[str, Any]]) ->
 
 def _report_coverage_narrative(reports: list[dict[str, Any]]) -> str:
     parts: list[str] = []
+    accepted_dispositions = {"completed", "deferred", "blocked", "escalated"}
     for report in reports:
         if not isinstance(report, dict):
             continue
@@ -562,6 +1343,19 @@ def _report_coverage_narrative(reports: list[dict[str, Any]]) -> str:
                 for nested in value.values():
                     if isinstance(nested, (str, int, float, bool)):
                         parts.append(str(nested))
+        coverage = report.get("instruction_coverage")
+        if isinstance(coverage, dict):
+            for key, value in coverage.items():
+                disposition = _coverage_disposition(value).casefold()
+                if disposition not in accepted_dispositions:
+                    continue
+                parts.append(str(key))
+                if isinstance(value, (str, int, float, bool)):
+                    parts.append(str(value))
+                elif isinstance(value, dict):
+                    for nested in value.values():
+                        if isinstance(nested, (str, int, float, bool)):
+                            parts.append(str(nested))
     return " ".join(parts)
 
 
@@ -582,12 +1376,24 @@ def _coverage_match_tokens(text: str) -> set[str]:
         "execution": "execute",
         "executed": "execute",
         "executing": "execute",
+        "evaluate": "eval",
+        "evaluated": "eval",
+        "evaluating": "eval",
+        "evaluation": "eval",
         "performed": "perform",
         "performing": "perform",
         "proceeding": "proceed",
         "proceeds": "proceed",
         "requires": "require",
         "required": "require",
+        "adapts": "adapt",
+        "adapted": "adapt",
+        "adapting": "adapt",
+        "adaptation": "adapt",
+        "owns": "own",
+        "owned": "own",
+        "preserved": "preserve",
+        "preserving": "preserve",
         "artifacts": "artifact",
         "outputs": "output",
     }

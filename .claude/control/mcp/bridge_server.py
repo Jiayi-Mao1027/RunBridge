@@ -14,6 +14,55 @@ from typing import Any
 SERVER_VERSION = "0.1.0"
 PROTOCOL_VERSION = "2025-03-26"
 ORPHAN_MIN_INACTIVE_SECONDS = 300
+SDK_STREAM_ACTIVITY_TAIL_LINES = 5000
+BRIDGE_CALL_OPEN_EVENT_KINDS = {
+    "bridge_call_intended",
+    "pretooluse_allowed_by_main_leader",
+    "call_bridge_sdk_started",
+    "bridge_window_opened",
+    "bridge_packet_accepted",
+    "bridge_packet_rejected",
+    "team_create_started",
+    "team_create_succeeded",
+    "team_create_failed",
+    "task_create_started",
+    "task_create_succeeded",
+    "task_create_failed",
+    "taskcreated_hook_accepted",
+    "message_dispatch_started",
+    "message_dispatch_succeeded",
+    "message_dispatch_failed",
+    "wait_timeout_or_process_lost",
+    "partial_evidence_collected",
+    "artifacts_ready",
+    "completion_contract_satisfied",
+    "completion_contract_rejected",
+    "team_delete_started",
+    "team_delete_failed",
+}
+BRIDGE_CALL_TERMINAL_EVENT_KINDS = {
+    "bridge_call_failed",
+    "bridge_call_interrupted",
+    "bridge_result_returned",
+    "bridge_result_returned_with_failure",
+    "bridge_result_returned_with_partial",
+    "bridge_result_returned_with_cleanup_required",
+    "call_bridge_sdk_error",
+    "orphan_timeout_without_bridge_return",
+    "orphan_timeout_without_heartbeat",
+    "bridge_window_failed",
+    "bridge_window_partial_returned",
+    "bridge_window_orphaned",
+    "bridge_window_interrupted",
+}
+BRIDGE_CALL_TERMINAL_STATUSES = {
+    "bridge_window_returned",
+    "bridge_window_partial_returned",
+    "bridge_window_failed",
+    "bridge_window_orphaned",
+    "bridge_window_interrupted",
+    "bridge_call_failed",
+}
 
 SERVER_ROOT = Path(__file__).resolve().parent
 CONTROL_ROOT = SERVER_ROOT.parent
@@ -560,7 +609,12 @@ def _latest_bridge_activity(run_root: Path, bridge_window_id: str) -> dict[str, 
         "agent_messages.jsonl",
         "event_log.jsonl",
     ):
-        for record in _read_jsonl_safely(run_root / source_file):
+        path = run_root / source_file
+        if source_file == "sdk_stream_events.jsonl":
+            records = _read_jsonl_tail_safely(path, SDK_STREAM_ACTIVITY_TAIL_LINES)
+        else:
+            records = _read_jsonl_safely(path)
+        for record in records:
             if str(record.get("bridge_window_id") or record.get("window_id") or "") != bridge_window_id and bridge_window_id not in json.dumps(record, ensure_ascii=False):
                 continue
             timestamp = _parse_iso_timestamp(record.get("timestamp") or record.get("created_at"))
@@ -611,6 +665,38 @@ def _read_jsonl_safely(path: Path) -> list[dict[str, Any]]:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except Exception:
         return []
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    return records
+
+
+def _read_jsonl_tail_safely(path: Path, max_lines: int) -> list[dict[str, Any]]:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            chunks: list[bytes] = []
+            line_count = 0
+            while position > 0 and line_count <= max_lines:
+                read_size = min(8192, position)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                chunks.append(chunk)
+                line_count += chunk.count(b"\n")
+        raw = b"".join(reversed(chunks))
+    except Exception:
+        return []
+    text = raw.decode("utf-8", errors="replace")
+    lines = text.splitlines()[-max_lines:]
     records: list[dict[str, Any]] = []
     for line in lines:
         if not line.strip():
@@ -774,14 +860,133 @@ def _call_bridge_sdk_for_arguments(
     else:
         _save_last_packet(runtime_runs_root, packet, run_id=resolved_run_id)
     _ensure_packet_matches_current_binding(packet, runtime_runs_root, resolved_run_id, explicit_arguments=explicit_arguments)
-    _ensure_main_bridge_lifecycle_started(CONTROL_ROOT, packet, runtime_runs_root, persist=bool(arguments.get("persist", True)))
+    active_result = _active_bridge_window_result_for_packet(packet, runtime_runs_root, resolved_run_id)
+    if active_result is not None:
+        return active_result
+    persist = bool(arguments.get("persist", True))
+    if persist:
+        _ensure_main_bridge_lifecycle_started(CONTROL_ROOT, packet, runtime_runs_root, persist=True)
     return call_bridge_sdk(
         CONTROL_ROOT,
         packet,
         runtime_runs_root=runtime_runs_root,
-        persist=bool(arguments.get("persist", True)),
+        persist=persist,
         record_main_lifecycle=False,
     )
+
+
+def _active_bridge_window_result_for_packet(
+    packet: dict[str, Any],
+    runtime_runs_root: str | Path,
+    run_id: str,
+) -> dict[str, Any] | None:
+    binding = packet.get("binding") if isinstance(packet.get("binding"), dict) else {}
+    requested_bridge_window_id = str(binding.get("bridge_window_id") or "").strip()
+    active_windows = _active_bridge_windows(runtime_runs_root, run_id, exclude_bridge_window_id=requested_bridge_window_id)
+    if not active_windows:
+        return None
+    return {
+        "run_id": run_id,
+        "main_session_id": binding.get("main_session_id"),
+        "sub_session_id": binding.get("sub_session_id"),
+        "bridge_window_id": requested_bridge_window_id,
+        "team_id_or_null": None,
+        "task_id_or_null": None,
+        "status": "partial_or_failed",
+        "reports": [
+            {
+                "summary": (
+                    "Refused to open a second bridge window for the same run while another bridge window "
+                    f"is active: {', '.join(active_windows)}. Treat this as a coalesced duplicate caller, "
+                    "not as target-project work."
+                ),
+                "source": "bridge_server",
+            }
+        ],
+        "artifact_refs": [],
+        "evidence": {
+            "run_level_active_bridge_window_ids": active_windows,
+            "coalesced_duplicate_run_bridge_call": True,
+            "requested_bridge_window_id": requested_bridge_window_id,
+        },
+        "error_or_null": {
+            "type": "RunActiveBridgeWindowExists",
+            "message": "another bridge window is already active for this run; no new bridge window was opened",
+        },
+        "cleanup_required": False,
+    }
+
+
+def _active_bridge_windows(
+    runtime_runs_root: str | Path,
+    run_id: str,
+    *,
+    exclude_bridge_window_id: str,
+) -> list[str]:
+    snapshot = read_runtime_snapshot(CONTROL_ROOT, run_id, runtime_runs_root=runtime_runs_root)
+    lifecycle = snapshot.get("lifecycle") if isinstance(snapshot.get("lifecycle"), dict) else {}
+    status_index = lifecycle.get("status_index") if isinstance(lifecycle.get("status_index"), dict) else {}
+    active = {
+        str(item)
+        for item in lifecycle.get("open_bridge_window_ids", [])
+        if str(item or "").strip() and str(item) != exclude_bridge_window_id
+    }
+    active.update(
+        item
+        for item in _event_log_active_bridge_windows(Path(runtime_runs_root) / run_id)
+        if item != exclude_bridge_window_id and str(status_index.get(item) or "") not in BRIDGE_CALL_TERMINAL_STATUSES
+    )
+    return sorted(active)
+
+
+def _event_log_active_bridge_windows(run_root: Path) -> list[str]:
+    event_log = run_root / "event_log.jsonl"
+    if not event_log.exists():
+        return []
+    active: set[str] = set()
+    last_seen: dict[str, datetime] = {}
+    try:
+        lines = event_log.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+    for line in lines[-1000:]:
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(record, dict):
+            continue
+        bridge_window_id = str(record.get("bridge_window_id") or "").strip()
+        if not bridge_window_id:
+            continue
+        event_kind = str(record.get("event_kind") or "").strip()
+        if event_kind in BRIDGE_CALL_TERMINAL_EVENT_KINDS:
+            active.discard(bridge_window_id)
+            last_seen.pop(bridge_window_id, None)
+        elif event_kind in BRIDGE_CALL_OPEN_EVENT_KINDS:
+            active.add(bridge_window_id)
+            timestamp = _parse_event_timestamp(record.get("timestamp"))
+            if timestamp is not None:
+                last_seen[bridge_window_id] = timestamp
+    now = datetime.now(timezone.utc)
+    return sorted(
+        bridge_window_id
+        for bridge_window_id in active
+        if not last_seen.get(bridge_window_id) or (now - last_seen[bridge_window_id]).total_seconds() <= ORPHAN_MIN_INACTIVE_SECONDS
+    )
+
+
+def _parse_event_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _should_auto_dispatch_after_build(

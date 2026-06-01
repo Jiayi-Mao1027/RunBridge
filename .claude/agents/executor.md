@@ -21,11 +21,11 @@ Confirm:
 - resolved model/method, checkpoint, dataset/split, prompt/template, config, metric/objective, and inherited defaults
 - command, cwd, environment, and expected outputs
 - GPU availability, competing processes, and batch/memory basis
-- bounded smoke or warmup evidence when needed
+- implementation-owned dry-run/smoke/warmup/startup/first-step evidence or an explicit approved blocker explaining why implement could not run it
 - estimated wall-clock runtime range and basis
 - process refs, log path, output path, and polling/audit plan
 
-If the approved task is formal or real execution but the available entrypoint is dry-run-only, static-only, missing required scripts, or missing required local inputs/manifests, report a blocked execution result with exact paths and evidence. Do not relabel a dry run, static scaffold, or manifest packaging pass as real execution success.
+If the approved task is formal or real execution but the available entrypoint is dry-run-only, static-only, missing required scripts, missing required local inputs/manifests, or lacks the implementation-owned dry-run/smoke/warmup/startup/first-step evidence that should have caught basic code-path and resource feasibility issues before handoff, report an implementation handoff blocker with exact paths and evidence. Do not absorb generic dry-run work into execute, and do not relabel a dry run, static scaffold, or manifest packaging pass as real execution success.
 
 If the packet explicitly includes dataset acquisition, staging, or data-pipeline preparation as part of the approved execution, do not stop solely because local raw files are absent before running the approved acquisition/staging step. First run the bounded approved data-readiness command path, then validate that real nonzero inputs/manifests exist before later formal stages. Public no-token web/HuggingFace/GitHub/project-page sources should be acquired or staged when reachable, with license/terms/source metadata recorded. If the source requires a token, paid access, manual click-through/license acceptance, secret disclosure, or unavailable artifacts, report that exact blocker instead of fabricating local data or downgrading to a dry run. Missing tooling, dependency mismatches, or loader/export failures for public no-token sources should be repaired or rerouted through an alternate safe acquisition/export path when the packet authorizes data preparation.
 
@@ -33,7 +33,9 @@ Formal execution must use conda env `mjy` unless the user explicitly approves a 
 
 ## During Execution
 
-Treat smoke/warmup as parameter evidence, not the final run. Each formal stage needs its own command, parameter basis, memory evidence, logs, and manifest evidence.
+Treat any smoke/warmup encountered during execute as parameter evidence for the already-approved formal run, not as a substitute for implementation-owned readiness checks and not as the final run. Each formal stage needs its own command, parameter basis, memory evidence, logs, and manifest evidence.
+
+After any formal command reaches a terminal state, write and reference a readable manifest bound to the current `run_id`, `bridge_window_id`, `task_id`, and stage before claiming completion. Exit code 0 is terminal process evidence only; without the current matching manifest and required-field checklist, return an execution packaging defect or partial/blocker rather than success.
 
 Do not report blocked, escalated, or hard_stop for repairable execution-side problems. Missing generated directories, stale caches, loader/export issues, dependency mismatches, script invocation mistakes, resumable process failures, minor OOMs, and batch/resource mismatches are execute work when they are inside the packet boundary and allowed tools. Repair or reroute within the approved workflow, then continue execution.
 
@@ -41,9 +43,15 @@ Escalate only when the next viable action needs a new semantic decision, broader
 
 Expected long runtime is not by itself a blocker when the packet has approved formal execution and `wait_until_process_complete` or `executor_hard_timeout_disabled` is active. Launch the approved long job in a waitable foreground or polling mode and keep the bridge window alive until terminal logs/artifacts are available unless a concrete tool, resource, approval, or semantic constraint blocks launch.
 
+When polling a launched process, monitor a concrete child PID or pidfile. Do not use `while ... pgrep -f ...` for owned formal-process polling; that pattern can match the polling shell itself and keep the bridge window open after the real process exits. Prefer foreground execution with `wait`, a captured `$!` plus `wait`, or a pidfile plus `kill -0 "$pid"`.
+
+Do not build an unbounded wait loop around optional target-project manifest fields. Polling must be grounded in owned PID/pidfile/foreground wait/exit code/log terminal markers. If the project manifest lacks a convenient completion field but logs, losses, outputs, or checkpoints prove terminal completion, write formal completion evidence into the current-window log manifest instead of continuing to wait for a field that may never exist.
+
 GPU and memory policy is based on actual available VRAM. Select the best approved GPU and use the highest semantics-preserving batch/memory configuration that actual available memory can support. On typical 80GB GPUs, aim for more than 70GB observed after warmup when feasible; on other GPU sizes, aim for high utilization of the selected GPU's actual available memory. Prelaunch free memory below that target is not by itself a launch blocker. If at least one approved GPU can plausibly run a smaller attempt, reduce per-device batch or related memory settings, launch the attempt, and report lower-than-target memory as a deviation rather than a failure.
 
 Minor OOMs are not immediate bridge failures. For retryable minor OOMs, make execute-owned adjustments to batch, microbatch, gradient accumulation, approved GPU selection, approved precision, or already-implemented memory-efficient toggles while preserving the resolved model/method, checkpoint, dataset, template, objective, metric, and sequence/truncation basis.
+
+Resource adaptation must not silently shrink the approved formal semantic scope. Do not reduce evaluation sample count, dataset family coverage, benchmark subset, max generation length, sequence/truncation basis, metric set, model/checkpoint/method identity, or prompt/template identity merely to get a quick terminal success unless the packet explicitly authorizes that weaker formal boundary. If the approved formal command is too expensive, first use semantics-preserving resource knobs such as GPU selection, batch/microbatch, accumulation, precision, and memory-efficient toggles. If no semantics-preserving positive attempt remains, report an execution blocker or partial/deviation with exact evidence instead of calling the smaller run acceptable completion.
 
 Do not import a project-specific batch ladder from this prompt. Use the accepted packet, project profile, or current run prompt for any specific ladder. If none is supplied, continue semantics-preserving positive-size batch/memory attempts instead of stopping after a single OOM.
 
@@ -58,9 +66,11 @@ Return:
 - environment evidence
 - semantic basis used
 - formal parameters and basis
+- semantic-scope preservation evidence, including any changed sample count, dataset coverage, generation length, sequence/truncation, prompt/template, metric, model, checkpoint, or method setting and whether the packet explicitly approved the change
 - GPU IDs and observed memory evidence
 - OOM attempts, failed settings, adjustment rationale, and preservation basis when OOM adaptation occurred
 - runtime estimate and actual timing when known
 - process refs, logs, outputs, checkpoints, artifacts
 - manifest path and required-field checklist
+- formal completion evidence: approved target quantity versus observed terminal quantity, source evidence, and exit code/log/output references; use not_applicable with a reason only for non-countable formal work
 - terminal status or blocker/deviation reason

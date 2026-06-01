@@ -15,6 +15,7 @@ import sys
 import threading
 from typing import Any
 from urllib.parse import urlsplit
+import uuid
 
 from .adapters import OuterLeaderEventSink
 
@@ -118,7 +119,13 @@ class ClaudeAgentSdkOuterLeaderAdapter:
 
         client = await self._ensure_client(sdk, request)
         prompt = _build_user_prompt(request)
-        start_payload = {"session_id": request.get("main_session_id"), "input_id": request.get("input_id")}
+        query_session_id = _outer_claude_query_session_id(request)
+        start_payload = {
+            "session_id": query_session_id,
+            "main_session_id": request.get("main_session_id"),
+            "outer_claude_session_id": _outer_claude_native_session_id(request) or None,
+            "input_id": request.get("input_id"),
+        }
         if self._options_diagnostics:
             start_payload["outer_leader_options"] = self._options_diagnostics
             if self._options_diagnostics.get("settings_diagnostics"):
@@ -130,7 +137,7 @@ class ClaudeAgentSdkOuterLeaderAdapter:
             start_payload,
         )
         try:
-            await client.query(prompt, session_id=str(request.get("main_session_id") or "default"))
+            await client.query(prompt, session_id=query_session_id)
         except TypeError:
             await client.query(prompt)
 
@@ -153,7 +160,12 @@ class ClaudeAgentSdkOuterLeaderAdapter:
             event_sink,
             request,
             "sdk_stream_final",
-            {"session_id": request.get("main_session_id"), "message_count": len(messages)},
+            {
+                "session_id": query_session_id,
+                "main_session_id": request.get("main_session_id"),
+                "outer_claude_session_id": _outer_claude_native_session_id(request) or None,
+                "message_count": len(messages),
+            },
             status="completed",
         )
         return _sdk_result(request, messages, result_message, handled_by=self.name)
@@ -197,9 +209,14 @@ class ClaudeAgentSdkOuterLeaderAdapter:
             "PYTHONNOUSERSITE": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
         }
+        outer_claude_session_id = _outer_claude_native_session_id(request)
+        if outer_claude_session_id:
+            env["BRIDGE_OUTER_CLAUDE_SESSION_ID"] = outer_claude_session_id
+            env["CLAUDE_CONTROL_OUTER_CLAUDE_SESSION_ID"] = outer_claude_session_id
         env.update(_bridge_process_env_overrides(control_root, cli_info, repo_root))
         env.update(_settings_env(settings_path))
         env.update(cli_info.get("env") or {})
+        _ensure_loopback_provider_no_proxy(env)
         _ensure_env_api_key_alias(env)
         env["ANTHROPIC_MODEL"] = leader_model
         env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = leader_model
@@ -345,6 +362,7 @@ def _materialize_outer_leader_settings(
         if isinstance(hook_payload, dict) and isinstance(hook_payload.get("hooks"), dict):
             payload = {**payload, "hooks": _filter_claude_cli_hooks(hook_payload["hooks"])}
     normalized = _normalize_hook_commands(payload, claude_root / "hooks")
+    _ensure_settings_loopback_provider_no_proxy(normalized)
     _ensure_settings_api_key_alias(normalized)
     target = claude_root / "runtime_state" / "generated" / "outer_leader_settings.json"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -790,6 +808,8 @@ def _options_diagnostics(values: dict[str, Any], settings_path: Path | None, cli
             and settings_env.get("ANTHROPIC_API_KEY") == settings_env.get("ANTHROPIC_AUTH_TOKEN"),
             "settings_has_http_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTP_PROXY")),
             "settings_has_https_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTPS_PROXY")),
+            "settings_has_no_proxy": _has_nonempty(_env_value_ci(settings_env, "NO_PROXY")),
+            "settings_no_proxy_has_loopback": _no_proxy_includes_loopback(settings_env),
             "subprocess_env_has_anthropic_base_url": _has_nonempty(env.get("ANTHROPIC_BASE_URL")),
             "subprocess_anthropic_base_url": _safe_url_preview(env.get("ANTHROPIC_BASE_URL")),
             "subprocess_env_has_anthropic_auth_token": _has_nonempty(env.get("ANTHROPIC_AUTH_TOKEN")),
@@ -801,6 +821,8 @@ def _options_diagnostics(values: dict[str, Any], settings_path: Path | None, cli
             "subprocess_default_haiku_model": env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
             "subprocess_env_has_http_proxy": _has_nonempty(_env_value_ci(env, "HTTP_PROXY")),
             "subprocess_env_has_https_proxy": _has_nonempty(_env_value_ci(env, "HTTPS_PROXY")),
+            "subprocess_env_has_no_proxy": _has_nonempty(_env_value_ci(env, "NO_PROXY")),
+            "subprocess_no_proxy_has_loopback": _no_proxy_includes_loopback(env),
         },
     }
 
@@ -830,9 +852,14 @@ def outer_leader_startup_diagnostics(
         "PYTHONNOUSERSITE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    outer_claude_session_id = _outer_claude_native_session_id(request)
+    if outer_claude_session_id:
+        env["BRIDGE_OUTER_CLAUDE_SESSION_ID"] = outer_claude_session_id
+        env["CLAUDE_CONTROL_OUTER_CLAUDE_SESSION_ID"] = outer_claude_session_id
     env.update(_bridge_process_env_overrides(control, cli_info, repo))
     env.update(_settings_env(settings_path))
     env.update(cli_info.get("env") or {})
+    _ensure_loopback_provider_no_proxy(env)
     _ensure_env_api_key_alias(env)
     env["ANTHROPIC_MODEL"] = leader_model
     env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = leader_model
@@ -1133,13 +1160,17 @@ def _sdk_result(
             {
                 "summary": summary,
                 "source": "outer_leader_sdk",
-                "session_id": request.get("main_session_id"),
+                "session_id": _outer_claude_query_session_id(request),
+                "main_session_id": request.get("main_session_id"),
+                "outer_claude_session_id": _outer_claude_native_session_id(request) or None,
                 "message_count": len(messages),
             }
         ],
         "artifact_refs": [],
         "evidence": {
-            "outer_sdk_session_id": request.get("main_session_id"),
+            "outer_sdk_session_id": _outer_claude_query_session_id(request),
+            "main_session_id": request.get("main_session_id"),
+            "outer_claude_session_id": _outer_claude_native_session_id(request) or None,
             "sdk_message_count": len(messages),
             "result_subtype": subtype,
             "runtime_event_id": request.get("runtime_event_id"),
@@ -1389,6 +1420,75 @@ def _env_value_ci(env: dict[Any, Any], key: str) -> Any:
     return None
 
 
+_LOOPBACK_NO_PROXY_ENTRIES = ("127.0.0.1", "localhost", "::1")
+
+
+def _is_loopback_provider_base_url(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return False
+    host = (parts.hostname or "").strip().lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _merge_no_proxy_entries(*values: Any) -> str:
+    entries: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for item in str(value or "").split(","):
+            entry = item.strip()
+            if not entry:
+                continue
+            key = entry.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(entry)
+    for entry in _LOOPBACK_NO_PROXY_ENTRIES:
+        key = entry.lower()
+        if key not in seen:
+            seen.add(key)
+            entries.append(entry)
+    return ",".join(entries)
+
+
+def _ensure_loopback_provider_no_proxy(env: dict[str, str]) -> bool:
+    base_url = env.get("ANTHROPIC_BASE_URL") or env.get("CLAUDE_CODE_API_BASE_URL")
+    if not _is_loopback_provider_base_url(base_url):
+        return False
+    merged = _merge_no_proxy_entries(_env_value_ci(env, "NO_PROXY"), _env_value_ci(env, "no_proxy"))
+    env["NO_PROXY"] = merged
+    env["no_proxy"] = merged
+    return True
+
+
+def _ensure_settings_loopback_provider_no_proxy(settings_payload: dict[str, Any]) -> bool:
+    env = settings_payload.get("env")
+    if not isinstance(env, dict):
+        return False
+    base_url = env.get("ANTHROPIC_BASE_URL") or env.get("CLAUDE_CODE_API_BASE_URL")
+    if not _is_loopback_provider_base_url(base_url):
+        return False
+    merged = _merge_no_proxy_entries(_env_value_ci(env, "NO_PROXY"), _env_value_ci(env, "no_proxy"))
+    env["NO_PROXY"] = merged
+    env["no_proxy"] = merged
+    return True
+
+
+def _no_proxy_includes_loopback(env: dict[Any, Any]) -> bool:
+    entries = {
+        item.strip().lower()
+        for value in (_env_value_ci(env, "NO_PROXY"), _env_value_ci(env, "no_proxy"))
+        for item in str(value or "").split(",")
+        if item.strip()
+    }
+    return all(entry.lower() in entries for entry in _LOOPBACK_NO_PROXY_ENTRIES)
+
+
 def _safe_url_preview(value: Any) -> str | None:
     raw = str(value or "").strip()
     if not raw:
@@ -1474,6 +1574,32 @@ def _env_float(name: str) -> float | None:
 
 def _sdk_timeout_seconds() -> int | None:
     return _env_int("OUTER_LEADER_SDK_TIMEOUT_SECONDS")
+
+
+def _outer_claude_query_session_id(request: dict[str, Any]) -> str:
+    return _outer_claude_native_session_id(request) or str(request.get("main_session_id") or "default")
+
+
+def _outer_claude_native_session_id(request: dict[str, Any]) -> str:
+    session_id = str(
+        request.get("outer_claude_session_id")
+        or request.get("outerClaudeSessionId")
+        or request.get("claude_session_id")
+        or request.get("claudeSessionId")
+        or ""
+    ).strip()
+    if _looks_like_uuid(session_id):
+        return session_id
+    main_session_id = str(request.get("main_session_id") or "").strip()
+    return main_session_id if _looks_like_uuid(main_session_id) else ""
+
+
+def _looks_like_uuid(value: Any) -> bool:
+    try:
+        uuid.UUID(str(value or "").strip())
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _now_iso() -> str:

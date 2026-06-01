@@ -643,8 +643,8 @@ def simulated_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
     task_spec = packet.get("task_spec", {})
     completion_contract = packet.get("completion_contract", {}) if isinstance(packet.get("completion_contract"), dict) else {}
     required_artifacts = completion_contract.get("required_artifacts")
-    artifact_refs = [str(item) for item in required_artifacts] if isinstance(required_artifacts, list) else []
-    manifest_required = "log_manifest" in artifact_refs
+    required_artifact_names = [str(item) for item in required_artifacts] if isinstance(required_artifacts, list) else []
+    manifest_required = "log_manifest" in required_artifact_names
     configured_manifest_fields = completion_contract.get("manifest_required_fields")
     manifest_fields = [str(item) for item in configured_manifest_fields] if isinstance(configured_manifest_fields, list) else []
     if manifest_required and not manifest_fields:
@@ -686,6 +686,26 @@ def simulated_team_executor(execution_input: dict[str, Any]) -> dict[str, Any]:
         field: manifest_defaults.get(field, "not_applicable: simulated executor")
         for field in manifest_fields
     } if manifest_required else {}
+    manifest_path: Path | None = None
+    if manifest_required:
+        artifact_dir = Path(os.environ.get("RUNBRIDGE_SIMULATED_ARTIFACT_DIR") or os.environ.get("TMPDIR") or os.environ.get("TEMP") or ".").expanduser()
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        safe_run = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(execution_input.get("run_id") or "run"))
+        safe_window = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(execution_input.get("bridge_window_id") or "bridge"))
+        manifest_path = artifact_dir / f"{safe_run}_{safe_window}_log_manifest.json"
+        manifest_payload = {
+            **manifest_defaults,
+            **manifest_checklist,
+            "environment_evidence": {"executor": "simulated_team_executor"},
+            "process_refs": [{"status": "succeeded", "executor": "simulated_team_executor"}],
+            "log_files": [{"path": "simulated.log", "status": "not_applicable"}],
+            "produced_artifacts": [{"path": "simulated_artifact", "status": "not_applicable"}],
+        }
+        manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    artifact_refs = [
+        str(manifest_path) if item == "log_manifest" and manifest_path is not None else item
+        for item in required_artifact_names
+    ]
     coverage_items = task_spec.get("instruction_coverage_checklist") if isinstance(task_spec.get("instruction_coverage_checklist"), list) else []
     instruction_coverage = {str(item): "completed" for item in coverage_items if str(item)}
     if not instruction_coverage:
@@ -770,7 +790,7 @@ def _run_runtime_owned_teammate_fallback(
     reports: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     attempts: list[dict[str, Any]] = []
-    for teammate_name in teammate_names:
+    for teammate_index, teammate_name in enumerate(teammate_names):
         max_attempts = _runtime_owned_teammate_retry_attempts()
         final_failure: dict[str, Any] | None = None
         for attempt_index in range(1, max_attempts + 1):
@@ -813,6 +833,12 @@ def _run_runtime_owned_teammate_fallback(
                 )
                 if observed_after_attempt is not None:
                     attempt_record["observed_activity_before_retry"] = True
+                    if _runtime_owned_should_salvage_after_observed_activity(packet, teammate_name, error_or_null):
+                        attempt_record["retry_after_observed_activity"] = False
+                        attempt_record["salvaged_after_observed_activity"] = True
+                        reports.append(observed_after_attempt)
+                        final_failure = None
+                        break
                     attempt_record["retry_after_observed_activity"] = True
             if attempt_index >= max_attempts or not _runtime_owned_teammate_error_retryable(error_or_null):
                 break
@@ -841,7 +867,54 @@ def _run_runtime_owned_teammate_fallback(
                     }
                 )
             else:
-                failures.append(final_failure)
+                transport_blocked_report = _runtime_owned_blocked_report_from_transport_failure(
+                    execution_input=execution_input,
+                    packet=packet,
+                    teammate_name=teammate_name,
+                    failure=final_failure,
+                )
+                if transport_blocked_report is not None:
+                    reports.append(transport_blocked_report)
+                    error_or_null = final_failure.get("error_or_null") if isinstance(final_failure.get("error_or_null"), dict) else {}
+                    skipped_teammates = teammate_names[teammate_index + 1 :]
+                    attempts.append(
+                        {
+                            "teammate": teammate_name,
+                            "adapter": "provider-transport-blocked-report",
+                            "runtime_teammate_attempt_index": "post_attempt_transport_reconciliation",
+                            "error_type": error_or_null.get("type"),
+                            "continue_remaining_teammates": False,
+                            "blocked_report_recorded": True,
+                            "provider_circuit_breaker_triggered": True,
+                            "skipped_teammates": skipped_teammates,
+                        }
+                    )
+                    result = _runtime_owned_bridge_result_from_teammate_reports(
+                        packet=packet,
+                        execution_input=execution_input,
+                        reports=reports,
+                        original_result=original_result,
+                        prompt_path=prompt_path,
+                        transport=transport,
+                        attempts=attempts,
+                    )
+                    evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else {}
+                    if isinstance(evidence, dict):
+                        evidence["failure_classification"] = "provider_transport_failure"
+                        evidence["provider_transport_error"] = error_or_null
+                        evidence["cooldown_required"] = True
+                        evidence["provider_circuit_breaker_triggered"] = True
+                        evidence["attempted_teammates"] = teammate_names[: teammate_index + 1]
+                        evidence["skipped_teammates"] = skipped_teammates
+                        result["evidence"] = evidence
+                    error = result.get("error_or_null") if isinstance(result.get("error_or_null"), dict) else None
+                    if error is not None:
+                        error.setdefault("provider_transport_error", error_or_null)
+                        error.setdefault("cooldown_required", True)
+                        error.setdefault("skipped_teammates", skipped_teammates)
+                    return result
+                else:
+                    failures.append(final_failure)
 
     if failures:
         provider_transport_error = _first_provider_transport_error(failures)
@@ -873,7 +946,7 @@ def _run_runtime_owned_teammate_fallback(
                 **{k: v for k, v in provider_transport_error.items() if k not in {"type", "message"}},
             }
         return {
-            "status": "failed",
+            "status": _runtime_owned_fallback_status_from_reports_and_failures(reports, failures),
             "reports": reports,
             "artifact_refs": [],
             "evidence": evidence,
@@ -895,26 +968,34 @@ def _run_runtime_owned_teammate_fallback(
 def _runtime_owned_teammate_fallback_allowed(packet: dict[str, Any], result: dict[str, Any]) -> bool:
     phase = str(packet.get("target_phase") or "").strip()
     if phase == "l4_execute":
-        return _is_agent_dispatch_contract_violation(result)
+        return _is_runtime_owned_fallback_selected(result) or _is_agent_dispatch_contract_violation(result)
     if phase == "l3_bridge":
         return (
-            _is_agent_dispatch_contract_violation(result)
+            _is_runtime_owned_fallback_selected(result)
+            or _is_agent_dispatch_contract_violation(result)
             or _is_bridge_leader_cli_unavailable(result)
             or _is_provider_transport_result(result)
         )
     if phase == "l4_implement":
         return (
-            _is_agent_dispatch_contract_violation(result)
+            _is_runtime_owned_fallback_selected(result)
+            or _is_agent_dispatch_contract_violation(result)
             or _is_bridge_leader_cli_unavailable(result)
             or _is_provider_transport_result(result)
         )
     if phase == "l4_anomaly":
         return (
-            _is_agent_dispatch_contract_violation(result)
+            _is_runtime_owned_fallback_selected(result)
+            or _is_agent_dispatch_contract_violation(result)
             or _is_bridge_leader_cli_unavailable(result)
         )
     if phase == "l2_advisory":
-        return _is_bridge_leader_cli_unavailable(result)
+        return (
+            _is_runtime_owned_fallback_selected(result)
+            or _is_agent_dispatch_contract_violation(result)
+            or _is_bridge_leader_cli_unavailable(result)
+            or _is_bridge_leader_output_contract_failure(result)
+        )
     return False
 
 
@@ -971,9 +1052,62 @@ def _runtime_owned_blocked_report_from_observed_activity(
     )
 
 
+def _runtime_owned_blocked_report_from_transport_failure(
+    *,
+    execution_input: dict[str, Any],
+    packet: dict[str, Any],
+    teammate_name: str,
+    failure: dict[str, Any],
+) -> dict[str, Any] | None:
+    error_or_null = failure.get("error_or_null")
+    if not isinstance(error_or_null, dict):
+        return None
+    error_type = str(error_or_null.get("type") or "").strip()
+    is_provider_transport = _is_provider_transport_error_type(error_type) or _provider_transport_failure(
+        error_or_null.get("message"),
+        "",
+    ) is not None
+    if not is_provider_transport:
+        return None
+    coverage = {item: "blocked" for item in _runtime_owned_coverage_items(packet, teammate_name)}
+    refs = [
+        f"bridge_window:{execution_input.get('bridge_window_id')}",
+        f"team:{execution_input.get('team_id')}",
+        f"task:{execution_input.get('task_id')}",
+        f"runtime_owned_teammate:{teammate_name}",
+    ]
+    return _normalize_runtime_owned_teammate_report(
+        {
+            "summary": (
+                f"{teammate_name} could not return a semantic JSON teammate report because provider "
+                "transport failed before usable teammate output was available. Runtime records this as a "
+                "blocked teammate report so the bridge result remains structurally diagnosable."
+            ),
+            "instruction_coverage": coverage,
+            "semantic_identity_resolution": {
+                "disposition": "blocked",
+                "basis": "provider transport failed before runtime received a parseable semantic teammate report",
+            },
+            "classification": "provider_transport_before_teammate_report",
+            "next_action_recommendation": "repair_or_cooldown_runtime_provider_transport_before_retry",
+            "evidence_refs": [ref for ref in refs if not ref.endswith(":None")],
+        },
+        teammate_name,
+        packet,
+        "",
+        {
+            "salvaged_from_failure": failure,
+            "runtime_report_disposition": "blocked_due_to_provider_transport_before_report",
+            "provider_transport_error": error_or_null,
+        },
+    )
+
+
 def _runtime_owned_fallback_reason(result: dict[str, Any]) -> str:
     error = result.get("error_or_null") if isinstance(result, dict) and isinstance(result.get("error_or_null"), dict) else {}
     error_type = str(error.get("type") or "").strip()
+    if _is_runtime_owned_fallback_selected(result):
+        return "RuntimeOwnedTeammateFallbackSelected"
     if error_type:
         return error_type
     if _is_agent_dispatch_contract_violation(result):
@@ -1001,9 +1135,18 @@ def _runtime_owned_agent_dispatch_unavailable_result(message: str) -> dict[str, 
         "reports": [],
         "artifact_refs": [],
         "evidence": {"runtime_decision": "prefer_runtime_owned_teammate_fallback"},
-        "error_or_null": {"type": "AgentDispatchContractViolation", "message": message},
+        "error_or_null": {"type": "RuntimeOwnedTeammateFallbackSelected", "message": message},
         "cleanup_required": False,
     }
+
+
+def _is_runtime_owned_fallback_selected(result: Any) -> bool:
+    error = result.get("error_or_null") if isinstance(result, dict) and isinstance(result.get("error_or_null"), dict) else {}
+    error_type = str(error.get("type") or "").strip()
+    if error_type == "RuntimeOwnedTeammateFallbackSelected":
+        return True
+    evidence = result.get("evidence") if isinstance(result, dict) and isinstance(result.get("evidence"), dict) else {}
+    return str(evidence.get("runtime_decision") or "").strip() == "prefer_runtime_owned_teammate_fallback"
 
 
 def _is_agent_dispatch_contract_violation(result: Any) -> bool:
@@ -1042,6 +1185,17 @@ def _is_bridge_leader_cli_unavailable(result: Any) -> bool:
     }:
         return True
     return False
+
+
+def _is_bridge_leader_output_contract_failure(result: Any) -> bool:
+    error = result.get("error_or_null") if isinstance(result, dict) and isinstance(result.get("error_or_null"), dict) else {}
+    error_type = str(error.get("type") or "")
+    return error_type in {
+        "SchemaValidationFailed",
+        "BridgeResultGuardrailFailed",
+        "ClaudeCliInvalidReports",
+        "ClaudeCliMissingReports",
+    }
 
 
 def _is_provider_transport_result(result: Any) -> bool:
@@ -1125,7 +1279,7 @@ def _run_runtime_owned_teammate(
     _ensure_claude_api_key_alias(env)
     _force_bridge_model_env(env, teammate_model)
     _bind_bridge_child_session_env(env, teammate_input)
-    timeout_seconds = _runtime_owned_teammate_timeout_seconds(packet, teammate_names)
+    timeout_seconds = _runtime_owned_teammate_timeout_seconds(packet, teammate_names, teammate_name=teammate_name)
 
     attempt = {
         "teammate": teammate_name,
@@ -1292,7 +1446,7 @@ def _run_runtime_owned_teammate_print(
     env.setdefault("CLAUDE_CODE_SIMPLE", "1")
     _force_bridge_model_env(env, teammate_model)
     _bind_bridge_child_session_env(env, teammate_input)
-    timeout_seconds = _runtime_owned_teammate_timeout_seconds(packet, teammate_names)
+    timeout_seconds = _runtime_owned_teammate_timeout_seconds(packet, teammate_names, teammate_name=teammate_name)
 
     attempt = {
         "teammate": teammate_name,
@@ -1501,7 +1655,18 @@ def _teammate_assignment(packet: dict[str, Any], teammate_name: str) -> dict[str
     return {}
 
 
-def _runtime_owned_teammate_timeout_seconds(packet: dict[str, Any], teammate_names: list[str]) -> int:
+def _runtime_owned_teammate_timeout_seconds(
+    packet: dict[str, Any],
+    teammate_names: list[str],
+    *,
+    teammate_name: str | None = None,
+) -> int | None:
+    if (
+        str(packet.get("target_phase") or "") == "l4_execute"
+        and str(teammate_name or "").strip() == "executor"
+        and _executor_hard_timeout_disabled(packet)
+    ):
+        return None
     provider_retry_floor = PROVIDER_GATE_DEFAULT_COOLDOWN_SECONDS + 240
     raw = os.environ.get("BRIDGE_RUNTIME_FALLBACK_TEAMMATE_TIMEOUT_SECONDS")
     try:
@@ -1540,6 +1705,15 @@ def _runtime_owned_teammate_error_retryable(error_or_null: Any) -> bool:
         "RuntimeOwnedTeammateTimeout",
         "RuntimeOwnedTeammateNoJsonReport",
     }
+
+
+def _runtime_owned_should_salvage_after_observed_activity(packet: dict[str, Any], teammate_name: str, error_or_null: Any) -> bool:
+    if str(packet.get("target_phase") or "").strip() != "l4_execute":
+        return False
+    if str(teammate_name or "").strip() != "executor":
+        return False
+    error_type = str((error_or_null or {}).get("type") if isinstance(error_or_null, dict) else "").strip()
+    return error_type in {"RuntimeOwnedTeammateNoJsonReport", "RuntimeOwnedTeammateNoReport", "RuntimeOwnedTeammateTimeout"}
 
 
 def _run_claude_tmux_teammate(
@@ -1738,8 +1912,6 @@ def _run_claude_tmux_teammate(
 
 
 def _tmux_runtime_teammate_idle_without_report(capture: str, prompt: str) -> bool:
-    if _tmux_runtime_teammate_assistant_text(capture, prompt).strip():
-        return False
     try:
         from outer_sdk.tmux_repl_adapter import _tmux_idle_prompt_after_submit
 
@@ -1747,6 +1919,8 @@ def _tmux_runtime_teammate_idle_without_report(capture: str, prompt: str) -> boo
             return True
     except Exception:
         pass
+    if _tmux_runtime_teammate_assistant_text(capture, prompt).strip():
+        return False
     return _tmux_prompt_visible(capture[-3000:])
 
 
@@ -2054,7 +2228,7 @@ def _runtime_owned_bridge_result_from_teammate_reports(
         "artifact_refs": _runtime_owned_artifact_refs(reports),
         "evidence": {
             "runtime_owned_teammate_fallback": True,
-            "fallback_reason": "AgentDispatchContractViolation",
+            "fallback_reason": _runtime_owned_fallback_reason(original_result),
             "fallback_transport": transport,
             "prompt_file": str(prompt_path),
             "bridge_window_id": execution_input.get("bridge_window_id"),
@@ -2085,6 +2259,12 @@ def _runtime_owned_bridge_result_from_teammate_reports(
             },
         )
     return result
+
+
+def _runtime_owned_fallback_status_from_reports_and_failures(reports: list[dict[str, Any]], failures: list[dict[str, Any]]) -> str:
+    if reports and failures:
+        return "partial_or_failed"
+    return "failed"
 
 
 def _runtime_owned_report_blocked_teammates(reports: list[dict[str, Any]]) -> list[str]:
@@ -2154,7 +2334,14 @@ def _semantic_block_requires_leader_decision(report: dict[str, Any]) -> bool:
         "manual click",
         "click-through",
         "paid access",
-        "token",
+        "api token",
+        "access token",
+        "hf token",
+        "huggingface token",
+        "token required",
+        "requires token",
+        "needs token",
+        "secret token",
         "secret",
         "license acceptance",
         "unavailable artifact",
@@ -2199,9 +2386,17 @@ def _runtime_owned_transport_blocked_teammates(reports: list[dict[str, Any]]) ->
         disposition = str(evidence.get("runtime_report_disposition") or "").strip() if isinstance(evidence, dict) else ""
         if (
             classification
-            not in {"provider_transport_after_observed_teammate_activity", "no_json_report_after_observed_teammate_activity"}
+            not in {
+                "provider_transport_after_observed_teammate_activity",
+                "provider_transport_before_teammate_report",
+                "no_json_report_after_observed_teammate_activity",
+            }
             and disposition
-            not in {"blocked_due_to_provider_transport_after_tool_activity", "blocked_due_to_no_json_report_after_tool_activity"}
+            not in {
+                "blocked_due_to_provider_transport_after_tool_activity",
+                "blocked_due_to_provider_transport_before_report",
+                "blocked_due_to_no_json_report_after_tool_activity",
+            }
         ):
             continue
         teammate = str(report.get("teammate_name") or report.get("agent_type") or report.get("teammate_id") or "").strip()
@@ -2218,11 +2413,14 @@ def _bridge_result_from_observed_teammate_reports(
     original_error: dict[str, Any],
     transport: str,
 ) -> dict[str, Any] | None:
-    if str(packet.get("target_phase") or "").strip() != "l3_bridge":
+    if not _observed_teammate_report_fallback_allowed(packet):
         return None
     observed = _observed_teammate_reports(project_root, execution_input, packet)
     if not observed:
         return None
+    expected_teammates = set(_runtime_owned_teammate_names(packet))
+    observed_teammates = {str(item.get("teammate") or "").strip() for item in observed if str(item.get("teammate") or "").strip()}
+    missing_teammates = sorted(expected_teammates - observed_teammates)
     result = _runtime_owned_bridge_result_from_teammate_reports(
         packet=packet,
         execution_input=execution_input,
@@ -2248,8 +2446,21 @@ def _bridge_result_from_observed_teammate_reports(
     if isinstance(evidence, dict):
         evidence["observed_teammate_report_fallback"] = True
         evidence["original_transport_error"] = original_error
+        evidence["missing_observed_teammate_reports"] = missing_teammates
         result["evidence"] = evidence
+    if missing_teammates and result.get("status") == "succeeded":
+        result["status"] = "partial_or_failed"
+        result["error_or_null"] = {
+            "type": "ObservedTeammateReportsMissing",
+            "message": "observed teammate report fallback did not recover every contracted teammate report",
+            "missing_teammates": missing_teammates,
+        }
     return result
+
+
+def _observed_teammate_report_fallback_allowed(packet: dict[str, Any]) -> bool:
+    phase = str(packet.get("target_phase") or "").strip()
+    return phase in {"l3_bridge", "l4_anomaly"}
 
 
 def _observed_teammate_reports(project_root: Path, execution_input: dict[str, Any], packet: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2454,6 +2665,13 @@ def _bridge_leader_prompt(packet: dict[str, Any], execution_input: dict[str, Any
         "the terminal logs/artifacts. TeamIdle is only waiting/progress evidence. Do not return status partial, "
         "partial_or_failed, or succeeded while an owned process is still running; record progress and continue "
         "waiting or polling inside this bridge window.\n\n"
+        "L4 execute resource-utilization guard: before treating TeamIdle or teammate completion as finish-ready "
+        "for a formal GPU stage, inspect current selected-device availability, observed VRAM/process evidence, "
+        "batch or microbatch basis, and semantics-preserving resource adaptation options. If utilization is "
+        "materially low and packet-bound resource knobs remain, keep the team working in L4 execute; otherwise "
+        "record the observed-vs-available disposition as best-available, deviation, or blocker with evidence. "
+        "Do not enforce a fixed numeric threshold in bridge-leader; use executor/postrun guidance and actual "
+        "model, stage, and device constraints.\n\n"
         f"Runtime binding:\n{json.dumps(binding, ensure_ascii=False, indent=2)}\n\n"
         "BridgePacket compact summary:\n"
         f"{json.dumps(_bridge_packet_summary_for_prompt(packet, agent_inputs), ensure_ascii=False, indent=2)}"
@@ -4427,6 +4645,8 @@ def _settings_diagnostics(cmd: list[str], env: dict[str, str], project_root: Pat
         "settings_has_anthropic_auth_token": _has_nonempty(settings_env.get("ANTHROPIC_AUTH_TOKEN")),
         "settings_has_http_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTP_PROXY")),
         "settings_has_https_proxy": _has_nonempty(_env_value_ci(settings_env, "HTTPS_PROXY")),
+        "settings_has_no_proxy": _has_nonempty(_env_value_ci(settings_env, "NO_PROXY")),
+        "settings_no_proxy_has_loopback": _no_proxy_includes_loopback(settings_env),
         "effective_anthropic_base_url": _safe_url_preview(_effective_anthropic_base_url(project_root=project_root, settings_path=settings_path)),
         "claude_print_bare_mode": "--bare" in cmd,
         "subprocess_env_has_anthropic_base_url": _has_nonempty(env.get("ANTHROPIC_BASE_URL")),
@@ -4438,6 +4658,8 @@ def _settings_diagnostics(cmd: list[str], env: dict[str, str], project_root: Pat
         "subprocess_claude_code_simple": env.get("CLAUDE_CODE_SIMPLE"),
         "subprocess_env_has_http_proxy": _has_nonempty(_env_value_ci(env, "HTTP_PROXY")),
         "subprocess_env_has_https_proxy": _has_nonempty(_env_value_ci(env, "HTTPS_PROXY")),
+        "subprocess_env_has_no_proxy": _has_nonempty(_env_value_ci(env, "NO_PROXY")),
+        "subprocess_no_proxy_has_loopback": _no_proxy_includes_loopback(env),
     }
 
 
@@ -4472,6 +4694,7 @@ def _merge_claude_command_env_into_subprocess_env(env: dict[str, str], project_r
     command_env, _parts = _configured_claude_command(project_root)
     for key, value in command_env.items():
         env[key] = value
+    _ensure_loopback_provider_no_proxy(env)
     return sorted(command_env.keys())
 
 
@@ -4616,6 +4839,75 @@ def _env_value_ci(env: dict[Any, Any], key: str) -> Any:
     return None
 
 
+_LOOPBACK_NO_PROXY_ENTRIES = ("127.0.0.1", "localhost", "::1")
+
+
+def _is_loopback_provider_base_url(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return False
+    host = (parts.hostname or "").strip().lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _merge_no_proxy_entries(*values: Any) -> str:
+    entries: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for item in str(value or "").split(","):
+            entry = item.strip()
+            if not entry:
+                continue
+            key = entry.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(entry)
+    for entry in _LOOPBACK_NO_PROXY_ENTRIES:
+        key = entry.lower()
+        if key not in seen:
+            seen.add(key)
+            entries.append(entry)
+    return ",".join(entries)
+
+
+def _ensure_loopback_provider_no_proxy(env: dict[str, str]) -> bool:
+    base_url = env.get("ANTHROPIC_BASE_URL") or env.get("CLAUDE_CODE_API_BASE_URL")
+    if not _is_loopback_provider_base_url(base_url):
+        return False
+    merged = _merge_no_proxy_entries(_env_value_ci(env, "NO_PROXY"), _env_value_ci(env, "no_proxy"))
+    env["NO_PROXY"] = merged
+    env["no_proxy"] = merged
+    return True
+
+
+def _ensure_settings_loopback_provider_no_proxy(settings_payload: dict[str, Any]) -> bool:
+    env = settings_payload.get("env")
+    if not isinstance(env, dict):
+        return False
+    base_url = env.get("ANTHROPIC_BASE_URL") or env.get("CLAUDE_CODE_API_BASE_URL")
+    if not _is_loopback_provider_base_url(base_url):
+        return False
+    merged = _merge_no_proxy_entries(_env_value_ci(env, "NO_PROXY"), _env_value_ci(env, "no_proxy"))
+    env["NO_PROXY"] = merged
+    env["no_proxy"] = merged
+    return True
+
+
+def _no_proxy_includes_loopback(env: dict[Any, Any]) -> bool:
+    entries = {
+        item.strip().lower()
+        for value in (_env_value_ci(env, "NO_PROXY"), _env_value_ci(env, "no_proxy"))
+        for item in str(value or "").split(",")
+        if item.strip()
+    }
+    return all(entry.lower() in entries for entry in _LOOPBACK_NO_PROXY_ENTRIES)
+
+
 def _safe_url_preview(value: Any) -> str | None:
     raw = str(value or "").strip()
     if not raw:
@@ -4642,6 +4934,7 @@ def _materialize_bridge_settings(source: Path, *, hook_settings: Path | None = N
     claude_root = (claude_root.expanduser().resolve() if claude_root else (source.parent.parent if source.parent.name == "hooks" else source.parent))
     payload = _merge_authoritative_hooks(_read_settings_payload_strict(source), hook_settings)
     normalized = _normalize_hook_commands(payload, claude_root)
+    _ensure_settings_loopback_provider_no_proxy(normalized)
     target = claude_root / "runtime_state" / "generated" / "bridge_hooks_settings.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -4799,7 +5092,7 @@ def _agent_model_override(name: str) -> str:
 
 
 def _allowed_model_names() -> set[str]:
-    raw = os.environ.get("BRIDGE_ALLOWED_MODELS", "gpt-main,sonnet-main,deepseek-main,seepseek-main")
+    raw = os.environ.get("BRIDGE_ALLOWED_MODELS", "gpt-main,deepseek-main")
     raw = raw.strip()
     if raw in {"", "*", "any", "ANY"}:
         return set()
@@ -5117,6 +5410,7 @@ def _resolve_claude_cli_path(value: str, env: dict[str, str] | None = None) -> s
             resolved = _resolve_claude_from_home(env_home)
             if resolved:
                 return resolved
+            return value
     resolved = shutil.which(value)
     if resolved:
         return resolved

@@ -29,6 +29,7 @@ DEFAULT_RETRY_POLICIES: dict[str, dict[str, Any]] = {
             "ProviderTransportConnectionRefused",
             "ProviderTransportRateLimited",
             "ProviderTransportReset",
+            "ProviderApiRetryTimeout",
             "ProviderGateTimeout",
         ],
     },

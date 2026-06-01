@@ -17,6 +17,7 @@ from common import (
     bash_execution_soft_reminders,
     detect_run_id,
     emit_observer_record,
+    executor_bash_pretool_denial,
     invoke_runtime_event,
     load_last_bridge_packet,
     now_iso,
@@ -49,6 +50,16 @@ def main() -> int:
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     if tool_name:
         _emit_tool_event(payload, tool_input, tool_name, status="started")
+    bash_denial = executor_bash_pretool_denial(tool_name, tool_input, observer_binding(payload, tool_input))
+    if bash_denial:
+        _emit_tool_event(
+            payload,
+            tool_input,
+            tool_name,
+            status="denied",
+            extra={"executor_command_guard": {"decision": "deny", "reason": "self_matching_pgrep_f_poll_loop"}},
+        )
+        return pretool_deny(bash_denial)
     if tool_name == "Agent":
         contract_denial = _bridge_agent_contract_denial(payload, tool_input)
         if contract_denial:

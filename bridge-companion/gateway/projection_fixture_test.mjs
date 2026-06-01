@@ -13,6 +13,8 @@ const runRoot = path.join(projectsRoot, repoKey, "runs", runId);
 process.env.BRIDGE_RUNTIME_PROJECTS_ROOT = projectsRoot;
 process.env.BRIDGE_SESSION_OBSERVER_ROOT = path.join(tmpRoot, "session_observer");
 process.env.BRIDGE_RUNTIME_REGISTRY_ROOT = path.join(tmpRoot, "registry");
+delete process.env.BRIDGE_OUTER_HOST_URL;
+delete process.env.OUTER_SDK_HOST_URL;
 
 const { buildProjection, closeSseClients, filterEvents, redactForResponse, requestHandler, submitLeaderInput } = await import("./server.mjs");
 
@@ -163,6 +165,24 @@ try {
     },
     sequence: 1
   });
+  await appendJsonl(path.join(runRoot, "teammate_reports.jsonl"), {
+    timestamp: "2026-05-11T00:00:02.250Z",
+    event_type: "teammate_reports",
+    run_id: runId,
+    bridge_window_id: "bw_projection",
+    team_id: "team_projection",
+    task_id: "task_projection",
+    teammate_id: "bridge-leader",
+    agent_type: "bridge-leader",
+    report: {
+      agent_type: "chiefmate-a",
+      teammate_name: "chiefmate-a",
+      summary: "nested analyst report done",
+      instruction_coverage: { "inspect ambiguity": "completed" },
+      evidence_refs: ["event:evt_nested_report"]
+    },
+    sequence: 2
+  });
   await appendJsonl(path.join(runRoot, "transitions.jsonl"), {
     timestamp: "2026-05-11T00:00:03.500Z",
     event_kind: "bridge_window_opened",
@@ -274,6 +294,38 @@ try {
     status: "streaming",
     message_preview: "├ chiefmate-a (blueprint review A) · 16 tool uses · 0 tokens\n│ ⎿ Done"
   });
+  await appendJsonl(path.join(runRoot, "sdk_stream_events.jsonl"), {
+    timestamp: "2026-05-11T00:00:05.300Z",
+    event_type: "sdk_stream_tool_use",
+    run_id: runId,
+    bridge_window_id: "bw_projection",
+    team_id: "team_projection",
+    task_id: "task_projection_chiefmate-b",
+    session_id: "sess_chiefmate_b",
+    agent_id: "chiefmate-b",
+    agent_type: "chiefmate-b",
+    teammate_id: "chiefmate-b",
+    status: "streaming",
+    tool_name: "Read",
+    tool_use_id: "tool_sdk_read_b",
+    message_preview: "assistant"
+  });
+  await appendJsonl(path.join(runRoot, "sdk_stream_events.jsonl"), {
+    timestamp: "2026-05-11T00:00:05.350Z",
+    event_type: "sdk_stream_tool_result",
+    run_id: runId,
+    bridge_window_id: "bw_projection",
+    team_id: "team_projection",
+    task_id: "task_projection_chiefmate-b",
+    session_id: "sess_chiefmate_b",
+    agent_id: "chiefmate-b",
+    agent_type: "chiefmate-b",
+    teammate_id: "chiefmate-b",
+    status: "streaming",
+    tool_name: "Read",
+    tool_use_id: "tool_sdk_read_b",
+    message_preview: "user"
+  });
   const longLeaderPrefix = "long duplicate leader report ".repeat(12).slice(0, 260);
   const longLeaderReport = `${longLeaderPrefix} full-tail-marker`;
   await appendJsonl(path.join(runRoot, "outer_host_events.jsonl"), {
@@ -305,6 +357,67 @@ try {
     status: "succeeded",
     result: longLeaderReport
   });
+  const reportFallbackNote = "system convergence note ".repeat(16);
+  await appendJsonl(path.join(runRoot, "outer_host_events.jsonl"), {
+    schema_version: "outer_sdk_host_event.v1",
+    timestamp: "2026-05-11T00:00:06.750Z",
+    event_kind: "outer_leader_result",
+    source: "outer_sdk_host",
+    authority: "source",
+    run_id: runId,
+    repo_key: repoKey,
+    payload: {
+      leader_result: {
+        status: "succeeded",
+        handled_by: "outer_sdk_host_latest_bridge_reports",
+        reports: [
+          { summary: reportFallbackNote },
+          { source: "runtime_snapshot.last_bridge_result.reports[0]", summary: "anomaly A says formal execution completed but missed expectations" },
+          { source: "runtime_snapshot.last_bridge_result.reports[1]", summary: "anomaly B identifies base model prompt mismatch" },
+          { source: "runtime_snapshot.last_bridge_result.reports[2]", summary: "anomaly C recommends implementation repair before rerun" }
+        ],
+        artifact_refs: [],
+        evidence: {},
+        error_or_null: null,
+        cleanup_required: false
+      }
+    },
+    sequence: 3
+  });
+  await appendJsonl(path.join(runRoot, "outer_host_events.jsonl"), {
+    schema_version: "outer_sdk_host_event.v1",
+    timestamp: "2026-05-11T00:00:07.000Z",
+    event_kind: "outer_leader_result",
+    source: "outer_sdk_host",
+    authority: "source",
+    run_id: runId,
+    repo_key: repoKey,
+    payload: {
+      leader_result: {
+        status: "succeeded",
+        handled_by: "outer_sdk_host_latest_bridge_reports",
+        reports: [
+          { summary: reportFallbackNote },
+          { teammate_or_source: "anomaly-analyst-a", summary: "anomaly A says formal execution completed but missed expectations" },
+          { teammate_or_source: "anomaly-analyst-b", summary: "anomaly B identifies base model prompt mismatch" },
+          { teammate_or_source: "anomaly-analyst-c", summary: "anomaly C recommends implementation repair before rerun" }
+        ],
+        artifact_refs: [],
+        evidence: {},
+        error_or_null: null,
+        cleanup_required: false
+      }
+    },
+    sequence: 4
+  });
+  await appendJsonl(path.join(runRoot, "sdk_stream_events.jsonl"), {
+    timestamp: "2026-05-11T00:00:07.250Z",
+    event_type: "ResultMessage",
+    sdk_message_type: "ResultMessage",
+    session_id: "outer-main",
+    status: "succeeded",
+    result: "NO_BRIDGE_DECISION: greeting only"
+  });
 
   const projection = await buildProjection(repoKey, runId);
   assert.equal(projection.schemaVersion, "companion_projection.v1");
@@ -315,10 +428,29 @@ try {
   assert.ok(projection.timeline.some(event => event.messagePreview.includes("model=gpt-main") && event.messagePreview.includes("cli=/tmp/bin/claude_mjy") && event.messagePreview.includes("cli_source=BRIDGE_CLAUDE_COMMAND") && event.messagePreview.includes("mcp_config=/tmp/.claude/mcp.json") && event.messagePreview.includes("base_url=https://provider.example/v1") && event.messagePreview.includes("settings_proxy_https=false")));
   assert.ok(projection.liveToolCards.some(card => card.toolName === "Read"));
   assert.equal(projection.completionChecklist.validatedBy, "completion_validator.v1");
-  assert.ok(projection.leaderReportCards.some(card => card.reportStatus === "succeeded" && card.handledBy === "claude-agent-sdk"));
-  assert.equal(projection.leaderReportCards.filter(card => card.summary === "leader reported runtime status").length, 1);
-  assert.ok(projection.leaderReportCards.some(card => card.summary.includes("SafeDPO and SafeOPD")));
+  assert.ok(projection.leaderReportCards.some(card => card.reportStatus === "succeeded"));
   assert.ok(projection.leaderReportCards.some(card => card.summary.includes("full-tail-marker")));
+  const multiReportCard = projection.leaderReportCards.find(card => card.handledBy === "outer_sdk_host_latest_bridge_reports");
+  assert.equal(multiReportCard.reportCount, 4);
+  assert.equal(multiReportCard.reportSections.length, 4);
+  assert.equal(multiReportCard.reportSections[1].title, "Anomaly analyst A");
+  assert.ok(multiReportCard.summary.includes("anomaly-analyst-a: anomaly A says formal execution completed but missed expectations"));
+  assert.ok(multiReportCard.summary.includes("anomaly-analyst-c: anomaly C recommends implementation repair before rerun"));
+  assert.ok(projection.tuiView.mainReport.summary.includes("anomaly-analyst-b: anomaly B identifies base model prompt mismatch"));
+  assert.ok(!projection.tuiView.mainReport.summary.includes("NO_BRIDGE_DECISION"));
+  for (let index = 0; index < 520; index += 1) {
+    await appendJsonl(path.join(runRoot, "sdk_stream_events.jsonl"), {
+      timestamp: `2026-05-11T00:00:08.${String(index).padStart(3, "0")}Z`,
+      event_type: "sdk_stream_status",
+      session_id: "outer-main",
+      status: "running",
+      message_preview: `window filler ${index}`,
+      sequence: 1000 + index
+    });
+  }
+  const windowedProjection = await buildProjection(repoKey, runId);
+  assert.ok(windowedProjection.tuiView.mainReport.summary.includes("anomaly-analyst-b: anomaly B identifies base model prompt mismatch"));
+  assert.ok(!windowedProjection.tuiView.mainReport.summary.includes("NO_BRIDGE_DECISION"));
   const longReportText = `${"report-body ".repeat(900)}report-tail-marker`;
   const redactedProjection = redactForResponse({
     leaderReportCards: [{ summary: longReportText }],
@@ -346,12 +478,47 @@ try {
   assert.equal(projection.tuiView.activityItems.filter(item => item.kind === "lifecycle" && item.status === "bridge_window_opened").length, 0);
   const chiefmateCard = projection.tuiView.teamTree.find(item => item.teammateId === "chiefmate-a");
   assert.equal(chiefmateCard.observedToolUseCount, 16);
+  assert.equal(chiefmateCard.lastReportSummary, "nested analyst report done");
   assert.ok(chiefmateCard.unknowns.some(item => item.includes("individual tool names not captured")));
+  const sdkChiefmateCard = projection.tuiView.teamTree.find(item => item.teammateId === "chiefmate-b");
+  assert.equal(sdkChiefmateCard.sourceQuality, "tool_activity");
+  assert.equal(sdkChiefmateCard.lastCompletedTool.toolName, "Read");
   const executorCard = projection.tuiView.teamTree.find(item => item.teammateId === "executor");
   assert.equal(executorCard.sourceQuality, "tool_activity");
   assert.equal(executorCard.lastCompletedTool.toolName, "Read");
   assert.ok(projection.tuiView.unknowns.includes("teammate tool activity captured; teammate live text not captured."));
   assert.ok(projection.tuiView.inspectorIndex[tuiReadCards[0].id].rawRefs.length >= 2);
+
+  await appendJsonl(path.join(runRoot, "bridge_packets.jsonl"), {
+    timestamp: "2026-05-11T00:00:07.000Z",
+    event_type: "bridge_packets",
+    run_id: runId,
+    bridge_window_id: "bw_observer_only",
+    team_id: "team_observer_only",
+    task_id: "task_observer_only",
+    target_phase: "l4_anomaly",
+    task_title: "observer only anomaly task",
+    objective: "diagnose observer only mismatch",
+    completion_contract: { required_outputs: ["report"], required_artifacts: [] },
+    report_contract: { required_sections: ["summary", "evidence"] },
+    sequence: 2
+  });
+  await appendJsonl(path.join(runRoot, "transitions.jsonl"), {
+    timestamp: "2026-05-11T00:00:07.500Z",
+    event_kind: "bridge_window_returned",
+    run_id: runId,
+    bridge_window_id: "bw_observer_only",
+    to_status: "bridge_window_returned",
+    sequence: 2
+  });
+  const observerOnlyProjection = await buildProjection(repoKey, runId);
+  assert.equal(observerOnlyProjection.activeTask.bridgeWindowId, "bw_observer_only");
+  assert.equal(observerOnlyProjection.activeTask.observedBridgeWindowId, "bw_observer_only");
+  assert.equal(observerOnlyProjection.activeTask.bridgeWindowAuthority, "observer_only");
+  assert.equal(observerOnlyProjection.activeTask.lifecycleState, "observed_uncommitted");
+  assert.equal(observerOnlyProjection.tuiView.header.lifecycleState, "observed_uncommitted");
+  assert.notEqual(observerOnlyProjection.tuiView.header.lifecycleState, "bridge_window_returned");
+
   const syntheticEvents = Array.from({ length: 605 }, (_, index) => ({ seq: index + 1, eventId: `evt_${index + 1}` }));
   const initialTail = filterEvents(syntheticEvents, new URLSearchParams("limit=500&tail=1"));
   assert.equal(initialTail.events[0].seq, 106);

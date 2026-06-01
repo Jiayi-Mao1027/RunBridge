@@ -23,6 +23,10 @@ const REQUEST_JSON_TIMEOUT_MS = Math.max(
   1000,
   Number(process.env.BRIDGE_COMPANION_REQUEST_JSON_TIMEOUT_MS || 5000)
 );
+const OUTER_HOST_HEALTH_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.BRIDGE_COMPANION_OUTER_HOST_HEALTH_TIMEOUT_MS || 3000)
+);
 const LEADER_INPUT_TIMEOUT_MS = Math.max(
   10000,
   Number(process.env.BRIDGE_COMPANION_LEADER_INPUT_TIMEOUT_MS || 15 * 60 * 1000)
@@ -718,11 +722,34 @@ function normalizeStatus(value) {
   return raw || undefined;
 }
 
-function actorFrom(record) {
+function reportSubjectFrom(record) {
+  const report = record?.report && typeof record.report === "object" && !Array.isArray(record.report)
+    ? record.report
+    : {};
+  const teammateId =
+    report.teammate_id ||
+    report.teammateId ||
+    report.teammate_name ||
+    report.teammateName ||
+    report.agent_type ||
+    report.agentType ||
+    report.role ||
+    undefined;
+  if (!teammateId) return null;
+  return {
+    role: report.role || report.agent_type || report.agentType || teammateId,
+    teammateId,
+    displayName: report.teammate_name || report.teammateName || teammateId
+  };
+}
+
+function actorFrom(record, source = "") {
   const nestedActor =
     record.actor && typeof record.actor === "object" && !Array.isArray(record.actor)
       ? record.actor
       : {};
+  const reportSubject = source === "teammate_report" ? reportSubjectFrom(record) : null;
+  if (reportSubject) return reportSubject;
   return {
     role:
       nestedActor.agent_type ||
@@ -760,6 +787,28 @@ function compactText(value, fallback = "") {
   return text.length > 700 ? `${text.slice(0, 697)}...` : text;
 }
 
+function compactReportText(value, fallback = "") {
+  const source =
+    value && typeof value === "object"
+      ? JSON.stringify(value)
+      : value ?? fallback ?? "";
+  const text = String(source).replace(/\s+/g, " ").trim();
+  return text.length > 4000 ? `${text.slice(0, 3997)}...` : text;
+}
+
+function displayReportText(value, fallback = "") {
+  const source =
+    value && typeof value === "object"
+      ? JSON.stringify(value, null, 2)
+      : value ?? fallback ?? "";
+  const text = String(source)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim();
+  return text.length > 12000 ? `${text.slice(0, 11997)}...` : text;
+}
+
 function compactRawRef(rawRef) {
   if (!rawRef || typeof rawRef !== "object") return rawRef || null;
   return {
@@ -774,9 +823,11 @@ function compactReport(report) {
   if (!report || typeof report !== "object") return report || null;
   return {
     teammate_id: report.teammate_id || report.teammateId || undefined,
+    teammate_name: report.teammate_name || report.teammateName || undefined,
     agent_type: report.agent_type || report.agentType || undefined,
+    role: report.role || undefined,
     status: report.status || undefined,
-    summary: report.summary ? compactText(report.summary) : undefined,
+    summary: report.summary ? compactReportText(report.summary) : undefined,
     decision: report.decision ? compactText(report.decision) : undefined,
     artifact_refs: Array.isArray(report.artifact_refs) ? report.artifact_refs.slice(0, 12) : undefined,
     evidence_refs: Array.isArray(report.evidence_refs) ? report.evidence_refs.slice(0, 12) : undefined
@@ -1063,11 +1114,10 @@ function messageFor(sourceFile, record) {
     const leaderResult = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : {};
     const request = payload.request && typeof payload.request === "object" ? payload.request : payload;
     if (record.event_kind === "outer_leader_result" || leaderResult.status) {
-      const report = Array.isArray(leaderResult.reports) ? leaderResult.reports[0] : null;
       return compactText([
         "leader",
         leaderResult.status,
-        report?.summary,
+        summarizeLeaderResultReports(leaderResult),
         leaderResult.error_or_null?.type || leaderResult.error_or_null?.message
       ].filter(Boolean).join(" "));
     }
@@ -1149,7 +1199,7 @@ function normalizeRunRecord(repoKey, runId, item) {
     kind,
     lane: laneFor(source, kind, status),
     streamEventType: record.event_type || record.eventType || record.type || undefined,
-    actor: actorFrom(record),
+    actor: actorFrom(record, source),
     textDelta: textDelta || undefined,
     toolInputDelta: sdkToolInputDelta(record, item.sourceFile),
     messagePreview: messageFor(item.sourceFile, record),
@@ -1343,7 +1393,22 @@ function eventLoadOptionsForQuery(query) {
 function includeProjectionRecord(sourceFile, record) {
   if (sourceFile !== "sdk_stream_events.jsonl") return true;
   const { kind } = sourceAndKind(sourceFile, record || {});
+  if (kind === "text_delta" && sdkRecordHasTeammateToolUseSummary(record || {})) return true;
   return !["text_delta", "sdk_delta"].includes(kind);
+}
+
+function sdkRecordHasTeammateToolUseSummary(record) {
+  const text = String(
+    record.message_preview ||
+    record.messagePreview ||
+    record.text_delta ||
+    record.delta_text ||
+    record.result ||
+    record.raw?.result ||
+    ""
+  );
+  if (!text || !text.includes("tool use")) return false;
+  return /(?:^|\n)\s*\S.{0,160}?\b\d+\s+tool uses?\b/i.test(text);
 }
 
 function projectionEventLoadOptions() {
@@ -1409,9 +1474,11 @@ async function loadCompanionData(repoKey, runId, options = {}) {
   };
 }
 
-function packetSummaryFrom(snapshot, runLedger, events) {
-  const packetEvent = [...events].reverse().find(event => event.raw?.packet || event.raw?.payload?.packet);
-  const packetSummaryEvent = [...events].reverse().find(event => event.source === "bridge_packet");
+function packetSummaryFrom(snapshot, runLedger, events, options = {}) {
+  const bridgeWindowId = stringOrEmpty(options.bridgeWindowId);
+  const inScope = event => !bridgeWindowId || eventBridgeWindowId(event) === bridgeWindowId;
+  const packetEvent = [...events].reverse().find(event => inScope(event) && (event.raw?.packet || event.raw?.payload?.packet));
+  const packetSummaryEvent = [...events].reverse().find(event => inScope(event) && event.source === "bridge_packet");
   const packet = packetEvent?.raw?.packet || packetEvent?.raw?.payload?.packet || null;
   const packetSummary = packetSummaryEvent?.raw || {};
   const task = packet?.task_spec || {};
@@ -1444,6 +1511,90 @@ function packetSummaryFrom(snapshot, runLedger, events) {
     packet,
     packetSummary
   };
+}
+
+function stringOrEmpty(value) {
+  const text = String(value || "").trim();
+  return text || "";
+}
+
+function eventBridgeWindowId(event) {
+  const raw = event?.raw && typeof event.raw === "object" ? event.raw : {};
+  const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+  const packet = raw.packet || payload.packet || {};
+  const binding = packet.binding && typeof packet.binding === "object" ? packet.binding : {};
+  return stringOrEmpty(
+    event?.bridgeWindowId ||
+    raw.bridge_window_id ||
+    raw.bridgeWindowId ||
+    payload.bridge_window_id ||
+    payload.bridgeWindowId ||
+    packet.bridge_window_id ||
+    packet.bridgeWindowId ||
+    binding.bridge_window_id ||
+    binding.bridgeWindowId
+  );
+}
+
+function runtimeBridgeWindowIds(snapshot, runLedger) {
+  const ids = new Set();
+  for (const source of [snapshot, runLedger]) {
+    if (!source || typeof source !== "object") continue;
+    const lifecycle = source.lifecycle && typeof source.lifecycle === "object" ? source.lifecycle : {};
+    for (const id of Array.isArray(lifecycle.open_bridge_window_ids) ? lifecycle.open_bridge_window_ids : []) {
+      const text = stringOrEmpty(id);
+      if (text) ids.add(text);
+    }
+    const statusIndex = lifecycle.status_index && typeof lifecycle.status_index === "object" ? lifecycle.status_index : {};
+    for (const id of Object.keys(statusIndex)) {
+      const text = stringOrEmpty(id);
+      if (text) ids.add(text);
+    }
+    const bindings = source.bindings && typeof source.bindings === "object" ? source.bindings : {};
+    const bridgeWindows = bindings.bridge_windows && typeof bindings.bridge_windows === "object" ? bindings.bridge_windows : {};
+    for (const id of Object.keys(bridgeWindows)) {
+      const text = stringOrEmpty(id);
+      if (text) ids.add(text);
+    }
+    const result = source.last_bridge_result && typeof source.last_bridge_result === "object" ? source.last_bridge_result : {};
+    const resultId = stringOrEmpty(result.bridge_window_id || result.bridgeWindowId);
+    if (resultId) ids.add(resultId);
+  }
+  return ids;
+}
+
+function runtimeBridgeWindowStatus(snapshot, runLedger, bridgeWindowId) {
+  const id = stringOrEmpty(bridgeWindowId);
+  if (!id) return "";
+  for (const source of [snapshot, runLedger]) {
+    const lifecycle = source?.lifecycle && typeof source.lifecycle === "object" ? source.lifecycle : {};
+    const statusIndex = lifecycle.status_index && typeof lifecycle.status_index === "object" ? lifecycle.status_index : {};
+    const status = stringOrEmpty(statusIndex[id]);
+    if (status) return status;
+  }
+  return "";
+}
+
+function firstRuntimeBridgeWindowId(snapshot, runLedger, candidates = []) {
+  const ids = runtimeBridgeWindowIds(snapshot, runLedger);
+  for (const value of candidates) {
+    const id = stringOrEmpty(value);
+    if (id && ids.has(id)) return id;
+  }
+  return "";
+}
+
+function latestRuntimeBridgeWindowId(snapshot, runLedger) {
+  const candidates = [];
+  for (const source of [snapshot, runLedger]) {
+    const lifecycle = source?.lifecycle && typeof source.lifecycle === "object" ? source.lifecycle : {};
+    candidates.push(...(Array.isArray(lifecycle.open_bridge_window_ids) ? lifecycle.open_bridge_window_ids : []));
+    const result = source?.last_bridge_result && typeof source.last_bridge_result === "object" ? source.last_bridge_result : {};
+    candidates.push(result.bridge_window_id, result.bridgeWindowId);
+    const statusIndex = lifecycle.status_index && typeof lifecycle.status_index === "object" ? lifecycle.status_index : {};
+    candidates.push(...Object.keys(statusIndex).reverse());
+  }
+  return firstRuntimeBridgeWindowId(snapshot, runLedger, candidates);
 }
 
 function compactPacketSummaryForResponse(packetSummary) {
@@ -1753,19 +1904,25 @@ function compactTuiViewForProjection(view) {
 async function buildProjection(repoKey, runId) {
   const data = await loadCompanionData(repoKey, runId, { events: projectionEventLoadOptions() });
   if (!data) return null;
-  const packetSummary = packetSummaryFrom(data.snapshot, data.runLedger, data.events);
   const events = data.events || [];
-  const projectionEvents = events.slice(-PROJECTION_EVENT_WINDOW);
+  const projectionEvents = projectionReducerEvents(events);
   const unknowns = unknownsFor(data);
   const latestPacketEvent = [...events].reverse().find(event => event.source === "bridge_packet" || event.raw?.packet || event.raw?.payload?.packet);
-  const activeBridgeWindowId =
-    packetSummary.packetSummary?.bridge_window_id ||
-    packetSummary.packetSummary?.bridgeWindowId ||
-    packetSummary.packet?.bridge_window_id ||
-    packetSummary.packet?.bridgeWindowId ||
+  const latestPacketBridgeWindowId = eventBridgeWindowId(latestPacketEvent);
+  const runtimeKnownBridgeWindowId = firstRuntimeBridgeWindowId(data.snapshot, data.runLedger, [
+    latestPacketBridgeWindowId,
     data.snapshot?.last_bridge_result?.bridge_window_id ||
-    data.snapshot?.last_bridge_result?.bridgeWindowId ||
-    latestPacketEvent?.bridgeWindowId;
+      data.snapshot?.last_bridge_result?.bridgeWindowId,
+    latestRuntimeBridgeWindowId(data.snapshot, data.runLedger)
+  ]);
+  const observedUncommittedBridgeWindowId =
+    latestPacketBridgeWindowId && latestPacketBridgeWindowId !== runtimeKnownBridgeWindowId
+      ? latestPacketBridgeWindowId
+      : "";
+  const activeBridgeWindowId = observedUncommittedBridgeWindowId || runtimeKnownBridgeWindowId;
+  const packetSummary = packetSummaryFrom(data.snapshot, data.runLedger, data.events, {
+    bridgeWindowId: activeBridgeWindowId
+  });
   const activeTeamId =
     packetSummary.packetSummary?.team_id ||
     packetSummary.packetSummary?.teamId ||
@@ -1782,6 +1939,9 @@ async function buildProjection(repoKey, runId) {
     data.snapshot?.last_bridge_result?.task_id ||
     data.snapshot?.last_bridge_result?.taskId ||
     latestPacketEvent?.taskId;
+  const activeLifecycleState = observedUncommittedBridgeWindowId
+    ? "observed_uncommitted"
+    : runtimeBridgeWindowStatus(data.snapshot, data.runLedger, activeBridgeWindowId) || latestLifecycleState(data.snapshot || data.runLedger);
   const tuiView = compactTuiViewForProjection(reduceToTuiView(projectionEvents, data.snapshot, data.activeOperations, {
     repoKey,
     runId,
@@ -1790,9 +1950,13 @@ async function buildProjection(repoKey, runId) {
     sessionBindings: data.sessionBindings,
     unknowns,
     currentBridgeWindowId: activeBridgeWindowId || null,
+    observedUncommittedBridgeWindowId: observedUncommittedBridgeWindowId || null,
+    lifecycleStateOverride: observedUncommittedBridgeWindowId ? "observed_uncommitted" : null,
     currentTeamId: activeTeamId || null,
     currentTaskId: activeTaskId || null
   }));
+  const leaderReportCards = projectLeaderReportCards(events).slice(-3);
+  const projectedTuiView = promoteVisibleMainReport(tuiView, leaderReportCards);
   return {
     schemaVersion: "companion_projection.v1",
     authority: "projection",
@@ -1812,8 +1976,13 @@ async function buildProjection(repoKey, runId) {
     activeTask: {
       title: packetSummary.objective,
       targetPhase: packetSummary.targetPhase,
-      lifecycleState: latestLifecycleState(data.snapshot || data.runLedger),
+      lifecycleState: activeLifecycleState,
       bridgeWindowId: activeBridgeWindowId || undefined,
+      observedBridgeWindowId: observedUncommittedBridgeWindowId || undefined,
+      bridgeWindowAuthority: observedUncommittedBridgeWindowId ? "observer_only" : activeBridgeWindowId ? "authoritative" : "unknown",
+      warning: observedUncommittedBridgeWindowId
+        ? "Latest observed bridge window is not present in run_ledger/runtime_snapshot; treat it as diagnostic evidence, not authoritative workflow state."
+        : undefined,
       teamId: activeTeamId || undefined,
       taskId: activeTaskId || undefined,
       packetRef: _projectionRawRef(latestPacketEvent),
@@ -1825,13 +1994,58 @@ async function buildProjection(repoKey, runId) {
     agentMessageCards: projectionEvents.filter(event => event.source === "agent_message" || event.source === "sdk_stream" || event.source === "outer_host").slice(-6).map(projectMessageCard),
     artifactCards: projectionEvents.filter(event => event.source === "artifact" || event.evidenceRefs?.length).slice(-5).map(projectArtifactCard),
     completionChecklist: projectCompletionChecklist(events),
-    leaderReportCards: projectLeaderReportCards(events).slice(-3),
+    leaderReportCards,
     failureRetryLane: projectionEvents.filter(event => event.lane === "failures" || ["failed", "blocked", "rejected"].includes(String(event.status || ""))).slice(-6).map(projectTimelineEvent),
     semanticCoverageMatrix: projectSemanticCoverage(events).slice(-10),
     rawJsonRefs: projectionEvents.slice(-10).map(event => ({ eventId: event.eventId, rawRef: compactRawRef(event.rawRef), sourceAuthority: event.runtimeEvent?.authority || "observed" })),
     unknowns,
-    tuiView
+    tuiView: projectedTuiView
   };
+}
+
+function promoteVisibleMainReport(tuiView, leaderReportCards) {
+  const summary = String(tuiView?.mainReport?.summary || "");
+  const shouldPromote =
+    /\bNO_BRIDGE_DECISION\b/i.test(summary) ||
+    cardHasTruncatedReportText(tuiView?.mainReport || {});
+  if (!shouldPromote) return tuiView;
+  const candidates = [...(leaderReportCards || [])].filter(card => {
+    const cardSummary = String(card?.summary || "");
+    return Number(card?.reportCount || 0) > 1 && !/\bNO_BRIDGE_DECISION\b/i.test(cardSummary);
+  });
+  const replacement = candidates.sort((a, b) => {
+    const quality = reportCardQuality(b) - reportCardQuality(a);
+    if (quality !== 0) return quality;
+    return String(b?.summary || "").length - String(a?.summary || "").length;
+  })[0];
+  if (!replacement) return tuiView;
+  const replacementSummary = compactReportText(replacement.summary || replacement.messagePreview || "");
+  return {
+    ...tuiView,
+    mainReport: {
+      ...tuiView.mainReport,
+      displayKey: replacement.displayKey || tuiView.mainReport?.displayKey,
+      status: replacement.reportStatus || replacement.status || tuiView.mainReport?.status,
+      handledBy: replacement.handledBy || tuiView.mainReport?.handledBy,
+      summary: replacementSummary,
+      body: replacementSummary,
+      reportSections: replacement.reportSections || [],
+      rawRefs: replacement.rawRef ? [compactRawRef(replacement.rawRef)] : tuiView.mainReport?.rawRefs || [],
+      evidenceRefs: replacement.evidenceRefs || tuiView.mainReport?.evidenceRefs || []
+    }
+  };
+}
+
+function projectionReducerEvents(events) {
+  const recentEvents = events.slice(-PROJECTION_EVENT_WINDOW);
+  const reportEvents = events
+    .filter(event => bridgeResultFromEvent(event) || (event.source === "outer_host" && event.raw?.event_kind === "outer_leader_result"))
+    .slice(-40);
+  const byId = new Map();
+  for (const event of [...reportEvents, ...recentEvents]) {
+    byId.set(event.eventId || `${event.source}:${event.seq}`, event);
+  }
+  return sortEvents([...byId.values()]);
 }
 
 function projectTimelineEvent(event) {
@@ -1895,7 +2109,8 @@ function projectLeaderReportCards(events) {
   });
   return dedupeLeaderReportCards([...bridgeResults, ...outerResults, ...sdkResults])
     .slice(-40)
-    .map(projectLeaderReportCard);
+    .map(projectLeaderReportCard)
+    .map(card => backfillLeaderReportCardSections(card, events));
 }
 
 function dedupeLeaderReportCards(events) {
@@ -1907,11 +2122,97 @@ function dedupeLeaderReportCards(events) {
       compactText(card.summary || "").slice(0, 260).toLowerCase()
     ].join("|");
     const existing = byKey.get(key);
-    if (!existing || String(card.summary || "").length > String(existing.card.summary || "").length) {
+    const preferSource = event.source === "outer_host" && existing?.event?.source !== "outer_host";
+    const quality = reportCardQuality(card);
+    const existingQuality = existing ? reportCardQuality(existing.card) : -Infinity;
+    const preferQuality = quality > existingQuality;
+    const preferLength =
+      quality === existingQuality &&
+      String(card.summary || "").length > String(existing.card.summary || "").length;
+    const preferLater =
+      quality === existingQuality &&
+      String(card.summary || "").length === String(existing.card.summary || "").length;
+    if (!existing || preferSource || preferQuality || preferLength || preferLater) {
       byKey.set(key, { event, card });
     }
   }
   return sortEvents([...byKey.values()].map(item => item.event));
+}
+
+function reportCardQuality(card) {
+  const summary = String(card?.summary || "");
+  let score = 0;
+  if (Number(card?.reportCount || 0) > 1) score += 2;
+  if (card?.handledBy === "outer_sdk_host_latest_bridge_reports") score += 1;
+  if (/runtime_snapshot\.last_bridge_result\.reports\[\d+\]/.test(summary)) score -= 4;
+  if (/reports_preview\[\d+\]/.test(summary)) score -= 2;
+  if (cardHasTruncatedReportText(card)) score -= 3;
+  return score;
+}
+
+function cardHasTruncatedReportText(card) {
+  const values = [
+    card?.summary,
+    ...(Array.isArray(card?.reportSections) ? card.reportSections.map(section => section.summary) : [])
+  ];
+  return values.some(value => /<truncated(?:\s+\d+\s+chars)?>/i.test(String(value || "")));
+}
+
+function backfillLeaderReportCardSections(card, events) {
+  if (!card || !needsLeaderReportBackfill(card)) return card;
+  const bridgeWindowId = bridgeWindowIdFromLeaderReportCard(card);
+  const fullBridgeCard = latestFullBridgeReportCard(events, bridgeWindowId);
+  if (!fullBridgeCard || !Array.isArray(fullBridgeCard.reportSections) || !fullBridgeCard.reportSections.length) return card;
+  const systemSections = Array.isArray(card.reportSections)
+    ? card.reportSections.filter(section => isSystemReportSection(section))
+    : [];
+  const reportSections = [
+    ...systemSections,
+    ...fullBridgeCard.reportSections.filter(section => !isSystemReportSection(section))
+  ];
+  return {
+    ...card,
+    summary: fullBridgeCard.summary || card.summary,
+    reportCount: reportSections.length || fullBridgeCard.reportCount || card.reportCount,
+    reportSections,
+    backfilledFrom: fullBridgeCard.rawRef || fullBridgeCard.eventId || undefined
+  };
+}
+
+function needsLeaderReportBackfill(card) {
+  if (card?.handledBy === "outer_sdk_host_latest_bridge_reports") return true;
+  if (cardHasTruncatedReportText(card)) return true;
+  return Array.isArray(card?.reportSections) && card.reportSections.some(section => {
+    const name = String(section?.name || section?.source || "");
+    return /runtime_snapshot\.last_bridge_result\.reports\[\d+\]/.test(name);
+  });
+}
+
+function latestFullBridgeReportCard(events, bridgeWindowId = "") {
+  const bridgeCards = events
+    .filter(event => bridgeResultFromEvent(event))
+    .map(projectLeaderReportCard)
+    .filter(candidate => Number(candidate.reportCount || 0) > 1 && !cardHasTruncatedReportText(candidate));
+  const scoped = bridgeWindowId
+    ? bridgeCards.filter(candidate => candidate.bridgeWindowId === bridgeWindowId)
+    : bridgeCards;
+  return scoped.at(-1) || bridgeCards.at(-1) || null;
+}
+
+function bridgeWindowIdFromLeaderReportCard(card) {
+  const direct = stringOrEmpty(card?.bridgeWindowId);
+  if (direct) return direct;
+  const text = [
+    card?.summary,
+    ...(Array.isArray(card?.reportSections) ? card.reportSections.map(section => section.summary) : [])
+  ].map(value => String(value || "")).join(" ");
+  const match = text.match(/\bbridge_window_id=([A-Za-z0-9_.:-]+)/);
+  return match ? match[1] : "";
+}
+
+function isSystemReportSection(section) {
+  const text = String(section?.name || section?.title || section?.source || "");
+  return text === "outer_sdk_host_latest_bridge_reports" || text === "System recovery note";
 }
 
 function projectLeaderReportCard(event) {
@@ -1919,7 +2220,7 @@ function projectLeaderReportCard(event) {
   const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
   const bridgeResult = bridgeResultFromEvent(event);
   if (bridgeResult) {
-    const reports = Array.isArray(bridgeResult.reports) ? bridgeResult.reports : [];
+    const reports = leaderReportsFromBridgeResult(bridgeResult);
     const evidence = bridgeResult.evidence || raw.evidence || null;
     return {
       ...projectTimelineEvent(event),
@@ -1928,19 +2229,22 @@ function projectLeaderReportCard(event) {
       summary: summarizeBridgeResult(bridgeResult),
       error: bridgeResult.error_or_null || raw.error_or_null || null,
       evidence: compactEvidenceForCard(evidence),
-      reportCount: reports.length
+      reportCount: reports.length,
+      reportSections: reportSectionsFromReports(reports)
     };
   }
   const leaderResult = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : null;
-  const report = Array.isArray(leaderResult?.reports) ? leaderResult.reports[0] : null;
+  const reports = Array.isArray(leaderResult?.reports) ? leaderResult.reports : [];
   const evidence = leaderResult?.evidence || raw.evidence || null;
   return {
     ...projectTimelineEvent(event),
     handledBy: leaderResult?.handled_by || raw.handled_by || raw.source || undefined,
     reportStatus: leaderResult?.status || raw.status || event.status || "unknown",
-    summary: report?.summary || raw.result || event.messagePreview || "",
+    summary: summarizeLeaderResultReports(leaderResult) || raw.result || event.messagePreview || "",
     error: leaderResult?.error_or_null || raw.error_or_null || null,
-    evidence: compactEvidenceForCard(evidence)
+    evidence: compactEvidenceForCard(evidence),
+    reportCount: reports.length,
+    reportSections: reportSectionsFromReports(reports)
   };
 }
 
@@ -1954,7 +2258,7 @@ function bridgeResultFromEvent(event) {
 }
 
 function summarizeBridgeResult(bridgeResult) {
-  const reports = Array.isArray(bridgeResult?.reports) ? bridgeResult.reports : [];
+  const reports = leaderReportsFromBridgeResult(bridgeResult);
   const header = [
     `BridgeResult status=${bridgeResult?.status || "unknown"}`,
     `report_count=${reports.length}`
@@ -1965,7 +2269,77 @@ function summarizeBridgeResult(bridgeResult) {
       return `${name}: ${report?.summary || "report recorded"}`;
     })
     .filter(Boolean);
-  return compactText([header, ...reportLines].join("\n\n"));
+  return compactReportText([header, ...reportLines].join("\n\n"));
+}
+
+function leaderReportsFromBridgeResult(bridgeResult) {
+  if (Array.isArray(bridgeResult?.reports) && bridgeResult.reports.length) return bridgeResult.reports;
+  if (Array.isArray(bridgeResult?.reports_preview)) return bridgeResult.reports_preview;
+  return [];
+}
+
+function summarizeLeaderResultReports(leaderResult) {
+  const reports = Array.isArray(leaderResult?.reports) ? leaderResult.reports : [];
+  if (!reports.length) return "";
+  if (reports.length === 1) return compactReportText(reports[0]?.summary || reports[0]?.message || "leader result recorded");
+  const header = [
+    `LeaderResult status=${leaderResult?.status || "unknown"}`,
+    leaderResult?.handled_by ? `handled_by=${leaderResult.handled_by}` : "",
+    `report_count=${reports.length}`
+  ].filter(Boolean).join("; ");
+  const reportLines = reports
+    .map((report, index) => {
+      const name =
+        report?.teammate_or_source ||
+        report?.teammate_name ||
+        report?.teammateName ||
+        report?.teammate_id ||
+        report?.teammateId ||
+        report?.agent_type ||
+        report?.role ||
+        report?.source ||
+        `report ${index + 1}`;
+      return `${name}: ${report?.summary || report?.message || "report recorded"}`;
+    })
+    .filter(Boolean);
+  return compactReportText([header, ...reportLines].join("\n\n"));
+}
+
+function reportSectionsFromReports(reports) {
+  if (!Array.isArray(reports)) return [];
+  return reports
+    .map((report, index) => {
+      if (!report || typeof report !== "object") return null;
+      const name =
+        report.teammate_or_source ||
+        report.teammate_name ||
+        report.teammateName ||
+        report.teammate_id ||
+        report.teammateId ||
+        report.agent_type ||
+        report.role ||
+        report.source ||
+        `report ${index + 1}`;
+      const summary = displayReportText(report.summary || report.message || "report recorded");
+      return {
+        name,
+        title: reportSectionTitle(name, index),
+        summary,
+        status: report.status || undefined,
+        classification: report.classification || undefined,
+        source: report.source || undefined
+      };
+    })
+    .filter(Boolean);
+}
+
+function reportSectionTitle(name, index) {
+  const text = String(name || "").trim();
+  const anomaly = text.match(/^anomaly-analyst-([a-z])$/i);
+  if (anomaly) return `Anomaly analyst ${anomaly[1].toUpperCase()}`;
+  if (text === "outer_sdk_host_latest_bridge_reports") return "System recovery note";
+  if (/runtime_snapshot\.last_bridge_result\.reports\[\d+\]/.test(text)) return `Anomaly report ${index}`;
+  return text || `Report ${index + 1}`;
 }
 
 function projectArtifactCard(event) {
@@ -2153,6 +2527,9 @@ function httpsJson(url, payload, headers = {}) {
 
 function normalizeLeaderInput(input) {
   const payload = input && typeof input === "object" ? { ...input } : {};
+  if (!String(payload.text || "").trim() && String(payload.message || "").trim()) {
+    payload.text = String(payload.message);
+  }
   const targetPhase = normalizeExplicitLeaderTargetPhase(
     payload.target_phase || payload.targetPhase || payload.target_phase_label || payload.targetPhaseLabel
   );
@@ -2257,6 +2634,19 @@ async function outerHostStatus() {
   const endpoint = new URL("/v1/status", OUTER_HOST_URL).toString();
   const headers = OUTER_HOST_TOKEN ? { "x-bridge-outer-host-token": OUTER_HOST_TOKEN } : {};
   return requestJson(endpoint, null, headers, "GET", { timeoutMs: REQUEST_JSON_TIMEOUT_MS });
+}
+
+async function outerHostHealth() {
+  if (!OUTER_HOST_URL) {
+    return {
+      ok: false,
+      error: "outer_host_not_configured",
+      message: "Set BRIDGE_OUTER_HOST_URL to enable outer host health discovery."
+    };
+  }
+  const endpoint = new URL("/health", OUTER_HOST_URL).toString();
+  const headers = OUTER_HOST_TOKEN ? { "x-bridge-outer-host-token": OUTER_HOST_TOKEN } : {};
+  return requestJson(endpoint, null, headers, "GET", { timeoutMs: OUTER_HOST_HEALTH_TIMEOUT_MS });
 }
 
 function selectedDebugEnv() {
@@ -2889,9 +3279,11 @@ async function handleApi(req, res, url) {
     let outerHost = null;
     if (OUTER_HOST_URL) {
       try {
-        const status = await outerHostStatus();
+        const status = await outerHostHealth();
         outerHost = {
-          ok: true,
+          ok: status?.ok !== false,
+          mode: status?.mode || null,
+          source: "outer_host_health",
           adapter: status.adapter,
           repoKey: status.repo_key || status.repoKey,
           runId: status.run_id || status.runId,

@@ -87,10 +87,12 @@ def validate_artifact_refs(
     missing: list[str] = []
 
     required = [str(item) for item in required_artifacts] if isinstance(required_artifacts, list) else []
+    required_ref_keys: set[tuple[str, str, str, str]] = set()
     for requirement in required:
         matches = [ref for ref in normalized if artifact_ref_satisfies(requirement, ref)]
-        usable_matches = [ref for ref in matches if _required_ref_is_usable(requirement, ref)]
+        usable_matches = [ref for ref in matches if _required_ref_is_usable(requirement, ref, context=context)]
         if usable_matches:
+            required_ref_keys.add(_artifact_ref_instance_key(usable_matches[0]))
             checks.append(_check("artifact_required", "pass", requirement, evidence_ref=usable_matches[0].get("id")))
         elif matches:
             missing.append(requirement)
@@ -100,7 +102,7 @@ def validate_artifact_refs(
             checks.append(_check("artifact_required", "block", requirement, message="required artifact missing"))
 
     for ref in normalized:
-        checks.extend(_validate_one_ref(ref, context=context))
+        checks.extend(_validate_one_ref(ref, context=context, required_ref_keys=required_ref_keys))
 
     return {
         "valid": not any(item["status"] in {"fail", "block"} for item in checks),
@@ -129,8 +131,10 @@ def artifact_ref_satisfies(required: str, ref: dict[str, Any]) -> bool:
     return key in haystack
 
 
-def _validate_one_ref(ref: dict[str, Any], *, context: dict[str, Any]) -> list[dict[str, Any]]:
+def _validate_one_ref(ref: dict[str, Any], *, context: dict[str, Any], required_ref_keys: set[tuple[str, str, str, str]] | None = None) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
+    required_ref_keys = required_ref_keys or set()
+    is_required_ref = _artifact_ref_instance_key(ref) in required_ref_keys
     if ref.get("schema_version") == ARTIFACT_REF_SCHEMA_VERSION:
         checks.append(_check("artifact_schema", "pass", str(ref.get("id"))))
     else:
@@ -140,7 +144,14 @@ def _validate_one_ref(ref: dict[str, Any], *, context: dict[str, Any]) -> list[d
         expected = context.get(key) or (context.get("window_id") if key == "bridge_window_id" else None)
         actual = ref.get(key)
         if expected and actual and str(expected) != str(actual):
-            checks.append(_check("artifact_binding", "block", str(ref.get("id")), message=f"{key} does not match current context"))
+            checks.append(
+                _check(
+                    "artifact_binding",
+                    "block" if is_required_ref else "warn",
+                    str(ref.get("id")),
+                    message=f"{key} does not match current context",
+                )
+            )
 
     path_text = _optional_str(ref.get("path"))
     if path_text:
@@ -158,14 +169,31 @@ def _validate_one_ref(ref: dict[str, Any], *, context: dict[str, Any]) -> list[d
     return checks
 
 
-def _required_ref_is_usable(requirement: str, ref: dict[str, Any]) -> bool:
+def _required_ref_is_usable(requirement: str, ref: dict[str, Any], *, context: dict[str, Any] | None = None) -> bool:
     ref_type = str(ref.get("ref_type") or "").strip().casefold()
     requirement_key = str(requirement or "").strip().casefold()
     file_backed = ref_type in {"path", "file", "log_manifest"} or requirement_key == "log_manifest"
     if not file_backed:
         return True
     path_text = _optional_str(ref.get("path"))
-    return bool(path_text and Path(path_text).is_file())
+    if not bool(path_text and Path(path_text).is_file()):
+        return False
+    if requirement_key == "log_manifest" and ref_type == "log_manifest" and context:
+        for key in ("run_id", "bridge_window_id", "task_id"):
+            expected = context.get(key) or (context.get("window_id") if key == "bridge_window_id" else None)
+            actual = ref.get(key)
+            if expected and actual and str(expected) != str(actual):
+                return False
+    return True
+
+
+def _artifact_ref_instance_key(ref: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(ref.get("id") or ""),
+        str(ref.get("path") or ""),
+        str(ref.get("bridge_window_id") or ""),
+        str(ref.get("task_id") or ""),
+    )
 
 
 def _check(name: str, status: str, subject: str, *, message: str = "", evidence_ref: str | None = None) -> dict[str, Any]:
@@ -210,6 +238,8 @@ def _text_looks_like_formal_log_manifest(value: str) -> bool:
     if basename in {"log_manifest.json", "execute_log_manifest.json"}:
         return True
     if basename.endswith("_log_manifest.json") or basename.endswith("-log-manifest.json"):
+        return True
+    if re.search(r"(?:^|[_-])log[_-]manifest(?:[_-].*)?\.json$", basename):
         return True
     if basename == "manifest.json":
         parts = [part for part in text.split("/") if part]

@@ -64,6 +64,7 @@
       "completion_allowed": false,
       "allowed_next_phases": [
         "l3_bridge",
+        "l2_advisory",
         "l4_execute",
         "l4_anomaly"
       ],
@@ -79,6 +80,7 @@
       "completion_allowed": true,
       "allowed_next_phases": [
         "l3_bridge",
+        "l2_advisory",
         "l4_anomaly",
         "l4_implement"
       ],
@@ -89,11 +91,12 @@
     },
     {
       "name": "l4_anomaly",
-      "description": "Recovery/anomaly route for failed, partial, blocked, or orphaned bridge windows.",
+      "description": "Complex anomaly-analysis route for surprising, contradictory, suspicious, or underexplained outcomes. Simple mechanical gaps such as missing artifacts, dry-run-only handoffs, absent manifests, missing data, or incomplete implementation readiness should return to the owning phase instead.",
       "optional": true,
       "completion_allowed": true,
       "allowed_next_phases": [
         "l3_bridge",
+        "l2_advisory",
         "l4_implement",
         "l4_execute"
       ],

@@ -40,6 +40,7 @@ Claude Code can already call tools and spawn agents. This workflow adds a contro
 
 ```text
 user request
+  -> outer host binds the selected RunBridge run to its Claude Code session
   -> leader-orchestrator reads runtime snapshot
   -> leader-orchestrator freezes task semantics
   -> runtime validates allowed phase route
@@ -50,10 +51,10 @@ user request
   -> teammates do bounded work and report evidence
   -> bridge-leader validates completion and deletes the team
   -> bridge result returns to main leader
-  -> main leader resumes from runtime truth
+  -> main leader resumes through the run's Claude Code session and runtime truth
 ```
 
-This is why the runtime state matters. The leader is supposed to resume from the ledger and snapshot, not from memory or a guessed prompt narrative.
+This is why the runtime state matters. The leader is supposed to resume from the selected run's native Claude Code session when it exists, with the ledger and snapshot as the authoritative workflow truth. If a legacy run has no resumable Claude Code session binding, recovery falls back to the ledger, snapshot, event logs, and snapshot refs explicitly rather than pretending the original conversation was resumed.
 
 ## Roles
 
@@ -89,7 +90,7 @@ Every phase can route back to `l3_bridge`. L3 is the universal inspection/curati
 
 From `l3_bridge`, the graph also allows routing to every phase: another L3 pass, `leader_freeze`, `l2_advisory`, `l4_implement`, `l4_execute`, or `l4_anomaly`. This makes L3 the bridge hub: it can perform a minimal repo sanity check after L2, resume after user confirmation, send ambiguous strategy back to L2, or send execution/result questions to L4 anomaly before implementation or execution proceeds.
 
-L3 packets have a documentation responsibility. When the work touches docs, Markdown, `CLAUDE.md`, README, setup/usage guidance, workflow rules, or agent behavior, L3 must explicitly decide whether repo-facing documentation needs a bounded update. `CLAUDE.md` is a first-class L3 target for workflow and agent-behavior changes.
+L3 packets have a standing documentation responsibility. On every invocation, curator and refresher should inspect enough current docs, active artifacts, manifests, reports, and runtime evidence to catch stale or conflicting project-state claims, even when the packet's main task is not a docs pass. When the work touches docs, Markdown, `CLAUDE.md`, README, setup/usage guidance, workflow rules, or agent behavior, L3 must explicitly decide whether repo-facing documentation needs a bounded update. `CLAUDE.md` is a first-class L3 target for workflow and agent-behavior changes.
 
 L3 packets also carry a minimum-active-surface responsibility. Curator should first understand the current step, what prior work has already completed, and what the next phase actually needs; then it should archive stale, duplicate, ambiguous, or non-current datasets, checkpoints, generated outputs, stale code copies, scratch scripts, and misleading inactive documents out of active reach. Logs are cleaned more conservatively: retain logs that may be reused for comparison, audit, avoiding expensive regeneration, or downstream interpretation; archive only logs that are clearly unused, duplicate, superseded, unrelated, or misleading. Archive is the default for material with possible audit value. Physical deletion is reserved for clearly disposable material or explicit approval.
 
@@ -112,6 +113,8 @@ L4 execute also treats smoke parameters as evidence, not as the final run shape.
 Minor OOMs during smoke, warmup, or formal launch are execute-owned adaptation events, not automatic bridge failures, when the executor role can handle them without changing approved semantics. Durable execute semantics live in `.claude/agents/executor.md` and `.claude/agents/postrun.md`; project-specific batch ladders or experiment details belong in the current run input, packet, project profile, or run-scoped evidence.
 
 Every generated formal log folder must contain an internal manifest, analogous to checkpoint manifests. The manifest is the durable identity record and should include run/window/task IDs, command, cwd, environment, semantic basis, smoke evidence refs, formal parameters/effective batch size, process refs, log files, expected outputs/checkpoints, timestamps, terminal status, and reuse/dependency notes. File names alone are not sufficient.
+
+Terminal exit code 0 is not enough to satisfy L4 execute. Completion requires a readable manifest that matches the current run/window/task and formal stage; missing, stale, or nonmatching manifests are execute packaging defects, not experiment results or anomaly-analysis triggers.
 
 L4 execute has strict environment and resource evidence rules, but the durable semantics for those rules are role-owned in the agent documents, not embedded in policy JSON contracts.
 
@@ -192,6 +195,7 @@ Keep large or historical material out of `runtime_snapshot.json`:
 - Store counts, latest/open items, stable IDs, short safe previews, and `snapshot_refs` pointing to authoritative files.
 - Keep `last_bridge_result` as a compact result index: report/artifact counts, status/checklist summaries, bounded previews, and refs to the full bridge result or observer streams.
 - Keep `bindings` as current attribution, not history: active/open bridge windows, recent session bindings, recent tool-use IDs, and omitted-count metadata.
+- Keep Claude Code session IDs as compact bindings only. They identify which native session should be resumed; they are not a substitute for ledgers, event logs, or full transcripts.
 - Preserve `semantic` and `scope` carefully because packet validation depends on frozen equality. If those fields become too large, change validation to hash/ref semantics first; do not ad hoc truncate them.
 
 Main leader behavior should follow the same rule: read the snapshot first, then follow `snapshot_refs` only for the specific evidence needed to make the next decision.
@@ -318,7 +322,7 @@ Start the outer host from inside the target repo:
 
 ```powershell
 cd C:\path\to\workspace-parent\your-repo
-python ..\.claude\control\runtime\outer_sdk_host.py --control-root ..\.claude\control --repo-root . --main-session-id outer-main
+python ..\.claude\control\runtime\outer_sdk_host.py --control-root ..\.claude\control --repo-root .
 ```
 
 SSH/Linux development example for the current remote layout:
@@ -328,9 +332,16 @@ cd /data03/liang/mjy/safe_opd
 python3 ../.claude/control/runtime/outer_sdk_host.py \
   --control-root ../.claude/control \
   --repo-root . \
-  --main-session-id outer-main \
   --adapter auto
 ```
+
+### Run And Claude Code Session Recovery
+
+A RunBridge `run_id` is the workflow identity. The outer leader conversation should be the native Claude Code session for that run, represented by a UUID `main_session_id` and exposed by `/v1/status` as `outer_claude_session_id` when known.
+
+When Companion selects an existing run through `8787`, it sends the selected `run_id` to the outer host. The host resolves the run's persisted session from the run ledger and observer bindings. If the outer leader process must be started again, the tmux adapter launches Claude with `claude --resume <session-id>` for that run. New runs get a UUID session id and launch with `claude --session-id <session-id>`.
+
+Do not use `claude --continue` for RunBridge recovery. It resumes the most recent conversation for the current directory, which can cross wires when multiple runs exist. `--main-session-id` remains a compatibility/debug override, but it should be a real Claude Code UUID when used; do not use fixed placeholders such as `outer-main` for normal operation.
 
 Current remote tmux layout uses the same host command inside a long-lived session such as `runbridge`. To restart after a system-side update, stop the old pane/process, start this command from `/data03/liang/mjy/safe_opd`, then verify the forwarded status endpoint before sending input:
 

@@ -4,8 +4,11 @@ from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import json
 import os
+import re
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -30,7 +33,18 @@ SNAPSHOT_DETAIL_LEVEL = "compact"
 SNAPSHOT_TEXT_LIMIT = 700
 SNAPSHOT_LIST_LIMIT = 8
 SNAPSHOT_RECENT_BINDING_LIMIT = 12
+LEDGER_RECENT_EVENTS_LIMIT = 20
+LEDGER_TRANSITIONS_LIMIT = 200
+RECENT_UPDATE_RECONCILE_LIMIT = 80
 ORCHESTRATION_ANOMALY_OPEN_SECONDS = 300
+SDK_STREAM_OBSERVER_TAIL_LINES = 5000
+SDK_STREAM_OBSERVER_COUNT_BYTE_LIMIT = 32 * 1024 * 1024
+OBSERVER_STREAM_TAIL_LINES = 5000
+OBSERVER_STREAM_COUNT_BYTE_LIMIT = 32 * 1024 * 1024
+OBSERVER_SUMMARY_BYTE_LIMIT = 4 * 1024 * 1024
+TOOL_EVENTS_OBSERVER_TAIL_LINES = 1000
+EVENT_LOG_PACKET_LOOKBACK_LINES = 10000
+PROCESS_TABLE_COMMAND_PREVIEW_LIMIT = 500
 ORCHESTRATION_ANOMALY_STUCK_STATUSES = {
     "bridge_call_started",
     "bridge_window_opened",
@@ -64,7 +78,20 @@ def _acquire_file_lock(handle: Any) -> None:
 
     import fcntl
 
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    raw_timeout = os.environ.get("WORKFLOW_DISPATCH_LOCK_TIMEOUT_SECONDS", "120")
+    try:
+        timeout_seconds = max(1.0, float(raw_timeout))
+    except (TypeError, ValueError):
+        timeout_seconds = 120.0
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for workflow dispatch lock: {getattr(handle, 'name', '<unknown>')}")
+            time.sleep(0.1)
 
 
 def _release_file_lock(handle: Any) -> None:
@@ -125,6 +152,7 @@ BRIDGE_TRANSPORT_ERROR_TYPES = {
     "ClaudeTmuxSoftTimeoutNoProgress",
     "ClaudeTmuxTimeout",
     "TransientClaudeTmuxTransportApiError",
+    "ProviderApiRetryTimeout",
 }
 BRIDGE_NO_REPORT_ERROR_TYPES = {
     "BridgeLeaderNoReport",
@@ -161,6 +189,30 @@ BRIDGE_RESULT_STATUS_EVENT_KINDS = {
     "failed": "bridge_result_returned_with_failure",
     "partial": "bridge_result_returned_with_partial",
     "partial_or_failed": "bridge_result_returned_with_partial",
+}
+BRIDGE_RESULT_RETURNED_EVENT_KINDS = {
+    "bridge_result_returned",
+    "bridge_result_returned_with_failure",
+    "bridge_result_returned_with_partial",
+    "bridge_result_returned_with_cleanup_required",
+    "bridge_result_returned_with_user_clarification_request",
+}
+BRIDGE_TERMINAL_EVENT_KINDS = {
+    *BRIDGE_RESULT_RETURNED_EVENT_KINDS,
+    "pretooluse_denied_by_main_leader",
+    "call_bridge_sdk_error",
+    "bridge_call_interrupted",
+    "bridge_packet_rejected",
+    "team_create_failed",
+    "task_create_failed",
+    "message_dispatch_failed",
+    "team_executor_failed",
+    "user_clarification_required",
+    "blocked_for_user_clarification",
+    "bridge_leader_fails_task",
+    "task_failed_by_bridge_leader",
+    "orphan_timeout_without_bridge_return",
+    "orphan_timeout_without_heartbeat",
 }
 
 AGENT_TYPES = {"main-leader", "bridge-leader", "teammate", "hook", "runtime"}
@@ -329,8 +381,16 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "bridge_call_interrupted": "bridge_window_interrupted",
     },
     "task_completion_started": {
+        "artifacts_ready": "task_completion_started",
+        "partial_evidence_collected": "bridge_window_partial_returned",
         "completion_contract_satisfied": "task_completion_completed",
         "completion_contract_rejected": "task_completion_rejected",
+        "bridge_leader_fails_task": "task_failed",
+        "task_failed_by_bridge_leader": "task_failed",
+        "team_delete_started": "team_delete_started",
+        "bridge_result_returned_with_partial": "bridge_window_partial_returned",
+        "bridge_result_returned_with_failure": "bridge_window_failed",
+        "bridge_result_returned_with_cleanup_required": "bridge_window_partial_returned",
         "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "orphan_timeout_without_heartbeat": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
@@ -363,6 +423,7 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
     "team_delete_started": {
         "team_delete_succeeded": "team_delete_completed",
         "team_delete_failed": "team_delete_failed",
+        "bridge_result_returned_with_cleanup_required": "bridge_window_partial_returned",
         "orphan_timeout_without_bridge_return": "bridge_window_orphaned",
         "orphan_timeout_without_heartbeat": "bridge_window_orphaned",
         "bridge_call_interrupted": "bridge_window_interrupted",
@@ -371,6 +432,7 @@ LIFECYCLE_TRANSITIONS: dict[str | None, dict[str, str]] = {
         "bridge_result_returned": "bridge_window_returned",
         "bridge_result_returned_with_failure": "bridge_window_failed",
         "bridge_result_returned_with_partial": "bridge_window_partial_returned",
+        "bridge_result_returned_with_cleanup_required": "bridge_window_partial_returned",
     },
     "team_delete_failed": {"bridge_result_returned_with_cleanup_required": "bridge_window_partial_returned"},
 }
@@ -590,6 +652,16 @@ def dispatch_workflow_event(
                 persist=persist,
             )
     existing_run = load_json_file(paths.run_ledger_path(run_id), default={}) or {}
+    if persist and run_id and existing_run:
+        existing_run = reconcile_run_ledger_if_stale(
+            control_root,
+            run_id,
+            repo_key=event_repo_key,
+            runtime_runs_root=runtime_runs_root,
+            run_ledger=existing_run,
+            persist=True,
+        )
+    event_payload = _bind_user_answer_event_to_waiting_window(event_payload, existing_run)
     event = WorkflowEvent.from_payload(event_payload, existing_run)
     if not event.run_id:
         raise ValueError("workflow event requires run_id")
@@ -656,6 +728,56 @@ def dispatch_workflow_event(
         runtime_snapshot=snapshot_after,
         written_paths=written_paths,
     )
+
+
+def _bind_user_answer_event_to_waiting_window(event_payload: dict[str, Any], run_ledger: dict[str, Any]) -> dict[str, Any]:
+    if str(event_payload.get("event_kind") or "").strip() != "user_answer_received":
+        return event_payload
+    if str(event_payload.get("bridge_window_id") or "").strip():
+        return event_payload
+    lifecycle = run_ledger.get("lifecycle") if isinstance(run_ledger.get("lifecycle"), dict) else {}
+    status_index = lifecycle.get("status_index") if isinstance(lifecycle.get("status_index"), dict) else {}
+    waiting_window_ids = [
+        str(bridge_window_id)
+        for bridge_window_id, status in status_index.items()
+        if str(status) in USER_ANSWER_WAIT_STATUSES
+    ]
+    if not waiting_window_ids:
+        return event_payload
+    bridge_window_id = _latest_bridge_window_id(run_ledger, waiting_window_ids)
+    binding = (
+        run_ledger.get("bindings", {})
+        .get("bridge_windows", {})
+        .get(bridge_window_id, {})
+        if isinstance(run_ledger.get("bindings"), dict)
+        else {}
+    )
+    bound_payload = deepcopy(event_payload)
+    bound_payload["bridge_window_id"] = bridge_window_id
+    if isinstance(binding, dict):
+        bound_payload.setdefault("sub_session_id", binding.get("sub_session_id"))
+        bound_payload.setdefault("team_id", binding.get("team_id_or_null"))
+        bound_payload.setdefault("task_id", binding.get("task_id_or_null"))
+    payload = bound_payload.get("payload") if isinstance(bound_payload.get("payload"), dict) else {}
+    payload = deepcopy(payload)
+    payload.setdefault("answered_bridge_window_id", bridge_window_id)
+    payload.setdefault("answered_bridge_window_count", len(waiting_window_ids))
+    payload.setdefault("answer_binding_source", "runtime_waiting_user_answer")
+    bound_payload["payload"] = payload
+    return bound_payload
+
+
+def _latest_bridge_window_id(run_ledger: dict[str, Any], bridge_window_ids: list[str]) -> str:
+    if len(bridge_window_ids) == 1:
+        return bridge_window_ids[0]
+    bindings = run_ledger.get("bindings", {}).get("bridge_windows", {}) if isinstance(run_ledger.get("bindings"), dict) else {}
+
+    def sort_key(bridge_window_id: str) -> tuple[str, str]:
+        binding = bindings.get(bridge_window_id) if isinstance(bindings, dict) else {}
+        updated_at = str(binding.get("updated_at") or "") if isinstance(binding, dict) else ""
+        return updated_at, bridge_window_id
+
+    return sorted(bridge_window_ids, key=sort_key)[-1]
 
 
 def _build_auto_recovery_plan(
@@ -749,14 +871,28 @@ def _build_auto_recovery_plan(
         retry_payload["retry_action"] = _retry_action_contract(event, retry_scope, decision, process_poll_guard)
         plan["dispatch_event"] = _runtime_recovery_event(event, "retry_attempt_scheduled", retry_payload)
     elif decision.exhausted:
-        anomaly_payload = {
-            **retry_payload,
-            "target_phase": "l4_anomaly",
-            "anomaly_reason": "retry_exhausted",
-            "next_action": "enter_anomaly",
-        }
-        plan["dispatch_event"] = _runtime_recovery_event(event, "enter_anomaly", anomaly_payload)
-        plan["next_action"] = "enter_anomaly"
+        mechanical_target = _mechanical_completion_gap_target(event, check_result, snapshot, retry_scope)
+        if mechanical_target:
+            current_phase = str(snapshot.get("current_phase") or "leader_freeze")
+            reroute_payload = {
+                **retry_payload,
+                "target_phase": mechanical_target,
+                "current_route": [current_phase, mechanical_target] if current_phase != mechanical_target else [mechanical_target],
+                "reroute_reason": "mechanical_completion_gap",
+                "recovery_rule": "completion_rejected_mechanical_gap_returns_to_owning_phase",
+                "next_action": "reroute_to_owning_phase",
+            }
+            plan["dispatch_event"] = _runtime_recovery_event(event, "route_rerouted", reroute_payload)
+            plan["next_action"] = "reroute_to_owning_phase"
+        else:
+            anomaly_payload = {
+                **retry_payload,
+                "target_phase": "l4_anomaly",
+                "anomaly_reason": "retry_exhausted",
+                "next_action": "enter_anomaly",
+            }
+            plan["dispatch_event"] = _runtime_recovery_event(event, "enter_anomaly", anomaly_payload)
+            plan["next_action"] = "enter_anomaly"
     return plan
 
 
@@ -838,16 +974,106 @@ def _retry_scope_for_failure(event: WorkflowEvent, check_result: CheckResult, sn
     if event.event_kind in {"bridge_result_returned", "bridge_result_returned_with_partial", "bridge_result_returned_with_cleanup_required"}:
         if _bridge_result_reports_teammate_transport_loss(event.payload):
             return "teammate_report_missing"
-        if "bridge_result_guardrail_failed" in check_result.reasons:
+        if "bridge_result_guardrail_failed" in check_result.reasons or "bridge_result_completion_contract_not_satisfied" in check_result.reasons:
             return "completion_rejected"
     if event.event_kind == "completion_contract_satisfied" and not check_result.ok:
         if any(reason.startswith("completion_") for reason in check_result.reasons):
             return "completion_rejected"
-    if "completion_report_guardrail_failed" in check_result.reasons or "bridge_result_guardrail_failed" in check_result.reasons:
+    if (
+        "completion_report_guardrail_failed" in check_result.reasons
+        or "bridge_result_guardrail_failed" in check_result.reasons
+        or "bridge_result_completion_contract_not_satisfied" in check_result.reasons
+    ):
         return "completion_rejected"
     if "bridge_packet_guardrail_failed" in check_result.reasons:
         return "bridge_sdk_call"
     return None
+
+
+def _mechanical_completion_gap_target(
+    event: WorkflowEvent,
+    check_result: CheckResult,
+    snapshot: dict[str, Any],
+    retry_scope: str,
+) -> str | None:
+    if retry_scope != "completion_rejected":
+        return None
+    text = _recovery_context_text(event.payload, list(check_result.reasons), check_result.derived_facts)
+    mechanical_markers = (
+        "missing",
+        "absent",
+        "required artifact",
+        "artifact",
+        "manifest",
+        "formal_handoff",
+        "handoff",
+        "implementation_validation",
+        "dryrun",
+        "dry-run",
+        "dry run",
+        "smoke",
+        "warmup",
+        "first-step",
+        "first step",
+        "entrypoint",
+        "command",
+        "cwd",
+        "config",
+        "input",
+        "output",
+        "placeholder",
+        "stale pointer",
+        "schema",
+        "required evidence",
+        "completion_contract_rejected",
+    )
+    if not any(marker in text for marker in mechanical_markers):
+        return None
+    complex_markers = (
+        "contradictory",
+        "suspicious",
+        "unexpected result",
+        "surprising result",
+        "underperform",
+        "metric anomaly",
+        "data anomaly",
+        "causal diagnosis",
+        "root cause unclear",
+    )
+    if any(marker in text for marker in complex_markers) and not any(
+        marker in text for marker in ("missing", "manifest", "handoff", "implementation_validation", "artifact")
+    ):
+        return None
+    if any(marker in text for marker in ("source identity", "unresolved source", "semantic identity", "ambiguous source")):
+        return "l3_bridge"
+    current_phase = str(snapshot.get("current_phase") or "")
+    if current_phase == "l4_execute" and not any(
+        marker in text for marker in ("implementation_validation", "formal_handoff", "handoff", "dryrun", "dry-run", "dry run", "smoke", "warmup", "first-step", "first step")
+    ):
+        return "l4_execute"
+    return "l4_implement"
+
+
+def _recovery_context_text(*values: Any) -> str:
+    chunks: list[str] = []
+
+    def visit(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                chunks.append(str(key))
+                visit(item)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                visit(item)
+            return
+        chunks.append(str(value))
+
+    for value in values:
+        visit(value)
+    return " ".join(chunks).casefold()
 
 
 def _retry_action_contract(
@@ -1035,6 +1261,8 @@ def _packet_hash_for_retry(event: WorkflowEvent, run_ledger: dict[str, Any]) -> 
         if not isinstance(record, dict):
             continue
         payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        if payload.get("packet_hash"):
+            return str(payload.get("packet_hash"))
         packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else None
         if packet:
             return retry_packet_hash(packet)
@@ -1042,6 +1270,8 @@ def _packet_hash_for_retry(event: WorkflowEvent, run_ledger: dict[str, Any]) -> 
         if not isinstance(transition, dict):
             continue
         payload = transition.get("payload") if isinstance(transition.get("payload"), dict) else {}
+        if payload.get("packet_hash"):
+            return str(payload.get("packet_hash"))
         packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else None
         if packet:
             return retry_packet_hash(packet)
@@ -1101,6 +1331,11 @@ def check_event(
         reasons.append("main_session_id_not_bound_to_run")
     if allowed_policy_events is not None and event.event_kind not in allowed_policy_events and event.event_kind not in _all_known_events(transitions):
         reasons.append("event_kind_not_allowed_by_policy")
+    if event.event_kind == "phase_advanced":
+        readiness = snapshot.get("phase_exit_readiness") if isinstance(snapshot.get("phase_exit_readiness"), dict) else {}
+        if readiness and readiness.get("exit_ready") is not True:
+            reasons.append("phase_exit_not_ready")
+            derived_facts["phase_exit_readiness"] = readiness
 
     integrity = snapshot.get("integrity", {})
     if event.event_kind in {"bridge_call_intended", "pretooluse_allowed_by_main_leader", "call_bridge_sdk_started"}:
@@ -1131,11 +1366,34 @@ def check_event(
     }:
         bridge_result = normalized_payload.get("bridge_result")
         if isinstance(bridge_result, dict):
-            completion_contract = normalized_payload.get("completion_contract") if isinstance(normalized_payload.get("completion_contract"), dict) else None
+            packet_for_validation, packet_ref = _completion_packet_for_window(snapshot, event, normalized_payload)
+            if packet_ref:
+                derived_facts["bridge_result_completion_packet_ref"] = packet_ref
+            completion_contract = packet_for_validation.get("completion_contract") if isinstance(packet_for_validation.get("completion_contract"), dict) else None
+            if completion_contract is None:
+                completion_contract = normalized_payload.get("completion_contract") if isinstance(normalized_payload.get("completion_contract"), dict) else None
             guardrail = validate_bridge_result(bridge_result, control_root=control_root, completion_contract=completion_contract)
             if not guardrail.get("valid"):
                 reasons.append("bridge_result_guardrail_failed")
                 derived_facts["guardrail_validation"] = guardrail
+            completion_validation = validate_bridge_completion(
+                packet_for_validation,
+                bridge_result,
+                context={
+                    "run_id": event.run_id,
+                    "bridge_window_id": event.bridge_window_id,
+                    "team_id": event.team_id,
+                    "task_id": event.task_id,
+                    "agent_id": event.agent_id,
+                    "event_id": event.event_id,
+                    "timestamp": event.timestamp,
+                },
+                control_root=control_root,
+                base_dir=_run_root_from_snapshot(snapshot),
+            )
+            derived_facts["bridge_result_completion_validation"] = completion_validation
+            if str(bridge_result.get("status") or "").strip().lower() in {"succeeded", "success"} and not completion_succeeded(completion_validation):
+                reasons.append("bridge_result_completion_contract_not_satisfied")
             expected_event_kind = _bridge_result_event_kind_for_payload(bridge_result)
             if expected_event_kind and event.event_kind != expected_event_kind:
                 reasons.append("bridge_result_event_kind_status_mismatch")
@@ -1155,6 +1413,13 @@ def check_event(
         else:
             derived_facts["from_status"] = bridge_status
             derived_facts["to_status"] = to_status
+    if (
+        event.event_kind == "bridge_result_returned"
+        and "bridge_result_completion_contract_not_satisfied" in reasons
+        and derived_facts.get("to_status") == "bridge_window_returned"
+    ):
+        derived_facts["to_status"] = "bridge_window_partial_returned"
+        derived_facts["completion_failure_terminal_status_override"] = "bridge_window_partial_returned"
 
     binding = _bridge_binding(snapshot, event.bridge_window_id)
     if binding:
@@ -1255,6 +1520,8 @@ def check_event(
         "bridge_packet_implement_requires_write_authority",
         "bridge_packet_guardrail_failed",
         "bridge_result_guardrail_failed",
+        "bridge_result_completion_contract_not_satisfied",
+        "phase_exit_not_ready",
         "completion_report_guardrail_failed",
         "taskcreated_payload_incomplete",
         "taskcreated_team_binding_invalid",
@@ -1299,7 +1566,8 @@ def update_runtime(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     run = deepcopy(run_ledger)
     _ensure_workflow_indexes(run)
-    event_record = event.as_record()
+    _compact_run_ledger_storage(run)
+    event_record = _compact_event_record_for_ledger(event.as_record())
     run["updated_at"] = event.timestamp
     run["last_event_id"] = event.event_id
     if event.event_kind == "user_prompt_submitted":
@@ -1356,7 +1624,24 @@ def update_runtime(
         "bridge_result_returned_with_cleanup_required",
         "bridge_result_returned_with_user_clarification_request",
     }:
-        run["last_bridge_result"] = _build_bridge_result(event, to_status)
+        last_bridge_result = _build_bridge_result(event, to_status)
+        if "bridge_result_completion_contract_not_satisfied" in check_result.reasons:
+            last_bridge_result["status"] = "partial_or_failed"
+            last_bridge_result["failure_stage_or_null"] = "completion_contract"
+            last_bridge_result.setdefault(
+                "error_or_null",
+                {
+                    "type": "CompletionContractNotSatisfied",
+                    "message": "bridge result did not satisfy the original packet completion contract",
+                },
+            )
+        completion_validation = check_result.derived_facts.get("bridge_result_completion_validation")
+        if isinstance(completion_validation, dict):
+            last_bridge_result["completion_validation"] = completion_validation
+        packet_ref = check_result.derived_facts.get("bridge_result_completion_packet_ref")
+        if isinstance(packet_ref, str) and packet_ref:
+            last_bridge_result["completion_packet_ref"] = packet_ref
+        run["last_bridge_result"] = last_bridge_result
         _commit_bridge_result_phase(run, event, run["last_bridge_result"], to_status)
 
     return run, [transition]
@@ -1453,6 +1738,7 @@ def build_runtime_snapshot(paths: ControlPaths, run_ledger: dict[str, Any]) -> d
     allowed_routes = _allowed_routes_for_phase(phase_graph, current_phase)
     lifecycle = _derive_lifecycle(run)
     snapshot_refs = _snapshot_refs(paths, run["run_id"])
+    _backfill_last_bridge_result_completion_validation(paths, run, snapshot_refs)
     observer_summary = _observer_summary(paths, run["run_id"])
     runtime_diagnostics = _derive_runtime_diagnostics(run, lifecycle, snapshot_refs, observer_summary)
     integrity = _derive_integrity(run, runtime_diagnostics)
@@ -1486,7 +1772,7 @@ def build_runtime_snapshot(paths: ControlPaths, run_ledger: dict[str, Any]) -> d
         ),
         "lifecycle": lifecycle,
         "bindings": _compact_bindings_for_snapshot(run.get("bindings", _empty_bindings()), lifecycle),
-        "allowed_actions": _derive_allowed_actions(integrity, lifecycle),
+        "allowed_actions": _derive_allowed_actions(integrity, lifecycle, phase_exit_readiness),
         "allowed_routes": allowed_routes,
         "integrity": integrity,
         "runtime_diagnostics": runtime_diagnostics,
@@ -1589,12 +1875,26 @@ def persist_workflow_result(
         if transition.get("transition_id") in applied_transition_ids:
             append_jsonl(paths.transitions_path(event.run_id), transition)
 
-    atomic_write_json(paths.run_ledger_path(event.run_id), run_ledger)
-    atomic_write_json(snapshot_path, snapshot)
-    try:
-        companion_paths = observe_workflow_event(paths, _event_for_projection(event, check_result), snapshot)
-    except Exception as exc:
-        companion_paths = {"companion_observer_error": f"{exc.__class__.__name__}: {exc}"}
+    state_paths: dict[str, str] = {}
+    if update_result.ok:
+        atomic_write_json(paths.run_ledger_path(event.run_id), run_ledger)
+        atomic_write_json(snapshot_path, snapshot)
+        state_paths = {
+            "runtime_snapshot": str(snapshot_path),
+            "run_ledger": str(paths.run_ledger_path(event.run_id)),
+        }
+    else:
+        # Rejected events are audit facts, not state updates. Writing the
+        # pre-event ledger here can roll an active run back when concurrent
+        # bridge/reporting events have already advanced the authoritative state.
+        state_paths = {"state_write_skipped": "update_rejected"}
+    if update_result.ok:
+        try:
+            companion_paths = observe_workflow_event(paths, _event_for_projection(event, check_result), snapshot)
+        except Exception as exc:
+            companion_paths = {"companion_observer_error": f"{exc.__class__.__name__}: {exc}"}
+    else:
+        companion_paths = {"companion_observer_skipped": "update_rejected"}
     try:
         checkpoint_paths = write_event_checkpoint(paths, event, snapshot)
     except Exception as exc:
@@ -1615,8 +1915,7 @@ def persist_workflow_result(
         "check_ledger": str(check_path),
         "update_ledger": str(update_path),
         "main_leader_inbox": str(notify_path),
-        "runtime_snapshot": str(snapshot_path),
-        "run_ledger": str(paths.run_ledger_path(event.run_id)),
+        **state_paths,
         "transitions": str(paths.transitions_path(event.run_id)),
         **registry_paths,
         **companion_paths,
@@ -1627,15 +1926,103 @@ def persist_workflow_result(
 
 
 def load_recent_workflow_events(paths: ControlPaths, run_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
-    records = load_jsonl(paths.run_root(run_id) / "event_log.jsonl")
+    records = _load_jsonl_tail(paths.run_root(run_id) / "event_log.jsonl", max(limit, 1))
     return records[-limit:]
+
+
+def reconcile_run_ledger_if_stale(
+    control_root: str | Path,
+    run_id: str,
+    *,
+    repo_key: str | None = None,
+    runtime_runs_root: str | Path | None = None,
+    run_ledger: dict[str, Any] | None = None,
+    persist: bool = True,
+) -> dict[str, Any]:
+    if repo_key and runtime_runs_root is None:
+        runtime_runs_root = get_repo_runtime_root(control_root, repo_key)
+    paths = ControlPaths.from_root(control_root, runtime_runs_root)
+    current = run_ledger if isinstance(run_ledger, dict) else load_json_file(paths.run_ledger_path(run_id), default={}) or {}
+    if not current or not _run_ledger_needs_event_log_reconcile(paths, run_id, current):
+        return current
+    if not persist:
+        return current
+
+    with _workflow_dispatch_lock(paths, run_id):
+        latest = load_json_file(paths.run_ledger_path(run_id), default={}) or current
+        if latest and not _run_ledger_needs_event_log_reconcile(paths, run_id, latest):
+            return latest
+        reconcile_workflow_from_ledger(
+            control_root,
+            run_id,
+            repo_key=repo_key,
+            runtime_runs_root=runtime_runs_root,
+            persist=True,
+        )
+        return load_json_file(paths.run_ledger_path(run_id), default={}) or latest
+
+
+def _run_ledger_needs_event_log_reconcile(paths: ControlPaths, run_id: str, run_ledger: dict[str, Any]) -> bool:
+    run_root = paths.run_root(run_id)
+    ledger_transitions = run_ledger.get("workflow_transitions", [])
+    ledger_transition_ids = {
+        str(item.get("transition_id"))
+        for item in ledger_transitions
+        if isinstance(item, dict) and item.get("transition_id")
+    }
+    applied_updates = [
+        record
+        for record in _load_jsonl_tail(run_root / "update_ledger.jsonl", RECENT_UPDATE_RECONCILE_LIMIT)
+        if isinstance(record, dict) and bool(record.get("ok")) and str(record.get("decision") or "") == "applied"
+    ]
+    latest_update = applied_updates[-1] if applied_updates else None
+    latest_update_event_id = str(latest_update.get("event_id") or "").strip() if isinstance(latest_update, dict) else ""
+    if latest_update_event_id:
+        if str(run_ledger.get("last_event_id") or "") != latest_update_event_id:
+            return True
+    elif latest_update:
+        transition_ids = [str(item) for item in latest_update.get("transition_ids", []) if str(item or "").strip()]
+        if any(transition_id not in ledger_transition_ids for transition_id in transition_ids):
+            return True
+
+    lifecycle = run_ledger.get("lifecycle") if isinstance(run_ledger.get("lifecycle"), dict) else {}
+    open_windows = {str(item) for item in lifecycle.get("open_bridge_window_ids", []) if str(item or "").strip()}
+    if open_windows:
+        if latest_update and str(latest_update.get("event_kind") or "").strip() in BRIDGE_TERMINAL_EVENT_KINDS:
+            return True
+        for record in reversed(ledger_transitions):
+            if not isinstance(record, dict):
+                continue
+            bridge_window_id = str(record.get("bridge_window_id") or "").strip()
+            event_kind = str(record.get("event_kind") or "").strip()
+            if bridge_window_id in open_windows and event_kind in BRIDGE_TERMINAL_EVENT_KINDS:
+                return True
+
+    latest_result = run_ledger.get("last_bridge_result") if isinstance(run_ledger.get("last_bridge_result"), dict) else {}
+    for record in reversed(ledger_transitions):
+        if not isinstance(record, dict):
+            continue
+        event_kind = str(record.get("event_kind") or "").strip()
+        if event_kind not in BRIDGE_RESULT_RETURNED_EVENT_KINDS:
+            continue
+        if str(latest_result.get("bridge_window_id") or "") != str(record.get("bridge_window_id") or ""):
+            return True
+        if str(latest_result.get("returned_at") or "") != str(record.get("timestamp") or ""):
+            return True
+        break
+
+    return False
 
 
 def _next_jsonl_sequence(path: Path) -> int:
     if not path.exists():
         return 1
     try:
-        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()) + 1
+        count = 0
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                count += chunk.count(b"\n")
+        return count + 1
     except Exception:
         return 1
 
@@ -1679,15 +2066,23 @@ def reconcile_workflow_from_ledger(
     replay_run = _base_run_for_replay(current_run, run_id, first_event=event_records[0])
     lifecycle_transitions = load_lifecycle_transitions(paths)
     allowed_policy_events = load_allowed_policy_events(paths)
+    historical_checks, historical_updates = _historical_replay_indexes(paths, run_id)
     replayed: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
 
     for raw_event in event_records:
         event = WorkflowEvent.from_payload(raw_event, replay_run)
-        snapshot_before = build_runtime_snapshot(paths, replay_run)
-        check_result = check_event(event, snapshot_before, lifecycle_transitions, allowed_policy_events, control_root=paths.control_root)
         update_kind = EVENT_TO_UPDATE_KIND.get(event.event_kind, "generic_runtime_update")
-        should_apply = check_result.decision == "allow" or _denied_failure_update_is_recordable(check_result, update_kind)
+        historical_check_record = historical_checks.get(event.event_id)
+        historical_update_record = historical_updates.get(event.event_id)
+        used_historical_check = historical_check_record is not None and historical_update_record is not None
+        if used_historical_check:
+            check_result = _check_result_from_historical_record(historical_check_record)
+            should_apply = _historical_update_applied(historical_update_record)
+        else:
+            snapshot_before = build_runtime_snapshot(paths, replay_run)
+            check_result = check_event(event, snapshot_before, lifecycle_transitions, allowed_policy_events, control_root=paths.control_root)
+            should_apply = check_result.decision == "allow" or _denied_failure_update_is_recordable(check_result, update_kind)
         if should_apply:
             replay_run, transitions = update_runtime(event, replay_run, check_result, update_kind, lifecycle_transitions)
         else:
@@ -1700,16 +2095,18 @@ def reconcile_workflow_from_ledger(
                     "event_kind": event.event_kind,
                     "decision": check_result.decision,
                     "reasons": check_result.reasons,
+                    "historical_check_reused": used_historical_check,
                 }
             )
-        replayed.append(
-            {
-                "event_id": event.event_id,
-                "event_kind": event.event_kind,
-                "decision": check_result.decision,
-                "transition_ids": [transition["transition_id"] for transition in transitions],
-            }
-        )
+        replayed_item = {
+            "event_id": event.event_id,
+            "event_kind": event.event_kind,
+            "decision": check_result.decision,
+            "transition_ids": [transition["transition_id"] for transition in transitions],
+        }
+        if used_historical_check:
+            replayed_item["historical_check_reused"] = True
+        replayed.append(replayed_item)
 
     snapshot = build_runtime_snapshot(paths, replay_run)
     result = {
@@ -1733,6 +2130,44 @@ def reconcile_workflow_from_ledger(
     return result
 
 
+def _historical_replay_indexes(paths: ControlPaths, run_id: str) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    run_root = paths.run_root(run_id)
+    checks: dict[str, dict[str, Any]] = {}
+    updates: dict[str, dict[str, Any]] = {}
+    for record in load_jsonl(run_root / "check_ledger.jsonl"):
+        if not isinstance(record, dict):
+            continue
+        event_id = str(record.get("event_id") or "").strip()
+        if event_id:
+            checks[event_id] = record
+    for record in load_jsonl(run_root / "update_ledger.jsonl"):
+        if not isinstance(record, dict):
+            continue
+        event_id = str(record.get("event_id") or "").strip()
+        if event_id:
+            updates[event_id] = record
+    return checks, updates
+
+
+def _check_result_from_historical_record(record: dict[str, Any]) -> CheckResult:
+    normalized_payload = record.get("normalized_payload") if isinstance(record.get("normalized_payload"), dict) else {}
+    derived_facts = record.get("derived_facts") if isinstance(record.get("derived_facts"), dict) else {}
+    reasons = record.get("reasons") if isinstance(record.get("reasons"), list) else []
+    return CheckResult(
+        ok=bool(record.get("ok")),
+        decision=str(record.get("decision") or ("allow" if record.get("ok") else "deny")),
+        code=str(record.get("code") or "historical_replay"),
+        reasons=[str(reason) for reason in reasons],
+        normalized_payload=deepcopy(normalized_payload),
+        derived_facts=deepcopy(derived_facts),
+        audit_ref=str(record.get("audit_ref") or f"chk_replay_{uuid.uuid4().hex[:16]}"),
+    )
+
+
+def _historical_update_applied(record: dict[str, Any]) -> bool:
+    return bool(record.get("ok")) and str(record.get("decision") or "").strip() == "applied"
+
+
 def load_lifecycle_transitions(paths: ControlPaths) -> dict[str | None, dict[str, str]]:
     table_path = paths.control_root / "policy" / "lifecycle_transition_table.json"
     payload = load_json_file(table_path, default={}) or {}
@@ -1750,12 +2185,17 @@ def load_lifecycle_transitions(paths: ControlPaths) -> dict[str | None, dict[str
 
 
 def _denied_failure_update_is_recordable(check_result: CheckResult, update_kind: str) -> bool:
+    if "lifecycle_transition_not_allowed" in check_result.reasons:
+        return False
+    if (
+        update_kind == "persist_bridge_result_returned"
+        and "bridge_result_completion_contract_not_satisfied" in check_result.reasons
+    ):
+        return True
     if update_kind not in FAILURE_UPDATE_KINDS:
         return False
     if check_result.decision == "allow":
         return True
-    if "lifecycle_transition_not_allowed" in check_result.reasons:
-        return False
     return True
 
 
@@ -1954,7 +2394,7 @@ def _build_transition(event: WorkflowEvent, update_kind: str, check_result: Chec
         "event_kind": event.event_kind,
         "update_kind": update_kind,
         "decision": check_result.decision,
-        "payload": deepcopy(check_result.normalized_payload),
+        "payload": _compact_payload_for_ledger(check_result.normalized_payload),
         "timestamp": event.timestamp,
     }
     transition["runtime_event"] = normalize_runtime_event(
@@ -1966,6 +2406,196 @@ def _build_transition(event: WorkflowEvent, update_kind: str, check_result: Chec
         safe_preview=f"{event.event_kind}->{to_status}",
     )
     return transition
+
+
+def _compact_run_ledger_storage(run: dict[str, Any]) -> None:
+    recent_events = run.get("recent_events")
+    if isinstance(recent_events, list):
+        run["recent_events"] = [
+            _compact_event_record_for_ledger(item)
+            for item in recent_events[-LEDGER_RECENT_EVENTS_LIMIT:]
+            if isinstance(item, dict)
+        ]
+
+    transitions = run.get("workflow_transitions")
+    if isinstance(transitions, list):
+        keep_by_index: set[int] = set(range(max(0, len(transitions) - LEDGER_TRANSITIONS_LIMIT), len(transitions)))
+        open_ids = {
+            str(item)
+            for item in (run.get("lifecycle", {}) if isinstance(run.get("lifecycle"), dict) else {}).get("open_bridge_window_ids", [])
+            if str(item or "").strip()
+        }
+        if open_ids:
+            seen_open: set[str] = set()
+            for index in range(len(transitions) - 1, -1, -1):
+                item = transitions[index]
+                if not isinstance(item, dict):
+                    continue
+                bridge_window_id = str(item.get("bridge_window_id") or "")
+                if bridge_window_id in open_ids and bridge_window_id not in seen_open:
+                    keep_by_index.add(index)
+                    seen_open.add(bridge_window_id)
+                    if seen_open == open_ids:
+                        break
+        run["workflow_transitions"] = [
+            _compact_transition_for_ledger(transitions[index])
+            for index in sorted(keep_by_index)
+            if isinstance(transitions[index], dict)
+        ]
+
+    retry_context = run.get("retry_context")
+    if isinstance(retry_context, dict) and isinstance(retry_context.get("attempts"), list):
+        retry_context["attempts"] = [
+            _compact_payload_for_ledger(item)
+            for item in retry_context.get("attempts", [])[-LEDGER_RECENT_EVENTS_LIMIT:]
+            if isinstance(item, dict)
+        ]
+        if isinstance(retry_context.get("latest"), dict):
+            retry_context["latest"] = _compact_payload_for_ledger(retry_context["latest"])
+
+
+def _compact_transition_for_ledger(transition: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(transition)
+    payload = compact.get("payload")
+    if isinstance(payload, dict):
+        compact["payload"] = _compact_payload_for_ledger(payload)
+    return compact
+
+
+def _compact_event_record_for_ledger(record: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(record)
+    payload = compact.get("payload")
+    if isinstance(payload, dict):
+        compact["payload"] = _compact_payload_for_ledger(payload)
+    return compact
+
+
+def _compact_payload_for_ledger(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return _compact_value_for_snapshot(payload)
+    compact: dict[str, Any] = {}
+    for key, value in payload.items():
+        key_text = str(key)
+        if key_text == "packet" and isinstance(value, dict):
+            compact["packet_summary"] = _compact_packet_for_ledger(value)
+            compact["packet_hash"] = retry_packet_hash(value)
+        elif key_text == "tool_input" and isinstance(value, dict):
+            tool_input = {str(k): v for k, v in value.items() if str(k) != "packet"}
+            if isinstance(value.get("packet"), dict):
+                tool_input["packet_summary"] = _compact_packet_for_ledger(value["packet"])
+                tool_input["packet_hash"] = retry_packet_hash(value["packet"])
+            compact[key_text] = _compact_value_for_snapshot(tool_input)
+        elif key_text == "bridge_result" and isinstance(value, dict):
+            compact[key_text] = _compact_bridge_result_storage(value)
+        elif key_text in {"reports", "artifact_refs"} and isinstance(value, list):
+            compact[f"{key_text}_count"] = len(value)
+            compact[f"{key_text}_preview"] = _compact_value_for_snapshot(value)
+        else:
+            compact[key_text] = _compact_value_for_snapshot(value)
+    return compact
+
+
+def _compact_packet_for_ledger(packet: dict[str, Any]) -> dict[str, Any]:
+    binding = packet.get("binding") if isinstance(packet.get("binding"), dict) else {}
+    frozen = packet.get("frozen_semantics") if isinstance(packet.get("frozen_semantics"), dict) else {}
+    task_spec = packet.get("task_spec") if isinstance(packet.get("task_spec"), dict) else {}
+    team_spec = packet.get("team_spec") if isinstance(packet.get("team_spec"), dict) else {}
+    teammates = []
+    for item in team_spec.get("teammate_specs", []) if isinstance(team_spec.get("teammate_specs"), list) else []:
+        if isinstance(item, dict):
+            teammates.append(
+                {
+                    "teammate_name": item.get("teammate_name"),
+                    "role": item.get("role"),
+                    "allowed_tools": list(item.get("allowed_tools") or [])[:SNAPSHOT_LIST_LIMIT],
+                }
+            )
+    return {
+        "schema_version": packet.get("schema_version"),
+        "repo_key": packet.get("repo_key") or binding.get("repo_key"),
+        "run_id": binding.get("run_id") or packet.get("run_id"),
+        "main_session_id": binding.get("main_session_id"),
+        "sub_session_id": binding.get("sub_session_id"),
+        "bridge_window_id": binding.get("bridge_window_id"),
+        "team_id_or_null": binding.get("team_id_or_null"),
+        "task_id_or_null": binding.get("task_id_or_null"),
+        "target_phase": packet.get("target_phase"),
+        "phase_route": _compact_value_for_snapshot(packet.get("phase_route")),
+        "task_subject": frozen.get("task_subject") or task_spec.get("task_subject"),
+        "task_kind": frozen.get("task_kind") or task_spec.get("task_kind"),
+        "teammates": teammates[:SNAPSHOT_LIST_LIMIT],
+    }
+
+
+def _compact_bridge_result_storage(result: dict[str, Any]) -> dict[str, Any]:
+    reports = result.get("reports") if isinstance(result.get("reports"), list) else []
+    artifacts = result.get("artifact_refs") if isinstance(result.get("artifact_refs"), list) else []
+    completion_validation = result.get("completion_validation") if isinstance(result.get("completion_validation"), dict) else {}
+    return {
+        "run_id": result.get("run_id"),
+        "main_session_id": result.get("main_session_id"),
+        "sub_session_id": result.get("sub_session_id"),
+        "bridge_window_id": result.get("bridge_window_id"),
+        "team_id_or_null": result.get("team_id_or_null"),
+        "task_id_or_null": result.get("task_id_or_null"),
+        "status": result.get("status"),
+        "failure_stage_or_null": result.get("failure_stage_or_null"),
+        "cleanup_required": bool(result.get("cleanup_required", False)),
+        "returned_at": result.get("returned_at"),
+        "report_count": len(reports),
+        "artifact_count": len(artifacts),
+        "reports_preview": _compact_value_for_snapshot(reports),
+        "artifact_refs_preview": _compact_value_for_snapshot(artifacts),
+        "evidence_summary": _compact_value_for_snapshot(result.get("evidence")),
+        "error_or_null": _compact_value_for_snapshot(result.get("error_or_null")),
+        "completion_packet_ref": result.get("completion_packet_ref"),
+        "completion_validation": _compact_completion_validation_for_snapshot(completion_validation),
+    }
+
+
+def _backfill_last_bridge_result_completion_validation(
+    paths: ControlPaths,
+    run: dict[str, Any],
+    snapshot_refs: dict[str, str],
+) -> None:
+    result = run.get("last_bridge_result")
+    if not isinstance(result, dict):
+        return
+    if isinstance(result.get("completion_validation"), dict):
+        return
+    if str(result.get("status") or "").strip().lower() not in {"succeeded", "success"}:
+        return
+    bridge_window_id = str(result.get("bridge_window_id") or "").strip()
+    if not bridge_window_id:
+        return
+    snapshot_stub = {
+        "snapshot_refs": snapshot_refs,
+        "run_id": run.get("run_id"),
+        "main_session_id": run.get("main_session_id") or run.get("run_id"),
+        "current_phase": run.get("current_phase") or "leader_freeze",
+        "route": run.get("route", {}),
+        "bindings": run.get("bindings", _empty_bindings()),
+    }
+    packet, packet_ref = _load_packet_for_window(snapshot_stub, bridge_window_id)
+    if not packet:
+        return
+    validation = validate_bridge_completion(
+        packet,
+        result,
+        context={
+            "run_id": run.get("run_id"),
+            "bridge_window_id": bridge_window_id,
+            "team_id": result.get("team_id_or_null"),
+            "task_id": result.get("task_id_or_null"),
+            "agent_id": "runtime.snapshot_legacy_completion_backfill",
+        },
+        control_root=paths.control_root,
+        base_dir=paths.run_root(str(run.get("run_id") or "")),
+    )
+    result["completion_validation"] = validation
+    if packet_ref:
+        result["completion_packet_ref"] = packet_ref
+    result["completion_validation_backfilled"] = True
 
 
 def _packet_from_event(event: WorkflowEvent) -> dict[str, Any] | None:
@@ -1983,12 +2613,12 @@ def _completion_packet_for_window(
     event: WorkflowEvent,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], str | None]:
-    packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else None
-    if packet:
-        return packet, payload.get("packet_ref") if isinstance(payload.get("packet_ref"), str) else "completion_payload:packet"
     packet, packet_ref = _load_packet_for_window(snapshot, event.bridge_window_id)
     if packet:
         return packet, packet_ref
+    packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else None
+    if packet:
+        return packet, payload.get("packet_ref") if isinstance(payload.get("packet_ref"), str) else "completion_payload:packet"
     contract = payload.get("completion_contract") or payload.get("contract") or {}
     return (
         {
@@ -2007,7 +2637,24 @@ def _load_packet_for_window(snapshot: dict[str, Any], bridge_window_id: str | No
     event_log_ref = _snapshot_ref_path(snapshot, "canonical_event_log") or _snapshot_ref_path(snapshot, "event_log")
     if not event_log_ref:
         return None, None
-    records = load_jsonl(Path(event_log_ref))
+    event_log_path = Path(event_log_ref)
+    records = _load_jsonl_tail(event_log_path, EVENT_LOG_PACKET_LOOKBACK_LINES)
+    if not records:
+        records = load_jsonl(event_log_path)
+    for record in reversed(records):
+        if str(record.get("bridge_window_id") or "") != str(bridge_window_id):
+            continue
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        packet = payload.get("packet")
+        if isinstance(packet, dict):
+            return packet, f"event_log.jsonl:{record.get('event_id') or '?'}"
+        tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+        packet = tool_input.get("packet")
+        if isinstance(packet, dict):
+            return packet, f"event_log.jsonl:{record.get('event_id') or '?'}"
+    if not _file_size_at_most(event_log_path, OBSERVER_STREAM_COUNT_BYTE_LIMIT):
+        return None, None
+    records = load_jsonl(event_log_path)
     for record in reversed(records):
         if str(record.get("bridge_window_id") or "") != str(bridge_window_id):
             continue
@@ -2139,6 +2786,7 @@ def _snapshot_refs(paths: ControlPaths, run_id: str) -> dict[str, str]:
         "main_leader_inbox": str(run_root / "main_leader_inbox.jsonl"),
         "teammate_reports": str(run_root / "teammate_reports.jsonl"),
         "tool_events": str(run_root / "tool_events.jsonl"),
+        "sdk_stream_events": str(run_root / "sdk_stream_events.jsonl"),
         "artifacts": str(run_root / "artifacts.jsonl"),
         "process_events": str(run_root / "process_events.jsonl"),
         "completion_checks": str(run_root / "completion_checks.jsonl"),
@@ -2156,16 +2804,28 @@ def _observer_summary(paths: ControlPaths, run_id: str) -> dict[str, Any]:
         "process_events": run_root / "process_events.jsonl",
         "completion_checks": run_root / "completion_checks.jsonl",
         "tool_events": run_root / "tool_events.jsonl",
+        "sdk_stream_events": run_root / "sdk_stream_events.jsonl",
         "agent_messages": run_root / "agent_messages.jsonl",
     }
     by_window: dict[str, dict[str, int]] = {}
+    latest_by_window: dict[str, dict[str, dict[str, str]]] = {}
     totals: dict[str, int] = {}
     for kind, path in streams.items():
         try:
-            records = load_jsonl(path) or []
+            if kind == "sdk_stream_events":
+                tail_lines = SDK_STREAM_OBSERVER_TAIL_LINES
+                byte_limit = min(SDK_STREAM_OBSERVER_COUNT_BYTE_LIMIT, OBSERVER_SUMMARY_BYTE_LIMIT)
+            elif kind == "tool_events":
+                tail_lines = min(OBSERVER_STREAM_TAIL_LINES, TOOL_EVENTS_OBSERVER_TAIL_LINES)
+                byte_limit = OBSERVER_SUMMARY_BYTE_LIMIT
+            else:
+                tail_lines = OBSERVER_STREAM_TAIL_LINES
+                byte_limit = OBSERVER_SUMMARY_BYTE_LIMIT
+            records = _load_jsonl_tail(path, tail_lines, max_bytes=byte_limit)
+            totals[kind] = len(records)
         except Exception:
             records = []
-        totals[kind] = len(records)
+            totals[kind] = 0
         for record in records:
             if not isinstance(record, dict):
                 continue
@@ -2174,7 +2834,79 @@ def _observer_summary(paths: ControlPaths, run_id: str) -> dict[str, Any]:
                 continue
             by_window.setdefault(bridge_window_id, {})
             by_window[bridge_window_id][kind] = by_window[bridge_window_id].get(kind, 0) + 1
-    return {"totals": totals, "by_bridge_window_id": by_window}
+            timestamp = _parse_iso(record.get("timestamp") or record.get("created_at") or record.get("ts"))
+            if timestamp is None:
+                continue
+            current = latest_by_window.setdefault(bridge_window_id, {}).get(kind, {})
+            current_timestamp = _parse_iso(current.get("timestamp")) if isinstance(current, dict) else None
+            if current_timestamp is not None and current_timestamp >= timestamp:
+                continue
+            latest_by_window[bridge_window_id][kind] = {
+                "timestamp": timestamp.isoformat(),
+                "event_kind": str(
+                    record.get("event_kind")
+                    or record.get("source_event_kind")
+                    or record.get("event_type")
+                    or record.get("raw_stream_event_type")
+                    or ""
+                ),
+            }
+    return {"totals": totals, "by_bridge_window_id": by_window, "latest_by_bridge_window_id": latest_by_window}
+
+
+def _count_text_lines(path: Path) -> int:
+    total = 0
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                total += chunk.count(b"\n")
+    except Exception:
+        return 0
+    return total
+
+
+def _file_size_at_most(path: Path, limit: int) -> bool:
+    try:
+        return path.stat().st_size <= limit
+    except Exception:
+        return True
+
+
+def _load_jsonl_tail(path: Path, max_lines: int, *, max_bytes: int | None = None) -> list[dict[str, Any]]:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            data = b""
+            lines: list[bytes] = []
+            bytes_read = 0
+            byte_limit = max(0, int(max_bytes)) if max_bytes is not None else None
+            while position > 0 and len(lines) <= max_lines:
+                if byte_limit is not None and bytes_read >= byte_limit:
+                    break
+                read_size = min(64 * 1024, position)
+                if byte_limit is not None:
+                    read_size = min(read_size, byte_limit - bytes_read)
+                    if read_size <= 0:
+                        break
+                position -= read_size
+                handle.seek(position)
+                data = handle.read(read_size) + data
+                bytes_read += read_size
+                lines = data.splitlines()
+    except Exception:
+        return []
+    records: list[dict[str, Any]] = []
+    for raw_line in lines[-max_lines:]:
+        if not raw_line.strip():
+            continue
+        try:
+            item = json.loads(raw_line.decode("utf-8", errors="replace"))
+        except Exception:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    return records
 
 
 def _derive_runtime_diagnostics(
@@ -2189,6 +2921,8 @@ def _derive_runtime_diagnostics(
     status_index = lifecycle.get("status_index") if isinstance(lifecycle.get("status_index"), dict) else {}
     open_window_ids = [str(item) for item in lifecycle.get("open_bridge_window_ids", []) if str(item)]
     observer_by_window = observer_summary.get("by_bridge_window_id") if isinstance(observer_summary.get("by_bridge_window_id"), dict) else {}
+    latest_by_window = observer_summary.get("latest_by_bridge_window_id") if isinstance(observer_summary.get("latest_by_bridge_window_id"), dict) else {}
+    active_process_candidates: dict[str, list[dict[str, Any]]] = {}
     for bridge_window_id in open_window_ids:
         status = str(status_index.get(bridge_window_id) or "")
         binding = run.get("bindings", {}).get("bridge_windows", {}).get(bridge_window_id, {})
@@ -2204,11 +2938,43 @@ def _derive_runtime_diagnostics(
         report_count = int(counts.get("teammate_reports", 0) or 0)
         artifact_count = int(counts.get("artifacts", 0) or 0)
         completion_count = int(counts.get("completion_checks", 0) or 0)
-        no_downstream_evidence = process_count == 0 and report_count == 0 and artifact_count == 0 and completion_count == 0
-        stuck_after_dispatch = status == "message_dispatch_completed" and no_downstream_evidence
+        sdk_stream_count = int(counts.get("sdk_stream_events", 0) or 0)
+        latest_for_window = latest_by_window.get(bridge_window_id) if isinstance(latest_by_window.get(bridge_window_id), dict) else {}
+        sdk_stream_latest = latest_for_window.get("sdk_stream_events") if isinstance(latest_for_window.get("sdk_stream_events"), dict) else {}
+        sdk_stream_latest_at = _parse_iso(sdk_stream_latest.get("timestamp")) if isinstance(sdk_stream_latest, dict) else None
+        sdk_stream_age_seconds = _elapsed_seconds(sdk_stream_latest_at, now)
+        sdk_stream_recent = sdk_stream_age_seconds is not None and sdk_stream_age_seconds < ORCHESTRATION_ANOMALY_OPEN_SECONDS
         open_too_long = open_seconds is not None and open_seconds >= ORCHESTRATION_ANOMALY_OPEN_SECONDS
+        should_scan_process_table = (
+            status in ORCHESTRATION_ANOMALY_STUCK_STATUSES
+            and open_too_long
+            and process_count == 0
+            and report_count == 0
+            and artifact_count == 0
+            and completion_count == 0
+            and not sdk_stream_recent
+        )
+        process_table_candidates = _active_process_table_matches(bridge_window_id) if should_scan_process_table else []
+        if process_table_candidates:
+            active_process_candidates[bridge_window_id] = process_table_candidates
+        no_downstream_evidence = (
+            process_count == 0
+            and report_count == 0
+            and artifact_count == 0
+            and completion_count == 0
+            and not sdk_stream_recent
+            and not process_table_candidates
+        )
+        stuck_after_dispatch = status == "message_dispatch_completed" and no_downstream_evidence
         if status in ORCHESTRATION_ANOMALY_STUCK_STATUSES and open_too_long and no_downstream_evidence:
-            conditions = ["bridge_window_open_too_long", "no_process_refs", "no_reports", "no_artifacts"]
+            conditions = [
+                "bridge_window_open_too_long",
+                "no_process_refs",
+                "no_process_table_candidates",
+                "no_reports",
+                "no_artifacts",
+                "no_recent_sdk_stream_events",
+            ]
             if stuck_after_dispatch:
                 conditions.append("status_stuck_at_message_dispatch_completed")
             anomalies.append(
@@ -2216,12 +2982,13 @@ def _derive_runtime_diagnostics(
                     "level": "blocking",
                     "category": "workflow_instability",
                     "classification": "bridge_orchestration_hang",
-                    "message": "bridge window is open too long without process, report, artifact, or completion evidence",
+                    "message": "bridge window is open too long without process, report, artifact, completion, or recent SDK stream evidence",
                     "bridge_window_id": bridge_window_id,
                     "status": status,
                     "conditions": conditions,
                     "open_seconds": open_seconds,
                     "last_event_age_seconds": last_event_age_seconds,
+                    "sdk_stream_age_seconds": sdk_stream_age_seconds,
                     "last_event_id": latest_transition.get("based_on_event"),
                     "team_id_or_null": binding.get("team_id_or_null"),
                     "task_id_or_null": binding.get("task_id_or_null"),
@@ -2230,6 +2997,8 @@ def _derive_runtime_diagnostics(
                         "teammate_reports": report_count,
                         "artifacts": artifact_count,
                         "completion_checks": completion_count,
+                        "sdk_stream_events": sdk_stream_count,
+                        "process_table_candidates": len(process_table_candidates),
                     },
                     "diagnostic_refs": {
                         "runtime_snapshot": refs.get("run_root"),
@@ -2239,6 +3008,7 @@ def _derive_runtime_diagnostics(
                         "artifacts": refs.get("artifacts"),
                         "process_events": refs.get("process_events"),
                         "tool_events": refs.get("tool_events"),
+                        "sdk_stream_events": refs.get("sdk_stream_events"),
                         "active_operations": refs.get("active_operations"),
                         "bridge_prompts_dir": refs.get("bridge_prompts_dir"),
                     },
@@ -2302,6 +3072,7 @@ def _derive_runtime_diagnostics(
     return {
         "detail_level": "compact",
         "observer_stream_counts": observer_summary.get("totals", {}),
+        "active_process_candidates": active_process_candidates,
         "orchestration_anomalies": anomalies[:SNAPSHOT_LIST_LIMIT],
         "execute_watchdog_alerts": watchdog_alerts[:SNAPSHOT_LIST_LIMIT],
         "has_blocking_orchestration_anomaly": any(item.get("level") == "blocking" for item in anomalies),
@@ -2320,6 +3091,7 @@ def _compact_bridge_result_for_snapshot(result: Any, refs: dict[str, str]) -> di
     artifacts = result.get("artifact_refs") if isinstance(result.get("artifact_refs"), list) else []
     evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else result.get("evidence")
     error = result.get("error_or_null")
+    completion_validation = result.get("completion_validation") if isinstance(result.get("completion_validation"), dict) else {}
     return {
         "detail_level": "compact",
         "full_result_ref": refs.get("run_ledger"),
@@ -2341,6 +3113,8 @@ def _compact_bridge_result_for_snapshot(result: Any, refs: dict[str, str]) -> di
         "artifact_refs_preview": [_compact_artifact_ref_for_snapshot(item) for item in artifacts[:SNAPSHOT_LIST_LIMIT]],
         "evidence_summary": _compact_value_for_snapshot(evidence),
         "error_or_null": _compact_value_for_snapshot(error),
+        "completion_packet_ref": result.get("completion_packet_ref"),
+        "completion_validation": _compact_completion_validation_for_snapshot(completion_validation),
         "omitted": {
             "reports": max(0, len(reports) - SNAPSHOT_LIST_LIMIT),
             "artifact_refs": max(0, len(artifacts) - SNAPSHOT_LIST_LIMIT),
@@ -2410,6 +3184,34 @@ def _latest_mapping_keys(mapping: dict[str, Any], limit: int) -> list[str]:
 
 def _latest_mapping_items(mapping: dict[str, Any], limit: int) -> list[tuple[str, Any]]:
     return [(str(key), value) for key, value in list(mapping.items())[-limit:]]
+
+
+def _compact_completion_validation_for_snapshot(validation: dict[str, Any]) -> dict[str, Any] | None:
+    if not validation:
+        return None
+    checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []
+    blocking = [
+        {
+            "name": item.get("name"),
+            "subject": item.get("subject"),
+            "status": item.get("status"),
+            "message": _compact_text(str(item.get("message") or "")),
+        }
+        for item in checks
+        if isinstance(item, dict) and item.get("status") in {"fail", "block"}
+    ]
+    return {
+        "validated_by": validation.get("validated_by"),
+        "final_disposition": validation.get("final_disposition"),
+        "required_outputs_present": validation.get("required_outputs_present"),
+        "required_artifacts_present": validation.get("required_artifacts_present"),
+        "validation_passed": validation.get("validation_passed"),
+        "missing_outputs": _compact_value_for_snapshot(validation.get("missing_outputs", [])),
+        "missing_artifacts": _compact_value_for_snapshot(validation.get("missing_artifacts", [])),
+        "failed_validations": _compact_value_for_snapshot(validation.get("failed_validations", [])),
+        "blocking_checks": blocking[:SNAPSHOT_LIST_LIMIT],
+        "omitted": {"blocking_checks": max(0, len(blocking) - SNAPSHOT_LIST_LIMIT)},
+    }
 
 
 def _compact_value_for_snapshot(value: Any, *, depth: int = 0) -> Any:
@@ -2509,6 +3311,78 @@ def _process_ref_looks_running(ref: Any) -> bool:
     return bool(ref.get("pid") or ref.get("process_ref") or ref.get("process_id"))
 
 
+def _active_process_table_matches(bridge_window_id: str) -> list[dict[str, Any]]:
+    bridge_window_id = str(bridge_window_id or "").strip()
+    proc_root = Path("/proc")
+    if os.name != "posix" or not bridge_window_id or not proc_root.exists():
+        return []
+    matches: list[dict[str, Any]] = []
+    current_pid = os.getpid()
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            pid = int(entry.name)
+        except ValueError:
+            continue
+        if pid == current_pid:
+            continue
+        cmdline = _read_proc_cmdline(entry)
+        if not cmdline or bridge_window_id not in cmdline:
+            continue
+        matches.append(
+            {
+                "pid": pid,
+                "ppid": _read_proc_ppid(entry),
+                "state": _read_proc_state(entry),
+                "command_preview": _compact_text(_redact_process_command(cmdline)[:PROCESS_TABLE_COMMAND_PREVIEW_LIMIT]),
+                "source": "process_table",
+            }
+        )
+        if len(matches) >= SNAPSHOT_LIST_LIMIT:
+            break
+    return matches
+
+
+def _read_proc_cmdline(proc_entry: Path) -> str:
+    try:
+        data = (proc_entry / "cmdline").read_bytes()[:65536]
+    except Exception:
+        return ""
+    return data.replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
+
+
+def _read_proc_state(proc_entry: Path) -> str | None:
+    try:
+        parts = (proc_entry / "stat").read_text(encoding="utf-8", errors="replace").split()
+    except Exception:
+        return None
+    return parts[2] if len(parts) > 2 else None
+
+
+def _read_proc_ppid(proc_entry: Path) -> int | None:
+    try:
+        parts = (proc_entry / "stat").read_text(encoding="utf-8", errors="replace").split()
+        return int(parts[3]) if len(parts) > 3 else None
+    except Exception:
+        return None
+
+
+def _redact_process_command(command: str) -> str:
+    text = str(command or "")
+    text = re.sub(
+        r"(?i)((?:--)?[\w-]*(?:token|password|secret|api[-_]?key)[\w-]*(?:=|\s+))([^ \t\r\n]+)",
+        r"\1<redacted>",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|API_KEY)[A-Z0-9_]*=)([^ \t\r\n]+)",
+        r"\1<redacted>",
+        text,
+    )
+    return text
+
+
 def _derive_integrity(run: dict[str, Any], runtime_diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
     approval = run.get("approval_state", {})
     hard_stop = run.get("hard_stop", {})
@@ -2587,17 +3461,57 @@ def _derive_lifecycle(run: dict[str, Any]) -> dict[str, Any]:
 def _derive_phase_exit_readiness(run: dict[str, Any]) -> dict[str, Any]:
     lifecycle = _derive_lifecycle(run)
     blocking = list(lifecycle.get("open_bridge_window_ids", []))
+    current_phase = str(run.get("current_phase") or "leader_freeze")
+    latest_result = run.get("last_bridge_result") if isinstance(run.get("last_bridge_result"), dict) else {}
+    latest_window_id = str(latest_result.get("bridge_window_id") or "") if latest_result else ""
+    latest_status = str(latest_result.get("status") or "").strip().lower() if latest_result else ""
+    lifecycle_status = ""
+    target_phase = None
+    if latest_window_id:
+        lifecycle_status = str(lifecycle.get("status_index", {}).get(latest_window_id) or "")
+        binding = run.get("bindings", {}).get("bridge_windows", {}).get(latest_window_id, {})
+        if isinstance(binding, dict) and binding.get("target_phase"):
+            target_phase = str(binding.get("target_phase"))
+    completion_validation = latest_result.get("completion_validation") if isinstance(latest_result.get("completion_validation"), dict) else None
+    blocking_reasons: list[str] = []
+    if blocking:
+        blocking_reasons.append("open_bridge_windows")
+    if latest_result:
+        if latest_status not in {"succeeded", "success"}:
+            blocking_reasons.append("latest_bridge_result_not_successful")
+        if bool(latest_result.get("cleanup_required")):
+            blocking_reasons.append("latest_bridge_cleanup_required")
+        if lifecycle_status and lifecycle_status != "bridge_window_returned":
+            blocking_reasons.append("latest_bridge_lifecycle_not_returned")
+        if target_phase and target_phase != current_phase:
+            blocking_reasons.append("latest_bridge_result_not_current_phase")
+        if latest_status in {"succeeded", "success"}:
+            if completion_validation is None:
+                blocking_reasons.append("latest_bridge_completion_not_validated")
+            elif not completion_succeeded(completion_validation):
+                blocking_reasons.append("latest_bridge_completion_not_satisfied")
     return {
-        "current_phase": run.get("current_phase", "leader_freeze"),
-        "exit_ready": len(blocking) == 0,
+        "current_phase": current_phase,
+        "exit_ready": not blocking_reasons,
+        "blocking_reasons": blocking_reasons,
         "blocking_event_ids": [],
         "blocking_task_ids": [],
         "blocking_bridge_window_ids": blocking,
+        "latest_bridge_window_id": latest_window_id or None,
+        "latest_bridge_result_status": latest_status or None,
+        "latest_bridge_lifecycle_status": lifecycle_status or None,
+        "latest_bridge_target_phase": target_phase,
+        "latest_completion_final_disposition": completion_validation.get("final_disposition") if isinstance(completion_validation, dict) else None,
+        "latest_completion_validated": completion_validation is not None,
         "changed_recently": bool(run.get("last_event_id")),
     }
 
 
-def _derive_allowed_actions(integrity: dict[str, Any], lifecycle: dict[str, Any]) -> list[str]:
+def _derive_allowed_actions(
+    integrity: dict[str, Any],
+    lifecycle: dict[str, Any],
+    phase_exit_readiness: dict[str, Any] | None = None,
+) -> list[str]:
     if integrity.get("has_hard_stop"):
         return ["clear_hard_stop", "abort_run"]
     if integrity.get("awaiting_approval"):
@@ -2606,7 +3520,10 @@ def _derive_allowed_actions(integrity: dict[str, Any], lifecycle: dict[str, Any]
         return ["record_user_answer", "abort_run"]
     if lifecycle.get("open_bridge_window_ids"):
         return ["record_bridge_event", "mark_bridge_orphaned", "abort_run"]
-    return ["call_bridge_sdk", "record_bridge_event", "advance_phase", "reroute_phase", "request_approval", "abort_run"]
+    actions = ["call_bridge_sdk", "record_bridge_event", "reroute_phase", "request_approval", "abort_run"]
+    if phase_exit_readiness is None or phase_exit_readiness.get("exit_ready"):
+        actions.insert(2, "advance_phase")
+    return actions
 
 
 def _allowed_routes_for_phase(phase_graph: dict[str, Any], current_phase: str) -> list[str]:

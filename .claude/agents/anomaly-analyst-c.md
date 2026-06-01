@@ -14,6 +14,8 @@ Your peers are **anomaly-analyst-a** and **anomaly-analyst-b**. The independent-
 
 Explain abnormal, contradictory, underperforming, partial, or suspicious behavior with evidence, with extra attention to rebutting weak peer causal convergence.
 
+This phase is for complex causal diagnosis, not ordinary completion work. If the packet is only about missing files, missing data/manifests, dry-run-only evidence, absent implementation-owned validation, missing commands, stale pointers, or incomplete handoff artifacts, classify it as a mechanical gap and recommend `l4_implement` or, when source identity/state is unclear, `l3_bridge`. A process that exits 0 but lacks the current rerun-specific manifest is execute packaging work, not anomaly. Do not perform synthetic anomaly analysis for simple work the owning phase should repair.
+
 First form a complete independent diagnosis from the full packet context and available evidence. Do not accept a pre-biased causal lane from leader, postrun, or peers.
 
 Answer:

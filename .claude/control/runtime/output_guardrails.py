@@ -481,6 +481,8 @@ def _is_empty_manifest_field(payload: dict[str, Any], field: str) -> bool:
 def _static_only_manifest_allows_empty(payload: dict[str, Any], field: str) -> bool:
     if field == "failure_reason" and _manifest_terminal_status_succeeded(payload):
         return True
+    if field == "output_checkpoint_log_paths" and _manifest_allows_empty_output_checkpoint_log_paths(payload):
+        return True
     if field not in {"output_checkpoint_log_paths", "process_refs", "conda_env_evidence"}:
         return False
     text = " ".join(
@@ -515,6 +517,59 @@ def _static_only_manifest_allows_empty(payload: dict[str, Any], field: str) -> b
     if field == "conda_env_evidence":
         return _is_empty_value(payload.get(field))
     return False
+
+
+def _manifest_allows_empty_output_checkpoint_log_paths(payload: dict[str, Any]) -> bool:
+    value = payload.get("output_checkpoint_log_paths")
+    if not isinstance(value, list) or value:
+        return False
+    if not _manifest_terminal_status_succeeded(payload):
+        return False
+    produced = (
+        payload.get("expected_outputs_or_checkpoints")
+        or payload.get("produced_artifacts")
+        or payload.get("artifacts")
+        or payload.get("log_files")
+    )
+    if _is_empty_value(produced):
+        return False
+    output_text = _manifest_text(produced).casefold()
+    checkpoint_markers = (
+        "checkpoint",
+        "checkpoints",
+        "ckpt",
+        "model.safetensors",
+        "pytorch_model",
+        ".pt",
+        ".pth",
+    )
+    if any(marker in output_text for marker in checkpoint_markers):
+        return False
+    stage_text = _manifest_text(
+        {
+            "stage_name": payload.get("stage_name"),
+            "stage_kind": payload.get("stage_kind"),
+            "run_kind": payload.get("run_kind"),
+            "execution_kind": payload.get("execution_kind"),
+            "mode": payload.get("mode"),
+            "method_or_objective": payload.get("method_or_objective"),
+            "metric_or_objective_basis": payload.get("metric_or_objective_basis"),
+        }
+    ).casefold()
+    non_checkpoint_markers = ("diagnostic", "evaluation", "eval", "benchmark", "audit", "analysis", "inference")
+    training_markers = ("train", "finetune", "fine-tune", "checkpoint")
+    if any(marker in stage_text for marker in training_markers) and not any(
+        marker in stage_text for marker in non_checkpoint_markers
+    ):
+        return False
+    return True
+
+
+def _manifest_text(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(value or "")
 
 
 def _manifest_terminal_status_succeeded(payload: dict[str, Any]) -> bool:

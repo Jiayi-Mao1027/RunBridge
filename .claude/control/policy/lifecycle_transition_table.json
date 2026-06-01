@@ -42,6 +42,11 @@
       "bridge_window_interrupted"
     ],
     [
+      "bridge_call_intended",
+      "orphan_timeout_without_bridge_return",
+      "bridge_window_orphaned"
+    ],
+    [
       "bridge_call_prechecked",
       "call_bridge_sdk_started",
       "bridge_call_started"
@@ -418,6 +423,16 @@
     ],
     [
       "task_completion_started",
+      "artifacts_ready",
+      "task_completion_started"
+    ],
+    [
+      "task_completion_started",
+      "partial_evidence_collected",
+      "bridge_window_partial_returned"
+    ],
+    [
+      "task_completion_started",
       "completion_contract_satisfied",
       "task_completion_completed"
     ],
@@ -425,6 +440,36 @@
       "task_completion_started",
       "completion_contract_rejected",
       "task_completion_rejected"
+    ],
+    [
+      "task_completion_started",
+      "bridge_leader_fails_task",
+      "task_failed"
+    ],
+    [
+      "task_completion_started",
+      "task_failed_by_bridge_leader",
+      "task_failed"
+    ],
+    [
+      "task_completion_started",
+      "team_delete_started",
+      "team_delete_started"
+    ],
+    [
+      "task_completion_started",
+      "bridge_result_returned_with_partial",
+      "bridge_window_partial_returned"
+    ],
+    [
+      "task_completion_started",
+      "bridge_result_returned_with_failure",
+      "bridge_window_failed"
+    ],
+    [
+      "task_completion_started",
+      "bridge_result_returned_with_cleanup_required",
+      "bridge_window_partial_returned"
     ],
     [
       "task_completion_started",
@@ -553,6 +598,11 @@
     ],
     [
       "team_delete_started",
+      "bridge_result_returned_with_cleanup_required",
+      "bridge_window_partial_returned"
+    ],
+    [
+      "team_delete_started",
       "orphan_timeout_without_bridge_return",
       "bridge_window_orphaned"
     ],
@@ -579,6 +629,11 @@
     [
       "team_delete_completed",
       "bridge_result_returned_with_partial",
+      "bridge_window_partial_returned"
+    ],
+    [
+      "team_delete_completed",
+      "bridge_result_returned_with_cleanup_required",
       "bridge_window_partial_returned"
     ],
     [

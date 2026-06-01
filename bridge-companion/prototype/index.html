@@ -349,13 +349,13 @@
     .submit-status.failed { color: var(--danger); }
     .leader-report-list {
       display: grid;
-      gap: 8px;
+      gap: 10px;
     }
     .leader-report {
       border: 1px solid var(--line);
       border-radius: 7px;
       background: #15191c;
-      padding: 9px;
+      padding: 12px;
       min-width: 0;
     }
     .leader-report.primary {
@@ -366,6 +366,7 @@
       color: #dfe7e9;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+      line-height: 1.55;
     }
     .leader-report pre {
       margin-top: 8px;
@@ -387,6 +388,95 @@
     .leader-kv b {
       color: var(--text);
       font-weight: 600;
+    }
+    .leader-report-meta, .leader-signals {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .leader-report-body {
+      display: grid;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .leader-outcome {
+      border-left: 3px solid var(--accent);
+      background: #111719;
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+    .leader-section-label {
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+    .leader-outcome .leader-summary {
+      color: var(--text);
+      font-size: 14px;
+    }
+    .leader-signals {
+      margin-top: 0;
+    }
+    .metric-pill {
+      display: inline-grid;
+      grid-template-columns: auto auto;
+      gap: 6px;
+      align-items: baseline;
+      min-height: 24px;
+      padding: 3px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #111517;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .metric-pill b {
+      color: var(--text);
+      font-weight: 650;
+    }
+    .report-section-list {
+      border-top: 1px solid var(--line);
+    }
+    .report-section {
+      padding: 11px 0;
+      border-bottom: 1px solid rgba(52, 60, 66, .72);
+    }
+    .report-section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 7px;
+    }
+    .report-section-title {
+      font-weight: 650;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .report-section-body {
+      color: #dfe7e9;
+      line-height: 1.56;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }
+    .report-section.system .report-section-body {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .leader-system-note {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .leader-system-note summary {
+      cursor: pointer;
+      color: var(--accent-2);
+      margin-bottom: 6px;
     }
     .check-row {
       display: grid;
@@ -1372,6 +1462,32 @@
       ].join("|");
     }
 
+    function leaderReportCardPriority(card) {
+      const summary = String(card?.summary || "");
+      const handledBy = String(card?.handledBy || "");
+      const status = String(card?.status || "").toLowerCase();
+      const noBridge = /\bNO_BRIDGE_DECISION\b/.test(summary);
+      const sectionCount = reportSectionsForCard(card).length;
+      const reportCount = Number(card?.reportCount || 0) || 0;
+      return [
+        noBridge ? 0 : 1,
+        handledBy === "outer_sdk_host_latest_bridge_reports" ? 1 : 0,
+        Math.min(reportCount, 12),
+        Math.min(sectionCount, 12),
+        status === "succeeded" || status === "completed" ? 1 : 0,
+        Math.min(summary.length, 4000)
+      ];
+    }
+
+    function compareLeaderReportCards(a, b) {
+      const aPriority = leaderReportCardPriority(a);
+      const bPriority = leaderReportCardPriority(b);
+      for (let index = 0; index < aPriority.length; index += 1) {
+        if (aPriority[index] !== bPriority[index]) return bPriority[index] - aPriority[index];
+      }
+      return (Date.parse(b?.ts || "") || 0) - (Date.parse(a?.ts || "") || 0);
+    }
+
     function dedupeLeaderReports(events) {
       const byKey = new Map();
       for (const event of events.sort((a, b) => (Date.parse(a.ts || "") || 0) - (Date.parse(b.ts || "") || 0))) {
@@ -1391,17 +1507,179 @@
       const raw = event.raw || {};
       const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
       const leaderResult = payload.leader_result && typeof payload.leader_result === "object" ? payload.leader_result : null;
-      const report = Array.isArray(leaderResult?.reports) ? leaderResult.reports[0] : null;
+      const reports = Array.isArray(leaderResult?.reports) ? leaderResult.reports : [];
       return {
         eventId: event.eventId,
         rawRef: event.rawRef,
         ts: event.ts,
         status: leaderResult?.status || raw.status || event.status || "unknown",
         handledBy: leaderResult?.handled_by || raw.handled_by || raw.source || "leader-orchestrator",
-        summary: report?.summary || raw.result || event.messagePreview || "leader result recorded",
+        summary: summarizeLeaderResult(leaderResult) || raw.result || event.messagePreview || "leader result recorded",
+        reportCount: reports.length,
+        reportSections: reportSectionsFromReports(reports),
         error: leaderResult?.error_or_null || raw.error_or_null || null,
         evidence: leaderResult?.evidence || raw.evidence || null
       };
+    }
+
+    function summarizeLeaderResult(leaderResult) {
+      const reports = Array.isArray(leaderResult?.reports) ? leaderResult.reports : [];
+      if (!reports.length) return "";
+      if (reports.length === 1) return reports[0]?.summary || reports[0]?.message || "leader result recorded";
+      const header = [
+        `LeaderResult status=${leaderResult?.status || "unknown"}`,
+        leaderResult?.handled_by ? `handled_by=${leaderResult.handled_by}` : "",
+        `report_count=${reports.length}`
+      ].filter(Boolean).join("; ");
+      const reportLines = reports.map((report, index) => {
+        const name = report?.teammate_or_source ||
+          report?.teammate_name ||
+          report?.teammateName ||
+          report?.teammate_id ||
+          report?.teammateId ||
+          report?.agent_type ||
+          report?.role ||
+          report?.source ||
+          `report ${index + 1}`;
+        return `${name}: ${report?.summary || report?.message || "report recorded"}`;
+      });
+      return [header, ...reportLines].join("\n\n");
+    }
+
+    function reportSectionsFromReports(reports) {
+      return (Array.isArray(reports) ? reports : []).map((report, index) => {
+        const name = report?.teammate_or_source ||
+          report?.teammate_name ||
+          report?.teammateName ||
+          report?.teammate_id ||
+          report?.teammateId ||
+          report?.agent_type ||
+          report?.role ||
+          report?.source ||
+          `report ${index + 1}`;
+        return {
+          name,
+          title: reportSectionTitle(name, index),
+          summary: report?.summary || report?.message || "report recorded",
+          status: report?.status || "",
+          classification: report?.classification || "",
+          source: report?.source || ""
+        };
+      });
+    }
+
+    function reportSectionTitle(name, index = 0) {
+      const text = String(name || "").trim();
+      const anomaly = text.match(/^anomaly-analyst-([a-z])$/i);
+      if (anomaly) return `Anomaly analyst ${anomaly[1].toUpperCase()}`;
+      if (text === "outer_sdk_host_latest_bridge_reports") return "System recovery note";
+      if (/runtime_snapshot\.last_bridge_result\.reports\[\d+\]/.test(text)) return `Anomaly report ${index}`;
+      return text || `Report ${index + 1}`;
+    }
+
+    function reportSectionsFromSummary(summary) {
+      const text = String(summary || "");
+      const pattern = /(?:^|\s)(outer_sdk_host_latest_bridge_reports|anomaly-analyst-[a-z]|runtime_snapshot\.last_bridge_result\.reports\[\d+\]|reports_preview\[\d+\]|[a-z][a-z0-9_-]{2,}):\s/gi;
+      const matches = [...text.matchAll(pattern)].map(match => ({
+        name: match[1],
+        start: match.index + match[0].indexOf(match[1]),
+        bodyStart: match.index + match[0].length
+      }));
+      if (!matches.length) return [];
+      return matches.map((match, index) => {
+        const next = matches[index + 1];
+        return {
+          name: match.name,
+          title: reportSectionTitle(match.name, index),
+          summary: text.slice(match.bodyStart, next ? next.start : text.length).trim()
+        };
+      }).filter(section => section.summary);
+    }
+
+    function reportSectionsForCard(card) {
+      if (Array.isArray(card?.reportSections) && card.reportSections.length) return card.reportSections;
+      return reportSectionsFromSummary(card?.summary);
+    }
+
+    function isSystemReportSection(section) {
+      const name = String(section?.name || section?.title || "");
+      return name === "outer_sdk_host_latest_bridge_reports" || name.includes("System recovery");
+    }
+
+    function extractMetrics(text) {
+      const metrics = [];
+      const seen = new Set();
+      const pattern = new RegExp("\\b(capability|safety|overrefusal|delta)\\s*[=:]\\s*(-?\\d+(?:\\.\\d+)?)", "gi");
+      for (const match of String(text || "").matchAll(pattern)) {
+        const key = match[1].toLowerCase() + ":" + match[2];
+        if (seen.has(key)) continue;
+        seen.add(key);
+        metrics.push({ label: match[1], value: match[2] });
+        if (metrics.length >= 8) break;
+      }
+      return metrics;
+    }
+
+    function formatReportBody(text) {
+      const raw = String(text || "")
+        .replace(/\r\n?/g, "\n")
+        .replace(/[ \t]+$/gm, "")
+        .trim();
+      if (!raw) return "";
+      if (raw.includes("\n")) return raw.replace(/\n{4,}/g, "\n\n\n");
+      const prepared = raw
+        .replace(/\s+(\d+[.)]\s+)/g, "\n  $1")
+        .replace(/\s+([-*]\s+)/g, "\n  $1");
+      const chunks = prepared.match(/.+?(?:[.!?。！？;；](?:\s+|$)|$)/g) || [prepared];
+      const paragraphs = [];
+      let current = "";
+      for (const chunk of chunks) {
+        const piece = chunk.trim();
+        if (!piece) continue;
+        if (current && current.length + piece.length > 320) {
+          paragraphs.push(current);
+          current = piece;
+        } else {
+          current = current ? `${current} ${piece}` : piece;
+        }
+      }
+      if (current) paragraphs.push(current);
+      return paragraphs.join("\n\n");
+    }
+
+    function renderLeaderReportBody(card, index) {
+      const sections = reportSectionsForCard(card);
+      const analystSections = sections.filter(section => !isSystemReportSection(section));
+      const systemSections = sections.filter(isSystemReportSection);
+      const outcome = analystSections[0]?.summary || card.summary || "leader result recorded";
+      const metrics = extractMetrics(card.summary || sections.map(section => section.summary).join(" "));
+      const sectionHtml = analystSections.length ? `
+        <div class="report-section-list">
+          ${analystSections.map(section => `
+            <section class="report-section">
+              <div class="report-section-head">
+                <div class="report-section-title">${escapeHtml(section.title || section.name || "Report")}</div>
+                ${section.classification ? `<span class="badge">${escapeHtml(section.classification)}</span>` : ""}
+              </div>
+              <div class="report-section-body">${escapeHtml(formatReportBody(section.summary || "report recorded"))}</div>
+            </section>
+          `).join("")}
+        </div>` : `<div class="leader-summary">${escapeHtml(formatReportBody(card.summary || "leader result recorded"))}</div>`;
+      const systemHtml = systemSections.length ? `
+        <details class="leader-system-note">
+          <summary>System note</summary>
+          ${systemSections.map(section => `<div class="report-section system"><div class="report-section-body">${escapeHtml(formatReportBody(section.summary))}</div></div>`).join("")}
+        </details>` : "";
+      return `
+        <div class="leader-report-body">
+          <section class="leader-outcome">
+            <div class="leader-section-label">Conclusion</div>
+            <div class="leader-summary">${escapeHtml(formatReportBody(outcome))}</div>
+          </section>
+          ${metrics.length ? `<div class="leader-signals">${metrics.map(metric => `<span class="metric-pill"><span>${escapeHtml(metric.label)}</span><b>${escapeHtml(metric.value)}</b></span>`).join("")}</div>` : ""}
+          ${sectionHtml}
+          ${systemHtml}
+        </div>`;
     }
 
     function projectedLeaderReportCards() {
@@ -1412,6 +1690,8 @@
         status: card.reportStatus || card.status || "unknown",
         handledBy: card.handledBy || "leader-orchestrator",
         summary: card.summary || "leader result recorded",
+        reportCount: card.reportCount || 0,
+        reportSections: card.reportSections || [],
         error: card.error || null,
         evidence: card.evidence || null,
         projected: true
@@ -1440,11 +1720,13 @@
       for (const card of [...cards].sort((a, b) => (Date.parse(b.ts || "") || 0) - (Date.parse(a.ts || "") || 0))) {
         const key = leaderReportCardKey(card);
         const existing = byKey.get(key);
-        if (!existing || String(card.summary || "").length > String(existing.summary || "").length) {
+        const sectionCount = Array.isArray(card.reportSections) ? card.reportSections.length : 0;
+        const existingSectionCount = Array.isArray(existing?.reportSections) ? existing.reportSections.length : 0;
+        if (!existing || sectionCount > existingSectionCount || (sectionCount === existingSectionCount && String(card.summary || "").length > String(existing.summary || "").length)) {
           byKey.set(key, card);
         }
       }
-      return [...byKey.values()].sort((a, b) => (Date.parse(b.ts || "") || 0) - (Date.parse(a.ts || "") || 0));
+      return [...byKey.values()].sort(compareLeaderReportCards);
     }
 
     function renderLeaderReports() {
@@ -1458,31 +1740,38 @@
         ts: new Date().toISOString(),
         status: state.lastLeaderResponse.leader_result.status || "unknown",
         handledBy: state.lastLeaderResponse.leader_result.handled_by || state.lastLeaderResponse.host?.adapter || "outer host",
-        summary: state.lastLeaderResponse.leader_result.reports?.[0]?.summary || state.lastLeaderResponse.leader_result.error_or_null?.message || "latest submit response",
+        summary: summarizeLeaderResult(state.lastLeaderResponse.leader_result) || state.lastLeaderResponse.leader_result.error_or_null?.message || "latest submit response",
+        reportSections: reportSectionsFromReports(state.lastLeaderResponse.leader_result.reports),
+        reportCount: Array.isArray(state.lastLeaderResponse.leader_result.reports) ? state.lastLeaderResponse.leader_result.reports.length : 0,
         error: state.lastLeaderResponse.leader_result.error_or_null || null,
         evidence: state.lastLeaderResponse.leader_result.evidence || null
       } : null;
-      const cards = [response, report && report.summary ? {
+      const cards = dedupeLeaderReportCards([response, report && report.summary ? {
         id: report.id,
         eventId: report.id,
         status: report.status || "unknown",
         handledBy: report.handledBy || "runtime",
         summary: report.summary,
+        reportCount: report.reportCount || 0,
+        reportSections: report.reportSections || [],
         task: report.task,
         currentState: report.currentState,
         nextStep: report.nextStep,
         rawRefs: report.rawRefs || []
-      } : null, ...(!report?.summary ? projectedReports.slice(0, 3) : [])].filter(Boolean);
+      } : null, ...projectedReports.slice(0, 5)].filter(Boolean)).slice(0, 5);
       $("leaderReportList").innerHTML = cards.length ? cards.map((card, index) => `
         <article class="leader-report selectable ${index === 0 ? "primary" : ""}" data-item-id="${escapeHtml(card.id || card.eventId || "")}">
           <div class="member-head">
             <div class="name">${escapeHtml(card.handledBy)}</div>
             <span class="badge ${escapeHtml(statusClass(card.status))}">${escapeHtml(card.status)}</span>
           </div>
-          <div class="leader-summary">${escapeHtml(card.summary || "leader result recorded")}</div>
+          <div class="leader-report-meta">
+            ${card.reportCount ? `<span class="badge">${escapeHtml(card.reportCount)} reports</span>` : ""}
+            ${card.currentState ? `<span class="badge">${escapeHtml(card.currentState)}</span>` : ""}
+          </div>
+          ${renderLeaderReportBody(card, index)}
           <div class="leader-kv">
             ${card.task ? `<div><b>Task</b><span>${escapeHtml(compact(card.task, 260))}</span></div>` : ""}
-            ${card.currentState ? `<div><b>State</b><span>${escapeHtml(card.currentState)}</span></div>` : ""}
             ${card.nextStep ? `<div><b>Next</b><span>${escapeHtml(card.nextStep)}</span></div>` : ""}
           </div>
           ${card.error ? `<div class="subtext">${escapeHtml(card.error.message || card.error.type || "error recorded")}</div>` : ""}

@@ -319,6 +319,10 @@
         ],
         [
           "l4_implement",
+          "l2_advisory"
+        ],
+        [
+          "l4_implement",
           "l4_execute"
         ],
         [
@@ -331,6 +335,10 @@
         ],
         [
           "l4_execute",
+          "l2_advisory"
+        ],
+        [
+          "l4_execute",
           "l4_anomaly"
         ],
         [
@@ -340,6 +348,10 @@
         [
           "l4_anomaly",
           "l3_bridge"
+        ],
+        [
+          "l4_anomaly",
+          "l2_advisory"
         ],
         [
           "l4_anomaly",
@@ -980,6 +992,22 @@
       ]
     },
     {
+      "id": "completion_artifacts_ready_idempotent",
+      "from": "task_completion_started",
+      "to": "task_completion_started",
+      "event_kinds": [
+        "artifacts_ready"
+      ]
+    },
+    {
+      "id": "completion_partial_evidence",
+      "from": "task_completion_started",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "partial_evidence_collected"
+      ]
+    },
+    {
       "id": "completion_satisfied",
       "from": "task_completion_started",
       "to": "task_completion_completed",
@@ -993,6 +1021,47 @@
       "to": "task_completion_rejected",
       "event_kinds": [
         "completion_contract_rejected"
+      ]
+    },
+    {
+      "id": "completion_failed_by_bridge_leader",
+      "from": "task_completion_started",
+      "to": "task_failed",
+      "event_kinds": [
+        "bridge_leader_fails_task",
+        "task_failed_by_bridge_leader"
+      ]
+    },
+    {
+      "id": "completion_cleanup_started",
+      "from": "task_completion_started",
+      "to": "team_delete_started",
+      "event_kinds": [
+        "team_delete_started"
+      ]
+    },
+    {
+      "id": "completion_partial_return",
+      "from": "task_completion_started",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "bridge_result_returned_with_partial"
+      ]
+    },
+    {
+      "id": "completion_failed_return",
+      "from": "task_completion_started",
+      "to": "bridge_window_failed",
+      "event_kinds": [
+        "bridge_result_returned_with_failure"
+      ]
+    },
+    {
+      "id": "completion_cleanup_return",
+      "from": "task_completion_started",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "bridge_result_returned_with_cleanup_required"
       ]
     },
     {
@@ -1026,6 +1095,14 @@
       "to": "task_completion_started",
       "event_kinds": [
         "retry_artifact_collection"
+      ]
+    },
+    {
+      "id": "completion_rejected_reroute_owning_phase",
+      "from": "task_completion_rejected",
+      "to": "validate_route",
+      "event_kinds": [
+        "route_rerouted"
       ]
     },
     {
@@ -1169,6 +1246,14 @@
       ]
     },
     {
+      "id": "team_delete_started_cleanup_return",
+      "from": "team_delete_started",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "bridge_result_returned_with_cleanup_required"
+      ]
+    },
+    {
       "id": "team_deleted_returned",
       "from": "team_delete_completed",
       "to": "bridge_window_returned",
@@ -1190,6 +1275,14 @@
       "to": "bridge_window_partial_returned",
       "event_kinds": [
         "bridge_result_returned_with_partial"
+      ]
+    },
+    {
+      "id": "team_deleted_cleanup_return",
+      "from": "team_delete_completed",
+      "to": "bridge_window_partial_returned",
+      "event_kinds": [
+        "bridge_result_returned_with_cleanup_required"
       ]
     },
     {
@@ -1326,6 +1419,14 @@
       "to": "enter_anomaly",
       "event_kinds": [
         "enter_anomaly"
+      ]
+    },
+    {
+      "id": "retry_reroute_owning_phase",
+      "from": "retry_attempt_scheduled",
+      "to": "validate_route",
+      "event_kinds": [
+        "route_rerouted"
       ]
     },
     {

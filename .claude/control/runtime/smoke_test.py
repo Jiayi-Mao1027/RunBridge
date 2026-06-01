@@ -6,9 +6,12 @@ import shutil
 import subprocess
 import sys
 import importlib.util
+import threading
+import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 import uuid
 
 from bridge_sdk import _bridge_leader_failure_retryable
@@ -18,6 +21,7 @@ from claude_cli_executor import BRIDGE_RESULT_SCHEMA
 from claude_cli_executor import _allowed_tools
 from claude_cli_executor import _bridge_append_system_prompt
 from claude_cli_executor import _bridge_leader_prompt
+from claude_cli_executor import _bridge_result_from_observed_teammate_reports
 from claude_cli_executor import _claude_tty_command_prefix
 from claude_cli_executor import _effective_anthropic_base_url
 from claude_cli_executor import _ensure_claude_api_key_alias
@@ -40,12 +44,16 @@ from claude_cli_executor import _reconcile_observed_teammate_activity
 from claude_cli_executor import _redact_cmd
 from claude_cli_executor import _required_agent_models
 from claude_cli_executor import _runtime_owned_bridge_result_from_teammate_reports
+from claude_cli_executor import _runtime_owned_report_blocked_teammates
 from claude_cli_executor import _runtime_owned_teammate_allowed_tools
 from claude_cli_executor import _runtime_owned_teammate_error_retryable
 from claude_cli_executor import _runtime_owned_teammate_fallback_allowed
+from claude_cli_executor import _runtime_owned_fallback_status_from_reports_and_failures
 from claude_cli_executor import _runtime_owned_teammate_names
 from claude_cli_executor import _runtime_owned_teammate_report_schema
 from claude_cli_executor import _runtime_owned_teammate_retry_attempts
+from claude_cli_executor import _runtime_owned_teammate_timeout_seconds
+from claude_cli_executor import _runtime_owned_should_salvage_after_observed_activity
 from claude_cli_executor import _runtime_run_root
 from claude_cli_executor import _run_claude_streaming
 from claude_cli_executor import _sdk_payload_is_effective_progress
@@ -88,6 +96,7 @@ from outer_sdk.tmux_repl_adapter import _tmux_prompt_text_visible as _outer_tmux
 from outer_sdk.tmux_repl_adapter import _outer_leader_add_dirs
 from outer_sdk.tmux_repl_adapter import _outer_leader_tmux_contract_violation
 from outer_sdk.tmux_repl_adapter import TmuxReplOuterLeaderAdapter
+from outer_sdk.host import _phase_exit_blockers_allow_auto_bridge_retry as _outer_phase_exit_blockers_allow_auto_bridge_retry
 from output_guardrails import validate_bridge_result, validate_completion_report, validate_log_manifest, validate_teammate_report
 from policy_compiler import compile_policy
 from repo_runtime import ensure_repo_registered, get_repo_runtime_root, list_registered_repos, resolve_repo_key
@@ -96,10 +105,14 @@ from retry_policy import decide_retry, load_retry_policies, packet_hash
 from runtime_event_envelope import normalize_runtime_event, normalize_stream_record
 from state_graph import load_state_graph, replay_run_state, validate_state_graph
 from team_planner import RiskBasedTeamSelector
+from loader import ControlPaths
 from workflow_runtime import CheckResult, WorkflowEvent, dispatch_workflow_event
+from workflow_runtime import build_runtime_snapshot
+from workflow_runtime import reconcile_run_ledger_if_stale
 from workflow_runtime import _retry_action_contract, _retry_scope_for_failure
 from workflow_runtime import _bridge_result_reports_teammate_transport_loss
 from workflow_runtime import reconcile_workflow_from_ledger
+import workflow_runtime as workflow_runtime_module
 
 
 SEMANTIC_REQUIRED_FIELDS = [
@@ -140,9 +153,9 @@ def build_fixture(root: Path) -> tuple[Path, Path]:
             {"name": "leader_freeze", "allowed_next_phases": ["l3_bridge", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly", "leader_freeze"]},
             {"name": "l2_advisory", "allowed_next_phases": ["l3_bridge"]},
             {"name": "l3_bridge", "allowed_next_phases": ["l3_bridge", "leader_freeze", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly"]},
-            {"name": "l4_implement", "allowed_next_phases": ["l3_bridge", "l4_execute", "l4_anomaly"]},
-            {"name": "l4_execute", "allowed_next_phases": ["l3_bridge", "l4_anomaly", "l4_implement"]},
-            {"name": "l4_anomaly", "allowed_next_phases": ["l3_bridge", "l4_implement", "l4_execute"]},
+            {"name": "l4_implement", "allowed_next_phases": ["l3_bridge", "l2_advisory", "l4_execute", "l4_anomaly"]},
+            {"name": "l4_execute", "allowed_next_phases": ["l3_bridge", "l2_advisory", "l4_anomaly", "l4_implement"]},
+            {"name": "l4_anomaly", "allowed_next_phases": ["l3_bridge", "l2_advisory", "l4_implement", "l4_execute"]},
         ]
     }
     now = _now()
@@ -238,7 +251,7 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
             },
             "report_contract": {
                 "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution", "artifact_manifests"],
-                "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution", "log manifest path", "formal execution parameter manifest", "manifest required fields checklist", "batchbasis", "gpu_id", "smoke memory observed when smoke ran", "warmup memory observed when warmup ran", "natural-language model dataset method semantics"],
+                "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution", "log manifest path", "formal execution parameter manifest", "manifest required fields checklist", "formal completion evidence with approved target quantity versus observed terminal quantity or not_applicable reason", "batchbasis", "gpu_id", "smoke memory observed when smoke ran", "warmup memory observed when warmup ran", "natural-language model dataset method semantics"],
                 "artifact_reporting_format": "list",
                 "include_failure_reason": True,
                 "include_next_action_recommendation": True,
@@ -264,7 +277,7 @@ def packet(bridge_window_id: str, sub_session_id: str) -> dict:
         },
         "report_contract": {
             "required_sections": ["summary", "evidence", "instruction_coverage", "semantic_identity_resolution", "artifact_manifests"],
-            "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution", "log manifest path", "formal execution parameter manifest", "manifest required fields checklist", "batchbasis", "gpu_id", "smoke memory observed when smoke ran", "warmup memory observed when warmup ran", "natural-language model dataset method semantics"],
+            "required_evidence": ["runtime event ids", "artifact", "instruction coverage disposition", "semantic identity resolution", "log manifest path", "formal execution parameter manifest", "manifest required fields checklist", "formal completion evidence with approved target quantity versus observed terminal quantity or not_applicable reason", "batchbasis", "gpu_id", "smoke memory observed when smoke ran", "warmup memory observed when warmup ran", "natural-language model dataset method semantics"],
             "artifact_reporting_format": "list",
             "include_failure_reason": True,
             "include_next_action_recommendation": True,
@@ -319,6 +332,12 @@ def report_for_packet(packet_payload: dict, summary: str = "ok") -> dict:
         "summary": summary,
         "instruction_coverage": coverage_for_packet(packet_payload),
         "semantic_identity_resolution": {"disposition": "not_applicable", "basis": "smoke fixture"},
+        "resource_utilization_sanity_check": {
+            "selected_gpu_availability": "gpu_id 0 available memory recorded",
+            "observed_vram": "observed-vs-available VRAM disposition: utilization acceptable for smoke fixture",
+            "batch_basis": "batchbasis smoke-derived final batch",
+            "disposition": "best-available resource utilization acceptable; no further semantics-preserving resource adaptation needed",
+        },
         "evidence_refs": [f"event:{packet_payload['binding']['bridge_window_id']}"],
         "manifest required fields checklist": _manifest_required_fields_checklist(packet_payload),
     }
@@ -335,8 +354,21 @@ def _manifest_required_fields_checklist(packet_payload: dict | None = None) -> d
         "batchbasis": "smoke-derived batch basis",
         "gpu_id": "0",
         "gpu_id_or_device_ids": "0",
+        "selected_gpu_total_free_memory": "selected GPU 0 total/free memory recorded by nvidia-smi",
         "memory observed": "smoke memory observed; warmup memory observed; formal memory observed",
+        "environment_evidence": {"python": "smoke"},
+        "process_refs": [{"pid": "smoke", "kind": "fixture"}],
+        "smoke_memory_observed": "64GB",
+        "warmup_memory_observed": "68GB",
         "formal_memory_observed": "72GB",
+        "resource_utilization_sanity_check": "observed-vs-available VRAM disposition: utilization acceptable for smoke fixture",
+        "adjustment_reason": "best-available batchbasis after smoke-derived resource adaptation evidence; no further semantics-preserving resource adaptation needed",
+        "formal_completion_evidence": {
+            "approved_target": {"kind": "steps", "value": 1},
+            "observed_terminal_quantity": {"kind": "steps", "value": 1},
+            "source_refs": ["exit_code:0", "log_tail:smoke"],
+            "disposition": "completed",
+        },
         "model": "demo model",
         "model_or_model_family": "demo model",
         "dataset": "demo dataset",
@@ -345,6 +377,19 @@ def _manifest_required_fields_checklist(packet_payload: dict | None = None) -> d
         "method_or_objective": "demo method",
         "terminal_status": "succeeded",
     }
+
+
+def _write_smoke_log_manifest(runs_root: Path, packet_payload: dict, *, task_id: str = "task_demo") -> dict:
+    run_id = "run_demo"
+    bridge_window_id = packet_payload.get("binding", {}).get("bridge_window_id") if isinstance(packet_payload, dict) else "bw"
+    manifest = _manifest_required_fields_checklist(packet_payload)
+    binding = packet_payload.get("binding", {}) if isinstance(packet_payload.get("binding"), dict) else {}
+    manifest["task_id"] = binding.get("task_id_or_null") or binding.get("task_id") or task_id
+    manifest["runtime_event_task_id"] = task_id
+    manifest_path = runs_root / run_id / "manifests" / f"{bridge_window_id}_log_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    return {"ref_type": "log_manifest", "path": str(manifest_path), "producer": {"agent_id": "smoke", "event_id": "evt_smoke_log_manifest"}}
 
 
 def dispatch(control_root: Path, runs_root: Path, payload: dict) -> dict:
@@ -392,10 +437,142 @@ def run_success(control_root: Path, runs_root: Path) -> dict:
     dispatch(control_root, runs_root, event("message_dispatch_succeeded", bw, ss, team_id="team_success", task_id="task_success", tool_name="send_messages"))
     dispatch(control_root, runs_root, event("team_idle_waiting", bw, ss, team_id="team_success", task_id="task_success", agent_type="hook", agent_id="hook.team_idle", payload={"wait_reason": "process_running", "owned_process_refs": []}))
     dispatch(control_root, runs_root, event("artifacts_ready", bw, ss, team_id="team_success", task_id="task_success", tool_name="task_complete"))
-    dispatch(control_root, runs_root, event("completion_contract_satisfied", bw, ss, team_id="team_success", task_id="task_success", agent_type="hook", agent_id="hook.task_completed", payload={"completion_contract": p["completion_contract"], "completion_checks": {"required_outputs_present": True, "required_artifacts_present": True, "validation_passed": True, "missing_outputs": [], "missing_artifacts": [], "failed_validations": [], "notes": []}, "completion_evidence": {"trajectory_refs": ["trajectory.jsonl:1"], "manifest_required_fields_checklist": _manifest_required_fields_checklist(p)}, "reports": [report_for_packet(p)], "artifact_refs": ["artifact", "log_manifest"]}))
+    log_manifest_ref = _write_smoke_log_manifest(runs_root, p, task_id="task_success")
+    artifact_refs = ["artifact", log_manifest_ref]
+    dispatch(control_root, runs_root, event("completion_contract_satisfied", bw, ss, team_id="team_success", task_id="task_success", agent_type="hook", agent_id="hook.task_completed", payload={"completion_contract": p["completion_contract"], "completion_checks": {"required_outputs_present": True, "required_artifacts_present": True, "validation_passed": True, "missing_outputs": [], "missing_artifacts": [], "failed_validations": [], "notes": []}, "completion_evidence": {"trajectory_refs": ["trajectory.jsonl:1"], "manifest_required_fields_checklist": _manifest_required_fields_checklist(p)}, "reports": [report_for_packet(p)], "artifact_refs": artifact_refs}))
     dispatch(control_root, runs_root, event("team_delete_started", bw, ss, team_id="team_success", task_id="task_success", tool_name="team_delete"))
     dispatch(control_root, runs_root, event("team_delete_succeeded", bw, ss, team_id="team_success", task_id="task_success", tool_name="team_delete"))
-    return dispatch(control_root, runs_root, event("bridge_result_returned", bw, ss, team_id="team_success", task_id="task_success", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", payload={"bridge_result": {"status": "succeeded", "reports": [report_for_packet(p)], "artifact_refs": ["artifact", "log_manifest"], "evidence": {"event_ids": ["evt_success"], "trajectory_refs": ["trajectory.jsonl:1"], "manifest_required_fields_checklist": _manifest_required_fields_checklist(p)}, "error_or_null": None, "cleanup_required": False}}))
+    return dispatch(control_root, runs_root, event("bridge_result_returned", bw, ss, team_id="team_success", task_id="task_success", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", payload={"bridge_result": {"status": "succeeded", "reports": [report_for_packet(p)], "artifact_refs": artifact_refs, "evidence": {"event_ids": ["evt_success"], "trajectory_refs": ["trajectory.jsonl:1"], "manifest_required_fields_checklist": _manifest_required_fields_checklist(p)}, "error_or_null": None, "cleanup_required": False}}))
+
+
+def run_legacy_completion_backfill_test(root: Path) -> dict:
+    root = root.resolve()
+    control_root, runs_root = build_fixture(root)
+    run_success(control_root, runs_root)
+    ledger_path = runs_root / "run_demo" / "run_ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    legacy_result = ledger.get("last_bridge_result") if isinstance(ledger.get("last_bridge_result"), dict) else {}
+    legacy_result.pop("completion_validation", None)
+    legacy_result.pop("completion_packet_ref", None)
+    _write_json(ledger_path, ledger)
+    snapshot = build_runtime_snapshot(ControlPaths.from_root(control_root, runs_root), ledger)
+    readiness = snapshot.get("phase_exit_readiness") if isinstance(snapshot.get("phase_exit_readiness"), dict) else {}
+    last_result = snapshot.get("last_bridge_result") if isinstance(snapshot.get("last_bridge_result"), dict) else {}
+    validation = last_result.get("completion_validation") if isinstance(last_result.get("completion_validation"), dict) else {}
+    if readiness.get("exit_ready") is not True or readiness.get("latest_completion_validated") is not True:
+        raise AssertionError(json.dumps({"readiness": readiness, "last_result": last_result}, ensure_ascii=False, indent=2))
+    if validation.get("final_disposition") != "succeeded":
+        raise AssertionError(json.dumps(validation, ensure_ascii=False, indent=2))
+    return {"legacy_completion_backfill": "passed"}
+
+
+def run_cleanup_required_return(control_root: Path, runs_root: Path) -> dict:
+    bw = "bw_cleanup_required"
+    ss = "sub_cleanup_required"
+    p = packet(bw, ss)
+    dispatch(control_root, runs_root, event("bridge_call_intended", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_cleanup_required", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_cleanup_required", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_cleanup_required", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("bridge_window_opened", bw, ss, agent_type="bridge-leader", payload={"packet": p}))
+    dispatch(control_root, runs_root, event("bridge_packet_accepted", bw, ss, payload={"packet": p}))
+    dispatch(control_root, runs_root, event("team_create_started", bw, ss, team_id="team_cleanup_required", tool_name="team_create"))
+    dispatch(control_root, runs_root, event("team_create_succeeded", bw, ss, team_id="team_cleanup_required", tool_name="team_create", payload={"team_name": "team_cleanup_required", "teammate_ids": ["mate_1"]}))
+    dispatch(control_root, runs_root, event("task_create_started", bw, ss, team_id="team_cleanup_required", task_id="task_cleanup_required", tool_name="task_create"))
+    dispatch(control_root, runs_root, event("task_create_succeeded", bw, ss, team_id="team_cleanup_required", task_id="task_cleanup_required", tool_name="task_create"))
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "taskcreated_hook_accepted",
+            bw,
+            ss,
+            team_id="team_cleanup_required",
+            task_id="task_cleanup_required",
+            agent_type="hook",
+            agent_id="hook.task_created",
+            payload={
+                "task_subject": "task_bw_cleanup_required",
+                "task_description": "smoke task created",
+                "task_spec": p["task_spec"],
+                "team_spec": p["team_spec"],
+                "task_team_mapping": p["task_team_mapping"],
+                "teammate_ids": ["mate_1"],
+            },
+        ),
+    )
+    dispatch(control_root, runs_root, event("message_dispatch_started", bw, ss, team_id="team_cleanup_required", task_id="task_cleanup_required", tool_name="send_messages"))
+    dispatch(control_root, runs_root, event("message_dispatch_succeeded", bw, ss, team_id="team_cleanup_required", task_id="task_cleanup_required", tool_name="send_messages"))
+    dispatch(control_root, runs_root, event("artifacts_ready", bw, ss, team_id="team_cleanup_required", task_id="task_cleanup_required", tool_name="task_complete"))
+    log_manifest_ref = _write_smoke_log_manifest(runs_root, p, task_id="task_cleanup_required")
+    artifact_refs = ["artifact", log_manifest_ref]
+    dispatch(control_root, runs_root, event("completion_contract_satisfied", bw, ss, team_id="team_cleanup_required", task_id="task_cleanup_required", agent_type="hook", agent_id="hook.task_completed", payload={"completion_contract": p["completion_contract"], "completion_checks": {"required_outputs_present": True, "required_artifacts_present": True, "validation_passed": True, "missing_outputs": [], "missing_artifacts": [], "failed_validations": [], "notes": []}, "completion_evidence": {"trajectory_refs": ["trajectory.jsonl:cleanup"], "manifest_required_fields_checklist": _manifest_required_fields_checklist(p)}, "reports": [report_for_packet(p)], "artifact_refs": artifact_refs}))
+    dispatch(control_root, runs_root, event("team_delete_started", bw, ss, team_id="team_cleanup_required", task_id="task_cleanup_required", tool_name="team_delete"))
+    return dispatch(control_root, runs_root, event("bridge_result_returned_with_cleanup_required", bw, ss, team_id="team_cleanup_required", task_id="task_cleanup_required", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", payload={"bridge_result": {"status": "succeeded", "reports": [report_for_packet(p)], "artifact_refs": artifact_refs, "evidence": {"event_ids": ["evt_cleanup_required"], "trajectory_refs": ["trajectory.jsonl:cleanup"], "manifest_required_fields_checklist": _manifest_required_fields_checklist(p)}, "error_or_null": None, "cleanup_required": True}}))
+
+
+def run_completion_started_recovery_returns(control_root: Path, runs_root: Path) -> dict:
+    outcomes: dict[str, Any] = {}
+
+    def setup_completion_started(bw: str, ss: str, team_id: str, task_id: str) -> tuple[dict, list[str]]:
+        p = packet(bw, ss)
+        dispatch(control_root, runs_root, event("bridge_call_intended", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id=f"tool_{bw}", payload={"packet": p}))
+        dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id=f"tool_{bw}", payload={"packet": p}))
+        dispatch(control_root, runs_root, event("call_bridge_sdk_started", bw, ss, agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id=f"tool_{bw}", payload={"packet": p}))
+        dispatch(control_root, runs_root, event("bridge_window_opened", bw, ss))
+        dispatch(control_root, runs_root, event("bridge_packet_accepted", bw, ss, payload={"packet": p}))
+        dispatch(control_root, runs_root, event("team_create_started", bw, ss, team_id=team_id, tool_name="team_create"))
+        dispatch(control_root, runs_root, event("team_create_succeeded", bw, ss, team_id=team_id, tool_name="team_create", payload={"team_name": team_id, "teammate_ids": ["mate_1"]}))
+        dispatch(control_root, runs_root, event("task_create_started", bw, ss, team_id=team_id, task_id=task_id, tool_name="task_create"))
+        dispatch(control_root, runs_root, event("task_create_succeeded", bw, ss, team_id=team_id, task_id=task_id, tool_name="task_create"))
+        dispatch(
+            control_root,
+            runs_root,
+            event(
+                "taskcreated_hook_accepted",
+                bw,
+                ss,
+                team_id=team_id,
+                task_id=task_id,
+                agent_type="hook",
+                agent_id="hook.task_created",
+                payload={
+                    "task_subject": f"task_{bw}",
+                    "task_description": "smoke task created",
+                    "task_spec": p["task_spec"],
+                    "team_spec": p["team_spec"],
+                    "task_team_mapping": p["task_team_mapping"],
+                    "teammate_ids": ["mate_1"],
+                },
+            ),
+        )
+        dispatch(control_root, runs_root, event("message_dispatch_started", bw, ss, team_id=team_id, task_id=task_id, tool_name="send_messages"))
+        dispatch(control_root, runs_root, event("message_dispatch_succeeded", bw, ss, team_id=team_id, task_id=task_id, tool_name="send_messages"))
+        log_manifest_ref = _write_smoke_log_manifest(runs_root, p, task_id=task_id)
+        artifact_refs = ["artifact", log_manifest_ref]
+        dispatch(control_root, runs_root, event("artifacts_ready", bw, ss, team_id=team_id, task_id=task_id, tool_name="task_complete", payload={"artifact_refs": artifact_refs}))
+        duplicate = dispatch_workflow_event(
+            str(control_root),
+            event("artifacts_ready", bw, ss, team_id=team_id, task_id=task_id, tool_name="task_complete", payload={"artifact_refs": artifact_refs}),
+            runtime_runs_root=str(runs_root),
+            persist=True,
+        )
+        if not duplicate.ok:
+            raise AssertionError(json.dumps(duplicate.check_result, ensure_ascii=False, indent=2))
+        return p, artifact_refs
+
+    p_direct, direct_artifacts = setup_completion_started("bw_completion_cleanup_direct", "sub_completion_cleanup_direct", "team_completion_cleanup_direct", "task_completion_cleanup_direct")
+    dispatch(control_root, runs_root, event("team_delete_started", "bw_completion_cleanup_direct", "sub_completion_cleanup_direct", team_id="team_completion_cleanup_direct", task_id="task_completion_cleanup_direct", tool_name="team_delete"))
+    direct = dispatch(control_root, runs_root, event("bridge_result_returned_with_cleanup_required", "bw_completion_cleanup_direct", "sub_completion_cleanup_direct", team_id="team_completion_cleanup_direct", task_id="task_completion_cleanup_direct", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", payload={"bridge_result": {"status": "failed", "reports": [], "artifact_refs": direct_artifacts, "evidence": {"event_ids": ["evt_completion_cleanup_direct"], "trajectory_refs": ["trajectory.jsonl:completion_cleanup"], "manifest_required_fields_checklist": _manifest_required_fields_checklist(p_direct)}, "error_or_null": {"type": "CompletionCleanupRequired", "message": "cleanup required after completion started"}, "cleanup_required": True}}))
+    outcomes["direct_cleanup_status"] = direct["lifecycle"]["status_index"]["bw_completion_cleanup_direct"]
+    outcomes["direct_cleanup_open"] = "bw_completion_cleanup_direct" in direct["lifecycle"]["open_bridge_window_ids"]
+
+    p_partial, partial_artifacts = setup_completion_started("bw_completion_partial", "sub_completion_partial", "team_completion_partial", "task_completion_partial")
+    dispatch(control_root, runs_root, event("partial_evidence_collected", "bw_completion_partial", "sub_completion_partial", team_id="team_completion_partial", task_id="task_completion_partial", payload={"evidence": {"event_ids": ["evt_completion_partial"], "trajectory_refs": ["trajectory.jsonl:completion_partial"]}, "reports": [report_for_packet(p_partial)], "artifact_refs": partial_artifacts}))
+    dispatch(control_root, runs_root, event("team_delete_started", "bw_completion_partial", "sub_completion_partial", team_id="team_completion_partial", task_id="task_completion_partial", tool_name="team_delete"))
+    partial = dispatch(control_root, runs_root, event("bridge_result_returned_with_cleanup_required", "bw_completion_partial", "sub_completion_partial", team_id="team_completion_partial", task_id="task_completion_partial", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", payload={"bridge_result": {"status": "failed", "reports": [], "artifact_refs": partial_artifacts, "evidence": {"event_ids": ["evt_completion_partial_cleanup"], "trajectory_refs": ["trajectory.jsonl:completion_partial_cleanup"], "manifest_required_fields_checklist": _manifest_required_fields_checklist(p_partial)}, "error_or_null": {"type": "PartialEvidenceCleanupRequired", "message": "cleanup required after partial evidence"}, "cleanup_required": True}}))
+    outcomes["partial_cleanup_status"] = partial["lifecycle"]["status_index"]["bw_completion_partial"]
+    outcomes["partial_cleanup_open"] = "bw_completion_partial" in partial["lifecycle"]["open_bridge_window_ids"]
+    return outcomes
 
 
 def run_failure(control_root: Path, runs_root: Path) -> dict:
@@ -528,11 +705,80 @@ def run_stuck_dispatch_anomaly(control_root: Path, runs_root: Path) -> dict:
     if not anomalies:
         raise AssertionError(json.dumps(snapshot, ensure_ascii=False, indent=2))
     anomaly = anomalies[0]
-    required_conditions = {"bridge_window_open_too_long", "status_stuck_at_message_dispatch_completed", "no_process_refs", "no_reports", "no_artifacts"}
+    required_conditions = {
+        "bridge_window_open_too_long",
+        "status_stuck_at_message_dispatch_completed",
+        "no_process_refs",
+        "no_reports",
+        "no_artifacts",
+        "no_recent_sdk_stream_events",
+    }
     if anomaly.get("classification") != "bridge_orchestration_hang" or not required_conditions.issubset(set(anomaly.get("conditions", []))):
         raise AssertionError(json.dumps(anomaly, ensure_ascii=False, indent=2))
+    if anomaly.get("observer_counts", {}).get("sdk_stream_events") != 0:
+        raise AssertionError(json.dumps(anomaly.get("observer_counts", {}), ensure_ascii=False, indent=2))
     if not snapshot.get("integrity", {}).get("has_blocking_orchestration_anomaly"):
         raise AssertionError(json.dumps(snapshot.get("integrity", {}), ensure_ascii=False, indent=2))
+    return snapshot
+
+
+def run_active_sdk_stream_suppresses_stuck_dispatch_anomaly(control_root: Path, runs_root: Path) -> dict:
+    run_stuck_dispatch_anomaly(control_root, runs_root)
+    run_root = runs_root / "run_demo"
+    stream_record = {
+        "event_type": "sdk_stream_assistant_text",
+        "raw_stream_event_type": "assistant",
+        "timestamp": _now(),
+        "run_id": "run_demo",
+        "main_session_id": "main",
+        "sub_session_id": "sub_stuck_dispatch",
+        "bridge_window_id": "bw_stuck_dispatch",
+        "team_id": "team_stuck_dispatch",
+        "task_id": "task_stuck_dispatch",
+        "agent_type": "bridge-leader",
+        "status": "streaming",
+        "safe_preview": "recent bounded SDK stream activity",
+    }
+    with (run_root / "sdk_stream_events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(stream_record, ensure_ascii=False) + "\n")
+    ledger = json.loads((run_root / "run_ledger.json").read_text(encoding="utf-8"))
+    snapshot = build_runtime_snapshot(ControlPaths.from_root(control_root, runs_root), ledger)
+    diagnostics = snapshot.get("runtime_diagnostics", {})
+    anomalies = diagnostics.get("orchestration_anomalies", [])
+    if anomalies:
+        raise AssertionError(json.dumps(anomalies, ensure_ascii=False, indent=2))
+    if diagnostics.get("observer_stream_counts", {}).get("sdk_stream_events") != 1:
+        raise AssertionError(json.dumps(diagnostics, ensure_ascii=False, indent=2))
+    if "sdk_stream_events" not in snapshot.get("snapshot_refs", {}):
+        raise AssertionError(json.dumps(snapshot.get("snapshot_refs", {}), ensure_ascii=False, indent=2))
+    return snapshot
+
+
+def run_active_process_table_suppresses_stuck_dispatch_anomaly(control_root: Path, runs_root: Path) -> dict:
+    run_stuck_dispatch_anomaly(control_root, runs_root)
+    run_root = runs_root / "run_demo"
+    ledger = json.loads((run_root / "run_ledger.json").read_text(encoding="utf-8"))
+    original = workflow_runtime_module._active_process_table_matches
+    workflow_runtime_module._active_process_table_matches = lambda bridge_window_id: [
+        {
+            "pid": 4242,
+            "ppid": 4000,
+            "state": "S",
+            "command_preview": f"python train.py --bridge-window {bridge_window_id}",
+            "source": "process_table",
+        }
+    ]
+    try:
+        snapshot = build_runtime_snapshot(ControlPaths.from_root(control_root, runs_root), ledger)
+    finally:
+        workflow_runtime_module._active_process_table_matches = original
+    diagnostics = snapshot.get("runtime_diagnostics", {})
+    anomalies = diagnostics.get("orchestration_anomalies", [])
+    if anomalies:
+        raise AssertionError(json.dumps(anomalies, ensure_ascii=False, indent=2))
+    candidates = diagnostics.get("active_process_candidates", {}).get("bw_stuck_dispatch", [])
+    if not candidates or candidates[0].get("pid") != 4242:
+        raise AssertionError(json.dumps(diagnostics, ensure_ascii=False, indent=2))
     return snapshot
 
 
@@ -662,10 +908,63 @@ def run_user_clarification_resume(control_root: Path, runs_root: Path) -> dict:
     )
     if "call_bridge_sdk" in paused.get("allowed_actions", []):
         raise AssertionError(json.dumps(paused, ensure_ascii=False, indent=2))
-    dispatch(control_root, runs_root, event("user_answer_received", bw, ss, agent_type="main-leader", agent_id="main", payload={"answer": "Proceed with the documented wording"}))
+    unbound_answer = event("user_answer_received", bw, ss, agent_type="main-leader", agent_id="main", payload={"answer": "Proceed with the documented wording"})
+    unbound_answer.pop("bridge_window_id", None)
+    unbound_answer.pop("sub_session_id", None)
+    answered = dispatch(control_root, runs_root, unbound_answer)
+    if answered.get("lifecycle", {}).get("status_index", {}).get(bw) != "user_answer_received":
+        raise AssertionError(json.dumps(answered, ensure_ascii=False, indent=2))
     dispatch(control_root, runs_root, event("resume_same_l3_task", bw, ss, agent_type="main-leader", agent_id="main", payload={"resume_reason": "user answered clarification"}))
     resumed = dispatch(control_root, runs_root, event("continuation_of_previous_l3", bw, ss, agent_type="main-leader", agent_id="main", payload={"continuation_reason": "continue bounded L3 documentation refresh"}))
     return resumed
+
+
+def run_runtime_owned_user_decision_pause(control_root: Path, runs_root: Path) -> dict:
+    bw = "bw_runtime_owned_user_decision"
+    ss = "sub_runtime_owned_user_decision"
+    p = packet(bw, ss)
+    p["target_phase"] = "l2_advisory"
+    p["phase_route"] = ["l3_bridge", "l2_advisory"]
+    p["task_spec"]["target_phase"] = "l2_advisory"
+    p["task_spec"]["instruction_coverage_checklist"] = ["decide next legal step"]
+    p["task_team_mapping"]["teammate_assignments"] = [{"teammate_name": "chiefmate-a", "assignment": "Decide next legal step.", "expected_output": "report"}]
+    p["team_spec"]["teammate_specs"] = [{"teammate_name": "chiefmate-a", "role": "advisory", "allowed_tools": ["Read"], "responsibilities": []}]
+    p["dispatch_contract"] = build_dispatch_contract(p)
+
+    def user_decision_executor(_execution_input: dict) -> dict:
+        teammate_report = report_for_packet(p, "Next viable action needs an explicit user decision.")
+        teammate_report.update(
+            {
+                "teammate_name": "chiefmate-a",
+                "agent_type": "chiefmate-a",
+                "classification": "user_decision",
+                "next_action_recommendation": "Ask the user whether to open a new post-milestone scope or stop.",
+            }
+        )
+        return {
+            "status": "partial_or_failed",
+            "reports": [teammate_report],
+            "artifact_refs": [],
+            "evidence": {"runtime_owned_teammate_fallback": True},
+            "error_or_null": {
+                "type": "RuntimeOwnedTeammateReportedBlocked",
+                "message": "runtime-owned teammate fallback reports contain blocked or escalated completion semantics",
+                "blocked_teammates": ["chiefmate-a"],
+            },
+            "cleanup_required": False,
+        }
+
+    bridge_result = call_bridge_sdk(str(control_root), p, runtime_runs_root=str(runs_root), persist=True, team_executor=user_decision_executor)
+    if bridge_result.get("status") != "needs_user_answer":
+        raise AssertionError(json.dumps(bridge_result, ensure_ascii=False, indent=2))
+    snapshot = reconcile_workflow_from_ledger(str(control_root), "run_demo", runtime_runs_root=str(runs_root), persist=True)["runtime_snapshot"]
+    status = snapshot.get("lifecycle", {}).get("status_index", {}).get(bw)
+    if status != "paused_for_user_answer":
+        raise AssertionError(json.dumps(snapshot, ensure_ascii=False, indent=2))
+    integrity = snapshot.get("integrity", {})
+    if integrity.get("awaiting_user_answer") is not True or "record_user_answer" not in snapshot.get("allowed_actions", []):
+        raise AssertionError(json.dumps(snapshot, ensure_ascii=False, indent=2))
+    return snapshot
 
 
 def run_mcp_lifecycle_helper(control_root: Path, runs_root: Path) -> dict:
@@ -709,10 +1008,18 @@ def run_mcp_lifecycle_helper(control_root: Path, runs_root: Path) -> dict:
     )
     old_override = os.environ.get("BRIDGE_ALLOW_RUNTIME_RUNS_ROOT_OVERRIDE")
     os.environ["BRIDGE_ALLOW_RUNTIME_RUNS_ROOT_OVERRIDE"] = "1"
+    mark_args = {"run_id": "run_demo", "bridge_window_id": bw, "sub_session_id": ss, "persist": True, "reason": "smoke orphan helper", "runtime_runs_root": str(runs_root)}
     try:
+        try:
+            module._call_tool("mark_bridge_orphaned", mark_args)
+        except ValueError as exc:
+            if "recent runtime evidence" not in str(exc):
+                raise
+        else:
+            raise AssertionError("recent bridge window orphan mark was accepted without force")
         response = module._call_tool(
             "mark_bridge_orphaned",
-            {"run_id": "run_demo", "bridge_window_id": bw, "sub_session_id": ss, "persist": True, "reason": "smoke orphan helper", "runtime_runs_root": str(runs_root)},
+            {**mark_args, "force": True},
         )
     finally:
         if old_override is None:
@@ -989,6 +1296,37 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
         task_spec={"task_subject": "sdk bridge manifest smoke", "task_kind": "bridge_window_smoke"},
         target_phase="l4_execute",
     )
+    manifest_path = runs_root / "run_demo" / "logs" / "runs" / "demo" / "log_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_payload = {
+        "run_id": "run_demo",
+        "bridge_window_id": manifest_packet["binding"]["bridge_window_id"],
+        "task_id": manifest_packet["task_spec"]["task_id_or_null"],
+        "stage_name": "sdk bridge manifest smoke",
+        "command": "conda run -n formal_env torchrun train.py --ckpt ckpt/demo --batch_size 4",
+        "cwd": ".",
+        "environment_evidence": {"executor": "smoke manifest fixture"},
+        "process_refs": [{"status": "succeeded", "executor": "smoke manifest fixture"}],
+        "batchbasis": "smoke-derived final batch 4",
+        "gpu_id": "0",
+        "gpu_id_or_device_ids": "0",
+        "memory observed": "smoke memory observed 12GB; warmup memory observed 72GB",
+        "smoke_memory_observed": "12GB",
+        "warmup_memory_observed": "72GB",
+        "formal_memory_observed": "72GB",
+        "model": "demo model",
+        "model_or_model_family": "demo model",
+        "dataset": "demo dataset",
+        "dataset_name_split_source": "demo dataset",
+        "method": "DPO",
+        "method_or_objective": "DPO",
+        "log_files": [{"path": "train.log", "status": "not_applicable"}],
+        "produced_artifacts": [{"path": "ckpt/demo", "status": "not_applicable"}],
+        "terminal_status": "succeeded",
+    }
+    for field in manifest_packet.get("completion_contract", {}).get("manifest_required_fields", []):
+        manifest_payload.setdefault(str(field), f"not_applicable: smoke fixture {field}")
+    manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     manifest_result = call_bridge_sdk(
         str(control_root),
         manifest_packet,
@@ -1001,7 +1339,7 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
                     "summary": "manifest present",
                     "instruction_coverage": coverage_for_packet(manifest_packet),
                     "semantic_identity_resolution": {"disposition": "not_applicable", "basis": "smoke fixture"},
-                    "evidence_refs": ["logs/runs/demo/artifact_manifest.json"],
+                    "evidence_refs": [str(manifest_path)],
                     "manifest required fields checklist": {
                         "run_id": "present",
                         "bridge_window_id": "present",
@@ -1017,7 +1355,7 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
                     },
                 }
             ],
-            "artifact_refs": ["logs/runs/demo/artifact_manifest.json"],
+            "artifact_refs": [str(manifest_path)],
             "evidence": {
                 "classification": "manifest present",
                 "manifest_required_fields_checklist": {
@@ -1062,11 +1400,307 @@ def run_sdk_roundtrip(control_root: Path, runs_root: Path) -> dict:
     }
 
 
-def assert_denied(control_root: Path, runs_root: Path, payload: dict, expected_reason: str) -> None:
+def run_reconcile_historical_check_replay_test(control_root: Path, runs_root: Path) -> dict:
+    packet = decide_next_bridge_packet(
+        str(control_root),
+        "run_demo",
+        runtime_runs_root=str(runs_root),
+        main_session_id="main_demo",
+        user_instruction="historical replay should keep accepted event",
+        task_spec={"task_subject": "historical replay", "task_kind": "bridge_window_smoke"},
+        target_phase="l4_execute",
+    )
+    packet = deepcopy(packet)
+    packet["phase_route"] = ["leader_freeze", "l4_execute"]
+    event_id = "evt_historical_replay_badroute"
+    event = {
+        "run_id": "run_demo",
+        "main_session_id": "main_demo",
+        "sub_session_id": packet["binding"]["sub_session_id"],
+        "bridge_window_id": packet["binding"]["bridge_window_id"],
+        "agent_id": "main-leader",
+        "agent_type": "main-leader",
+        "event_kind": "bridge_call_intended",
+        "event_id": event_id,
+        "timestamp": _now(),
+        "payload": {"packet": packet},
+    }
+    run_root = runs_root / "run_demo"
+    (run_root / "event_log.jsonl").write_text(json.dumps(event, ensure_ascii=False) + "\n", encoding="utf-8")
+    (run_root / "check_ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "decision": "allow",
+                "code": "ok",
+                "reasons": [],
+                "normalized_payload": {"packet": packet},
+                "derived_facts": {"from_status": None, "to_status": "bridge_call_intended"},
+                "audit_ref": "chk_historical_replay",
+                "event_id": event_id,
+                "event_kind": "bridge_call_intended",
+                "timestamp": event["timestamp"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_root / "update_ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "decision": "applied",
+                "transition_ids": ["wtr_historical_replay"],
+                "new_snapshot_ref": f"snapshot:run_demo:{event_id}",
+                "changed_fields": ["lifecycle"],
+                "audit_ref": "upd_historical_replay",
+                "event_id": event_id,
+                "event_kind": "bridge_call_intended",
+                "timestamp": event["timestamp"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    replay = reconcile_workflow_from_ledger(str(control_root), "run_demo", runtime_runs_root=str(runs_root), persist=False)
+    if replay.get("rejected_events"):
+        raise AssertionError(json.dumps(replay, ensure_ascii=False, indent=2))
+    replayed = replay.get("replayed_events") or []
+    if not replayed or replayed[0].get("historical_check_reused") is not True:
+        raise AssertionError(json.dumps(replay, ensure_ascii=False, indent=2))
+    status = replay["runtime_snapshot"]["lifecycle"]["status_index"].get(packet["binding"]["bridge_window_id"])
+    if status != "bridge_call_intended":
+        raise AssertionError(json.dumps(replay, ensure_ascii=False, indent=2))
+    return {"reconcile_historical_replay": status}
+
+
+def run_stale_projection_auto_reconcile_test(control_root: Path, runs_root: Path) -> dict:
+    run_id = "run_stale_projection"
+    bw = "bw_stale_projection"
+    ss = "sub_stale_projection"
+    p = deepcopy(packet(bw, ss))
+    p["binding"]["run_id"] = run_id
+    p["phase_route"] = ["leader_freeze", "l4_execute"]
+    p["dispatch_contract"] = build_dispatch_contract(p)
+    run_root = runs_root / run_id
+
+    events = [
+        event("bridge_call_intended", bw, ss, run_id=run_id, main_session_id="main_demo", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id=f"tool_{bw}", payload={"packet": p}),
+        event("pretooluse_allowed_by_main_leader", bw, ss, run_id=run_id, main_session_id="main_demo", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id=f"tool_{bw}", payload={"packet": p}),
+        event("call_bridge_sdk_started", bw, ss, run_id=run_id, main_session_id="main_demo", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id=f"tool_{bw}", payload={"packet": p}),
+        event("bridge_window_opened", bw, ss, run_id=run_id, main_session_id="main_demo", agent_type="bridge-leader", payload={"packet": p}),
+        event("bridge_packet_accepted", bw, ss, run_id=run_id, main_session_id="main_demo", payload={"packet": p}),
+        event("team_create_started", bw, ss, run_id=run_id, main_session_id="main_demo", team_id=f"team_{bw}", tool_name="team_create"),
+        event("team_create_succeeded", bw, ss, run_id=run_id, main_session_id="main_demo", team_id=f"team_{bw}", tool_name="team_create", payload={"team_name": f"team_{bw}", "teammate_ids": ["mate_stale_projection"]}),
+        event("task_create_started", bw, ss, run_id=run_id, main_session_id="main_demo", team_id=f"team_{bw}", task_id=f"task_{bw}", tool_name="task_create"),
+        event("task_create_succeeded", bw, ss, run_id=run_id, main_session_id="main_demo", team_id=f"team_{bw}", task_id=f"task_{bw}", tool_name="task_create"),
+        event(
+            "taskcreated_hook_accepted",
+            bw,
+            ss,
+            run_id=run_id,
+            main_session_id="main_demo",
+            team_id=f"team_{bw}",
+            task_id=f"task_{bw}",
+            agent_type="hook",
+            agent_id="hook.task_created",
+            payload={
+                "task_subject": f"task_{bw}",
+                "task_description": "smoke task created",
+                "task_spec": p["task_spec"],
+                "team_spec": p["team_spec"],
+                "task_team_mapping": p["task_team_mapping"],
+                "teammate_ids": ["mate_stale_projection"],
+            },
+        ),
+        event("message_dispatch_started", bw, ss, run_id=run_id, main_session_id="main_demo", team_id=f"team_{bw}", task_id=f"task_{bw}", tool_name="send_messages"),
+        event("message_dispatch_succeeded", bw, ss, run_id=run_id, main_session_id="main_demo", team_id=f"team_{bw}", task_id=f"task_{bw}", tool_name="send_messages"),
+    ]
+    snapshot = None
+    for payload in events:
+        snapshot = dispatch(control_root, runs_root, payload)
+    if snapshot is None or bw not in snapshot.get("lifecycle", {}).get("open_bridge_window_ids", []):
+        raise AssertionError(json.dumps(snapshot, ensure_ascii=False, indent=2))
+
+    manifest = _manifest_required_fields_checklist(p)
+    manifest["run_id"] = run_id
+    manifest["task_id"] = f"task_{bw}"
+    manifest["runtime_event_task_id"] = f"task_{bw}"
+    manifest_path = run_root / "manifests" / f"{bw}_log_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    artifact_refs = [{"ref_type": "log_manifest", "path": str(manifest_path), "producer": {"agent_id": "smoke", "event_id": "evt_stale_projection"}}]
+    report_payload = report_for_packet(p, "stale projection completed")
+    report_payload["manifest required fields checklist"] = manifest
+    dispatch(control_root, runs_root, event("artifacts_ready", bw, ss, run_id=run_id, main_session_id="main_demo", team_id=f"team_{bw}", task_id=f"task_{bw}", tool_name="task_complete"))
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "completion_contract_satisfied",
+            bw,
+            ss,
+            run_id=run_id,
+            main_session_id="main_demo",
+            team_id=f"team_{bw}",
+            task_id=f"task_{bw}",
+            agent_type="hook",
+            agent_id="hook.task_completed",
+            payload={
+                "completion_contract": p["completion_contract"],
+                "completion_checks": {
+                    "required_outputs_present": True,
+                    "required_artifacts_present": True,
+                    "validation_passed": True,
+                    "missing_outputs": [],
+                    "missing_artifacts": [],
+                    "failed_validations": [],
+                    "notes": [],
+                },
+                "completion_evidence": {"trajectory_refs": ["trajectory.jsonl:stale_projection"], "manifest_required_fields_checklist": manifest},
+                "reports": [report_payload],
+                "artifact_refs": ["artifact", *artifact_refs],
+            },
+        ),
+    )
+    dispatch(control_root, runs_root, event("team_delete_started", bw, ss, run_id=run_id, main_session_id="main_demo", team_id=f"team_{bw}", task_id=f"task_{bw}", tool_name="team_delete"))
+    dispatch(control_root, runs_root, event("team_delete_succeeded", bw, ss, run_id=run_id, main_session_id="main_demo", team_id=f"team_{bw}", task_id=f"task_{bw}", tool_name="team_delete"))
+    result_payload = event(
+        "bridge_result_returned",
+        bw,
+        ss,
+        run_id=run_id,
+        main_session_id="main_demo",
+        team_id=f"team_{bw}",
+        task_id=f"task_{bw}",
+        agent_type="main-leader",
+        agent_id="main",
+        tool_name="call_bridge_sdk",
+        payload={
+            "bridge_result": {
+                "status": "succeeded",
+                "reports": [report_payload],
+                "artifact_refs": ["artifact", *artifact_refs],
+                "evidence": {"event_ids": ["evt_stale_projection"], "manifest_required_fields_checklist": manifest},
+                "error_or_null": None,
+                "cleanup_required": False,
+            }
+        },
+    )
+    result_payload["event_id"] = "evt_stale_projection_returned"
+    result = dispatch_workflow_event(str(control_root), result_payload, runtime_runs_root=str(runs_root), persist=False)
+    if not result.ok:
+        raise AssertionError(json.dumps(result.check_result, ensure_ascii=False, indent=2))
+    for name, payload in [
+        ("event_log.jsonl", result_payload),
+        ("check_ledger.jsonl", {**result.check_result, "event_id": result.event_id, "event_kind": result.event_kind, "timestamp": result_payload["timestamp"]}),
+        ("update_ledger.jsonl", {**result.update_result, "event_id": result.event_id, "event_kind": result.event_kind, "timestamp": result_payload["timestamp"]}),
+    ]:
+        with (run_root / name).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    stale_ledger = json.loads((run_root / "run_ledger.json").read_text(encoding="utf-8"))
+    reconciled = reconcile_run_ledger_if_stale(str(control_root), run_id, runtime_runs_root=str(runs_root), run_ledger=stale_ledger, persist=True)
+    open_windows = reconciled.get("lifecycle", {}).get("open_bridge_window_ids", [])
+    status = reconciled.get("lifecycle", {}).get("status_index", {}).get(bw)
+    last_result = reconciled.get("last_bridge_result", {})
+    if open_windows or status != "bridge_window_returned" or last_result.get("bridge_window_id") != bw:
+        raise AssertionError(json.dumps(reconciled, ensure_ascii=False, indent=2))
+    transitions = _read_jsonl(run_root / "transitions.jsonl")
+    if not transitions or transitions[-1].get("based_on_event") != result.event_id:
+        raise AssertionError(json.dumps(transitions[-5:], ensure_ascii=False, indent=2))
+    second = reconcile_run_ledger_if_stale(str(control_root), run_id, runtime_runs_root=str(runs_root), run_ledger=reconciled, persist=True)
+    second_status = second.get("lifecycle", {}).get("status_index", {}).get(bw)
+    second_result = second.get("last_bridge_result", {})
+    if second.get("lifecycle", {}).get("open_bridge_window_ids", []) or second_status != "bridge_window_returned" or second_result.get("bridge_window_id") != bw:
+        raise AssertionError(json.dumps(second, ensure_ascii=False, indent=2))
+    return {"stale_projection_auto_reconcile": status}
+
+
+def run_bridge_sdk_duplicate_call_coalescing(control_root: Path, runs_root: Path) -> dict:
+    bw = "bw_duplicate_coalesced"
+    ss = "sub_duplicate_coalesced"
+    p = packet(bw, ss)
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[dict[str, Any]] = []
+    results: list[dict[str, Any] | None] = [None, None]
+    errors: list[str] = []
+
+    def executor(execution_input: dict[str, Any]) -> dict[str, Any]:
+        calls.append(execution_input)
+        started.set()
+        if not release.wait(timeout=10):
+            raise AssertionError("duplicate coalescing smoke executor was not released")
+        log_manifest_ref = _write_smoke_log_manifest(runs_root, p, task_id=p["binding"]["task_id_or_null"])
+        return {
+            "status": "succeeded",
+            "reports": [report_for_packet(p, "coalesced ok")],
+            "artifact_refs": ["artifact", log_manifest_ref],
+            "evidence": {
+                "event_ids": ["evt_duplicate_coalesced"],
+                "trajectory_refs": ["trajectory.jsonl:duplicate_coalesced"],
+                "manifest_required_fields_checklist": _manifest_required_fields_checklist(p),
+            },
+            "error_or_null": None,
+            "cleanup_required": False,
+        }
+
+    def invoke(index: int) -> None:
+        try:
+            results[index] = call_bridge_sdk(
+                str(control_root),
+                p,
+                runtime_runs_root=str(runs_root),
+                persist=True,
+                team_executor=executor,
+            )
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    first = threading.Thread(target=invoke, args=(0,))
+    second = threading.Thread(target=invoke, args=(1,))
+    first.start()
+    if not started.wait(timeout=10):
+        raise AssertionError("first duplicate coalescing bridge call did not reach executor")
+    second.start()
+    time.sleep(0.1)
+    release.set()
+    first.join(timeout=20)
+    second.join(timeout=20)
+    if first.is_alive() or second.is_alive() or errors:
+        raise AssertionError(json.dumps({"errors": errors, "alive": [first.is_alive(), second.is_alive()]}, ensure_ascii=False, indent=2))
+    if len(calls) != 1:
+        raise AssertionError(json.dumps({"executor_call_count": len(calls)}, ensure_ascii=False, indent=2))
+    if not all(isinstance(item, dict) and item.get("status") == "succeeded" for item in results):
+        raise AssertionError(json.dumps({"results": results}, ensure_ascii=False, indent=2))
+    second_evidence = results[1].get("evidence") if isinstance(results[1], dict) else {}
+    if not isinstance(second_evidence, dict) or second_evidence.get("coalesced_duplicate_bridge_call") is not True:
+        raise AssertionError(json.dumps({"second_result": results[1]}, ensure_ascii=False, indent=2))
+    opened_count = 0
+    event_log = runs_root / "run_demo" / "event_log.jsonl"
+    if event_log.exists():
+        for line in event_log.read_text(encoding="utf-8").splitlines():
+            if bw in line and '"event_kind": "bridge_window_opened"' in line:
+                opened_count += 1
+    if opened_count != 1:
+        raise AssertionError(json.dumps({"bridge_window_opened_count": opened_count}, ensure_ascii=False, indent=2))
+    snapshot = reconcile_workflow_from_ledger(str(control_root), "run_demo", runtime_runs_root=str(runs_root), persist=False)["runtime_snapshot"]
+    return {
+        "duplicate_call_coalescing": "passed",
+        "status": snapshot["lifecycle"]["status_index"].get(bw),
+        "executor_call_count": len(calls),
+    }
+
+
+def assert_denied(control_root: Path, runs_root: Path, payload: dict, expected_reason: str):
     result = dispatch_workflow_event(str(control_root), payload, runtime_runs_root=str(runs_root), persist=True)
     reasons = result.check_result.get("reasons", [])
     if result.ok or expected_reason not in reasons:
         raise AssertionError(json.dumps({"expected": expected_reason, "actual": result.check_result}, ensure_ascii=False, indent=2))
+    return result
 
 
 def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
@@ -1116,6 +1750,69 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         runs_root,
         event("bridge_call_intended", "bw_bad_l3_scope", "sub_bad_l3_scope", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_bad_l3_scope", payload={"packet": bad_l3_scope}),
         "bridge_packet_l3_write_scope_not_policy_owned",
+    )
+
+    bad_result_contract = packet("bw_bad_result_contract", "sub_bad_result_contract")
+    dispatch(control_root, runs_root, event("bridge_call_intended", "bw_bad_result_contract", "sub_bad_result_contract", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_bad_result_contract", payload={"packet": bad_result_contract}))
+    dispatch(control_root, runs_root, event("pretooluse_allowed_by_main_leader", "bw_bad_result_contract", "sub_bad_result_contract", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_bad_result_contract", payload={"packet": bad_result_contract}))
+    dispatch(control_root, runs_root, event("call_bridge_sdk_started", "bw_bad_result_contract", "sub_bad_result_contract", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", tool_use_id="tool_bad_result_contract", payload={"packet": bad_result_contract}))
+    dispatch(control_root, runs_root, event("bridge_window_opened", "bw_bad_result_contract", "sub_bad_result_contract", agent_type="bridge-leader", payload={"packet": bad_result_contract}))
+    dispatch(control_root, runs_root, event("bridge_packet_accepted", "bw_bad_result_contract", "sub_bad_result_contract", payload={"packet": bad_result_contract}))
+    dispatch(control_root, runs_root, event("team_create_started", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", tool_name="team_create"))
+    dispatch(control_root, runs_root, event("team_create_succeeded", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", tool_name="team_create", payload={"team_name": "team_bad_result_contract", "teammate_ids": ["mate_1"]}))
+    dispatch(control_root, runs_root, event("task_create_started", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", task_id="task_bad_result_contract", tool_name="task_create"))
+    dispatch(control_root, runs_root, event("task_create_succeeded", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", task_id="task_bad_result_contract", tool_name="task_create"))
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "taskcreated_hook_accepted",
+            "bw_bad_result_contract",
+            "sub_bad_result_contract",
+            team_id="team_bad_result_contract",
+            task_id="task_bad_result_contract",
+            agent_type="hook",
+            agent_id="hook.task_created",
+            payload={
+                "task_subject": "task_bw_bad_result_contract",
+                "task_description": "smoke task created",
+                "task_spec": bad_result_contract["task_spec"],
+                "team_spec": bad_result_contract["team_spec"],
+                "task_team_mapping": bad_result_contract["task_team_mapping"],
+                "teammate_ids": ["mate_1"],
+            },
+        ),
+    )
+    dispatch(control_root, runs_root, event("message_dispatch_started", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", task_id="task_bad_result_contract", tool_name="send_messages"))
+    dispatch(control_root, runs_root, event("message_dispatch_succeeded", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", task_id="task_bad_result_contract", tool_name="send_messages"))
+    good_log_manifest_ref = _write_smoke_log_manifest(runs_root, bad_result_contract, task_id="task_bad_result_contract")
+    good_artifact_refs = ["artifact", good_log_manifest_ref]
+    dispatch(control_root, runs_root, event("artifacts_ready", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", task_id="task_bad_result_contract", tool_name="task_complete", payload={"artifact_refs": good_artifact_refs}))
+    dispatch(control_root, runs_root, event("completion_contract_satisfied", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", task_id="task_bad_result_contract", agent_type="hook", agent_id="hook.task_completed", payload={"completion_contract": bad_result_contract["completion_contract"], "completion_checks": {"required_outputs_present": True, "required_artifacts_present": True, "validation_passed": True, "missing_outputs": [], "missing_artifacts": [], "failed_validations": [], "notes": []}, "completion_evidence": {"trajectory_refs": ["trajectory.jsonl:bad_result_contract"], "manifest_required_fields_checklist": _manifest_required_fields_checklist(bad_result_contract)}, "reports": [report_for_packet(bad_result_contract)], "artifact_refs": good_artifact_refs}))
+    dispatch(control_root, runs_root, event("team_delete_started", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", task_id="task_bad_result_contract", tool_name="team_delete"))
+    dispatch(control_root, runs_root, event("team_delete_succeeded", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", task_id="task_bad_result_contract", tool_name="team_delete"))
+    spoofed_weak_packet = deepcopy(bad_result_contract)
+    spoofed_weak_packet["completion_contract"]["required_artifacts"] = []
+    bad_result = assert_denied(
+        control_root,
+        runs_root,
+        event("bridge_result_returned", "bw_bad_result_contract", "sub_bad_result_contract", team_id="team_bad_result_contract", task_id="task_bad_result_contract", agent_type="main-leader", agent_id="main", tool_name="call_bridge_sdk", payload={"packet": spoofed_weak_packet, "bridge_result": {"status": "succeeded", "reports": [report_for_packet(bad_result_contract)], "artifact_refs": ["artifact"], "evidence": {"event_ids": ["evt_bad_result_contract"]}, "error_or_null": None, "cleanup_required": False}}),
+        "bridge_result_completion_contract_not_satisfied",
+    )
+    if bad_result.update_result.get("decision") != "applied":
+        raise AssertionError(json.dumps(bad_result.update_result, ensure_ascii=False, indent=2))
+    bad_result_snapshot = bad_result.runtime_snapshot
+    if bad_result_snapshot["lifecycle"]["status_index"].get("bw_bad_result_contract") != "bridge_window_partial_returned":
+        raise AssertionError(json.dumps(bad_result_snapshot["lifecycle"], ensure_ascii=False, indent=2))
+    if "bw_bad_result_contract" in bad_result_snapshot["lifecycle"].get("open_bridge_window_ids", []):
+        raise AssertionError(json.dumps(bad_result_snapshot["lifecycle"], ensure_ascii=False, indent=2))
+    if "advance_phase" in set(bad_result_snapshot.get("allowed_actions", [])):
+        raise AssertionError(json.dumps(bad_result_snapshot.get("phase_exit_readiness"), ensure_ascii=False, indent=2))
+    assert_denied(
+        control_root,
+        runs_root,
+        event("phase_advanced", "", "", agent_type="runtime", agent_id="runtime.phase_guard", payload={"target_phase": "l4_anomaly"}),
+        "phase_exit_not_ready",
     )
 
     hardened_l3 = decide_next_bridge_packet(
@@ -1428,8 +2125,11 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     required_execute_evidence = set(execute_packet["report_contract"].get("required_evidence", []))
     for required_manifest_evidence in [
         "manifest required fields checklist",
+        "formal completion evidence with approved target quantity versus observed terminal quantity or not_applicable reason",
         "batchbasis",
         "gpu_id",
+        "current GPU resource-utilization sanity check before finish-ready team idle or completion when GPU execution is involved",
+        "observed-vs-available VRAM disposition and resource-adaptation evidence or best-available deviation rationale when utilization is materially low",
         "smoke memory observed when smoke ran",
         "warmup memory observed when warmup ran",
         "natural-language model dataset method semantics",
@@ -1442,10 +2142,12 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
         if isinstance(item, dict)
     )
     required_execute_assignment_markers = [
+        "L4 execute pre-idle resource check",
         "Formal log manifest required fields",
         "batchbasis",
         "warmup_memory_observed",
         "dataset_name_split_source",
+        "formal_completion_evidence",
     ]
     if any(marker not in execute_assignments for marker in required_execute_assignment_markers):
         raise AssertionError(json.dumps(execute_packet.get("task_team_mapping"), ensure_ascii=False, indent=2))
@@ -1503,6 +2205,27 @@ def run_negative_tests(control_root: Path, runs_root: Path) -> dict:
     stray_snapshot = stray_failure.runtime_snapshot
     if "bw_stray_failure" in stray_snapshot.get("lifecycle", {}).get("status_index", {}):
         raise AssertionError(json.dumps(stray_snapshot["lifecycle"], ensure_ascii=False, indent=2))
+    rejected_packet_projection = packet("bw_rejected_projection", "sub_rejected_projection")
+    rejected_projection = dispatch_workflow_event(
+        str(control_root),
+        event(
+            "bridge_window_opened",
+            "bw_rejected_projection",
+            "sub_rejected_projection",
+            agent_type="bridge-leader",
+            payload={"packet": rejected_packet_projection},
+        ),
+        runtime_runs_root=str(runs_root),
+        persist=True,
+    )
+    if rejected_projection.ok or "lifecycle_transition_not_allowed" not in rejected_projection.check_result.get("reasons", []):
+        raise AssertionError(json.dumps(rejected_projection.check_result, ensure_ascii=False, indent=2))
+    rejected_snapshot = rejected_projection.runtime_snapshot
+    if "bw_rejected_projection" in rejected_snapshot.get("lifecycle", {}).get("status_index", {}):
+        raise AssertionError(json.dumps(rejected_snapshot["lifecycle"], ensure_ascii=False, indent=2))
+    bridge_packets = _read_jsonl(runs_root / "run_demo" / "bridge_packets.jsonl")
+    if any(item.get("bridge_window_id") == "bw_rejected_projection" for item in bridge_packets):
+        raise AssertionError(json.dumps(bridge_packets[-5:], ensure_ascii=False, indent=2))
     transition_ids = [item.get("transition_id") for item in _read_jsonl(runs_root / "run_demo" / "transitions.jsonl")]
     if len(transition_ids) != len(set(transition_ids)):
         raise AssertionError(json.dumps(transition_ids, ensure_ascii=False, indent=2))
@@ -1932,6 +2655,7 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
             "reports": {
                 "summary": "single report object missing report evidence",
                 "instruction_coverage": {"smoke checklist": "completed"},
+                "semantic_identity_resolution": {"disposition": "not_applicable", "basis": "smoke fixture"},
             },
             "artifact_refs": [],
             "evidence": {"runtime_ids": {"run_id": "run_single_report"}},
@@ -1952,6 +2676,7 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
             "reports": {
                 "summary": "single report object ok",
                 "instruction_coverage": {"smoke checklist": "completed"},
+                "semantic_identity_resolution": {"disposition": "not_applicable", "basis": "smoke fixture"},
                 "evidence_refs": ["event:run_single_report"],
             },
             "artifact_refs": [],
@@ -1975,6 +2700,7 @@ def run_cli_executor_policy_tests(root: Path) -> dict:
                 {
                     "summary": "list report missing report evidence",
                     "instruction_coverage": {"smoke checklist": "completed"},
+                    "semantic_identity_resolution": {"disposition": "not_applicable", "basis": "smoke fixture"},
                 }
             ],
             "artifact_refs": [],
@@ -2367,6 +3093,18 @@ def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
         reminder_codes = {item.get("code") for item in formal_reminders}
         if not {"executor_formal_gpu_probe_missing", "executor_log_manifest_reminder"}.issubset(reminder_codes):
             raise AssertionError(json.dumps(formal_reminders, ensure_ascii=False, indent=2))
+        formal_probe_command = "nvidia-smi; conda run -n formal_env torchrun train.py --per_device_train_batch_size 1 --write-log-manifest"
+        formal_probe_reminders = module.bash_execution_soft_reminders(
+            "Bash",
+            {"command": formal_probe_command, "cwd": "."},
+            binding,
+            after=False,
+        )
+        formal_probe_codes = {item.get("code") for item in formal_probe_reminders}
+        if "executor_formal_memory_target_missing" not in formal_probe_codes:
+            raise AssertionError(json.dumps(formal_probe_reminders, ensure_ascii=False, indent=2))
+        if "70GB" in json.dumps(formal_probe_reminders, ensure_ascii=False) or "60GB" in json.dumps(formal_probe_reminders, ensure_ascii=False):
+            raise AssertionError(json.dumps(formal_probe_reminders, ensure_ascii=False, indent=2))
         smoke_reminders = module.bash_execution_soft_reminders(
             "Bash",
             {"command": "conda run -n formal_env python train.py --smoke --max_steps=1", "cwd": "."},
@@ -2376,6 +3114,20 @@ def run_hook_observer_rebind_tests(root: Path, runs_root: Path) -> dict:
         smoke_codes = {item.get("code") for item in smoke_reminders}
         if "executor_formal_gpu_probe_missing" in smoke_codes or "executor_smoke_gpu_probe_recommended" not in smoke_codes:
             raise AssertionError(json.dumps(smoke_reminders, ensure_ascii=False, indent=2))
+        self_matching_pgrep_denial = module.executor_bash_pretool_denial(
+            "Bash",
+            {"command": "while pgrep -f 'python3 scripts/06_eval_all.py --mode formal'; do sleep 120; done", "cwd": "."},
+            binding,
+        )
+        if "pgrep -f" not in self_matching_pgrep_denial:
+            raise AssertionError(json.dumps({"denial": self_matching_pgrep_denial}, ensure_ascii=False, indent=2))
+        pid_scoped_poll_denial = module.executor_bash_pretool_denial(
+            "Bash",
+            {"command": "pid=$(cat run.pid); while kill -0 \"$pid\" 2>/dev/null; do sleep 120; done", "cwd": "."},
+            binding,
+        )
+        if pid_scoped_poll_denial:
+            raise AssertionError(json.dumps({"denial": pid_scoped_poll_denial}, ensure_ascii=False, indent=2))
         bash_record = {
             "timestamp": _now(),
             **binding,
@@ -3449,6 +4201,31 @@ def run_state_graph_tests(control_root: Path, runs_root: Path) -> dict:
     )
     if failed_state.get("graph_node") not in {"terminal_failure", "bridge_call_failed", "bridge_window_failed"}:
         raise AssertionError(json.dumps(failed_state, ensure_ascii=False, indent=2))
+    cleanup_return_state = graph.replay_events(
+        control_root,
+        [
+            event("bridge_call_intended", "bw_cleanup_path", "sub_cleanup_path"),
+            event("pretooluse_allowed_by_main_leader", "bw_cleanup_path", "sub_cleanup_path"),
+            event("call_bridge_sdk_started", "bw_cleanup_path", "sub_cleanup_path"),
+            event("bridge_window_opened", "bw_cleanup_path", "sub_cleanup_path"),
+            event("bridge_packet_accepted", "bw_cleanup_path", "sub_cleanup_path"),
+            event("team_create_started", "bw_cleanup_path", "sub_cleanup_path"),
+            event("team_create_succeeded", "bw_cleanup_path", "sub_cleanup_path"),
+            event("task_create_started", "bw_cleanup_path", "sub_cleanup_path"),
+            event("task_create_succeeded", "bw_cleanup_path", "sub_cleanup_path"),
+            event("taskcreated_hook_accepted", "bw_cleanup_path", "sub_cleanup_path"),
+            event("message_dispatch_started", "bw_cleanup_path", "sub_cleanup_path"),
+            event("message_dispatch_succeeded", "bw_cleanup_path", "sub_cleanup_path"),
+            event("artifacts_ready", "bw_cleanup_path", "sub_cleanup_path"),
+            event("completion_contract_satisfied", "bw_cleanup_path", "sub_cleanup_path"),
+            event("team_delete_started", "bw_cleanup_path", "sub_cleanup_path"),
+            event("bridge_result_returned_with_cleanup_required", "bw_cleanup_path", "sub_cleanup_path"),
+        ],
+        runtime_runs_root=str(runs_root),
+        run_id="run_demo",
+    )
+    if cleanup_return_state.get("graph_node") != "bridge_window_partial_returned":
+        raise AssertionError(json.dumps(cleanup_return_state, ensure_ascii=False, indent=2))
     interrupted_state = graph.replay_events(
         control_root,
         [
@@ -3695,7 +4472,7 @@ def run_retry_policy_tests(control_root: Path, runs_root: Path) -> dict:
             "message": "No usable implementor report was returned after repeated API Error: Unable to connect to API (ECONNRESET)",
             "missing_teammates": ["implementor"],
         },
-        "cleanup_required": True,
+        "cleanup_required": False,
     }
     if not _bridge_result_reports_teammate_transport_loss({"bridge_result": partial_bridge_result}):
         raise AssertionError(json.dumps(partial_bridge_result, ensure_ascii=False, indent=2))
@@ -3748,6 +4525,32 @@ def run_retry_policy_tests(control_root: Path, runs_root: Path) -> dict:
     if partial_retry_payload.get("packet_hash") != packet_hash(partial_packet):
         raise AssertionError(json.dumps(partial_retry_payload, ensure_ascii=False, indent=2))
 
+    assert_denied(
+        control_root,
+        runs_root,
+        event(
+            "phase_advanced",
+            "bw_retry_policy_reset_after_partial_transport",
+            "sub_retry_policy_reset_after_partial_transport",
+            agent_type="main-leader",
+            agent_id="main",
+            payload={"target_phase": "l3_bridge"},
+        ),
+        "phase_exit_not_ready",
+    )
+    dispatch(
+        control_root,
+        runs_root,
+        event(
+            "route_rerouted",
+            "bw_retry_policy_reset_after_partial_transport",
+            "sub_retry_policy_reset_after_partial_transport",
+            agent_type="main-leader",
+            agent_id="main",
+            payload={"current_route": ["l3_bridge", "l4_execute"], "target_phase": "l4_execute"},
+        ),
+    )
+
     bw_failed_report_loss = "bw_failed_teammate_report_loss"
     ss_failed_report_loss = "sub_failed_teammate_report_loss"
     failed_loss_packet = packet(bw_failed_report_loss, ss_failed_report_loss)
@@ -3798,7 +4601,7 @@ def run_retry_policy_tests(control_root: Path, runs_root: Path) -> dict:
             "missing_teammate   _reports": ["implementor"],
             "transport_errors": [{"teammate": "implementor", "error": "API Error: Unable to connect to API (ECONNRESET)"}],
         },
-        "cleanup_required": True,
+        "cleanup_required": False,
     }
     if not _bridge_result_reports_teammate_transport_loss({"bridge_result": failed_loss_bridge_result}):
         raise AssertionError(json.dumps(failed_loss_bridge_result, ensure_ascii=False, indent=2))
@@ -3919,13 +4722,13 @@ def run_retry_policy_tests(control_root: Path, runs_root: Path) -> dict:
         persist=True,
     )
     exhausted_plan = rejected_twice.check_result.get("derived_facts", {}).get("auto_recovery", {})
-    if exhausted_plan.get("dispatch_event_kind") != "enter_anomaly" or exhausted_plan.get("retry_scope") != "completion_rejected":
+    if exhausted_plan.get("dispatch_event_kind") != "route_rerouted" or exhausted_plan.get("retry_scope") != "completion_rejected":
         raise AssertionError(json.dumps(rejected_twice.check_result, ensure_ascii=False, indent=2))
-    anomaly_events = [
+    reroute_events = [
         item for item in _read_jsonl(runs_root / "run_demo" / "event_log.jsonl")
-        if item.get("event_kind") == "enter_anomaly" and item.get("bridge_window_id") == bw_repair
+        if item.get("event_kind") == "route_rerouted" and item.get("bridge_window_id") == bw_repair
     ]
-    if not anomaly_events:
+    if not reroute_events or reroute_events[-1].get("payload", {}).get("target_phase") != "l4_implement":
         raise AssertionError(json.dumps(_read_jsonl(runs_root / "run_demo" / "event_log.jsonl")[-10:], ensure_ascii=False, indent=2))
     retry_ledger = json.loads((runs_root / "run_demo" / "run_ledger.json").read_text(encoding="utf-8")).get("retry_context", {})
     completion_attempts = [item for item in retry_ledger.get("attempts", []) if item.get("bridge_window_id") == bw_repair and item.get("retry_scope") == "completion_rejected"]
@@ -4011,6 +4814,7 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
                             {
                                 "summary": "nested bridge report",
                                 "instruction_coverage": {"item": "blocked"},
+                                "semantic_identity_resolution": {"disposition": "not_applicable", "basis": "smoke fixture"},
                             }
                         ],
                         "artifact_refs": [],
@@ -4059,6 +4863,26 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     )
     if completed_without_evidence.get("valid") or completed_without_evidence.get("error_type") != "MissingRequiredEvidenceRef":
         raise AssertionError(json.dumps(completed_without_evidence, ensure_ascii=False, indent=2))
+    action_phase_semantic_block_report = {
+        "teammate_name": "anomaly-analyst-c",
+        "agent_type": "anomaly-analyst-c",
+        "classification": "execution_defect",
+        "summary": "full_token_opsa and selected-token diagnostics show prompt provenance is incomplete.",
+        "next_action_recommendation": "Do not rerun unchanged. Route to l4_implement to repair evaluator provenance and then rerun one formal evaluation.",
+        "instruction_coverage": {"diagnose M6 result": "completed"},
+        "semantic_identity_resolution": {
+            "prompt_or_template_identity": {"disposition": "blocked", "value": "prompt provenance incomplete"}
+        },
+        "evidence_refs": ["event:semantic_block_action_phase"],
+    }
+    if _runtime_owned_report_blocked_teammates([action_phase_semantic_block_report]):
+        raise AssertionError(json.dumps(action_phase_semantic_block_report, ensure_ascii=False, indent=2))
+    approval_semantic_block_report = {
+        **action_phase_semantic_block_report,
+        "next_action_recommendation": "Ask user for approval because the source requires an access token before continuing.",
+    }
+    if _runtime_owned_report_blocked_teammates([approval_semantic_block_report]) != ["anomaly-analyst-c"]:
+        raise AssertionError(json.dumps(approval_semantic_block_report, ensure_ascii=False, indent=2))
     fallback_packet = packet("bw_runtime_owned_fallback", "sub_runtime_owned_fallback")
     fallback_packet["target_phase"] = "l3_bridge"
     fallback_packet["phase_route"] = ["l3_bridge"]
@@ -4107,6 +4931,50 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
         raise AssertionError(json.dumps(fallback_packet, ensure_ascii=False, indent=2))
     if _prefer_runtime_owned_teammate_fallback(fallback_packet, bare_print_mode=False):
         raise AssertionError(json.dumps(fallback_packet, ensure_ascii=False, indent=2))
+    l2_fallback_packet = deepcopy(fallback_packet)
+    l2_fallback_packet["target_phase"] = "l2_advisory"
+    l2_fallback_packet["phase_route"] = ["l4_anomaly", "l2_advisory"]
+    l2_fallback_packet["task_spec"]["target_phase"] = "l2_advisory"
+    l2_fallback_packet["team_spec"]["teammate_specs"] = [
+        {
+            "teammate_name": "chiefmate-a",
+            "role": "advisory",
+            "allowed_tools": ["Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch"],
+            "responsibilities": [],
+        },
+        {
+            "teammate_name": "chiefmate-b",
+            "role": "advisory",
+            "allowed_tools": ["Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch"],
+            "responsibilities": [],
+        },
+        {
+            "teammate_name": "chiefmate-c",
+            "role": "advisory",
+            "allowed_tools": ["Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch"],
+            "responsibilities": [],
+        },
+    ]
+    l2_fallback_packet["task_team_mapping"]["teammate_assignments"] = [
+        {"teammate_name": "chiefmate-a", "assignment": "Produce advisory report.", "expected_output": "report"},
+        {"teammate_name": "chiefmate-b", "assignment": "Produce independent advisory report.", "expected_output": "report"},
+        {"teammate_name": "chiefmate-c", "assignment": "Produce peer-challenge advisory report.", "expected_output": "report"},
+    ]
+    l2_fallback_packet["dispatch_contract"] = build_dispatch_contract(l2_fallback_packet)
+    if not _runtime_owned_teammate_fallback_allowed(l2_fallback_packet, original_dispatch_failure):
+        raise AssertionError(json.dumps(l2_fallback_packet, ensure_ascii=False, indent=2))
+    bridge_leader_bad_shape = {
+        "status": "failed",
+        "reports": [],
+        "artifact_refs": [],
+        "evidence": {"guardrail_validation": {"path": "$.reports[0].summary"}},
+        "error_or_null": {"type": "SchemaValidationFailed", "message": "reports[0].summary expected type string"},
+        "cleanup_required": False,
+    }
+    if not _runtime_owned_teammate_fallback_allowed(l2_fallback_packet, bridge_leader_bad_shape):
+        raise AssertionError(json.dumps(bridge_leader_bad_shape, ensure_ascii=False, indent=2))
+    if not _prefer_runtime_owned_teammate_fallback(l2_fallback_packet, bare_print_mode=True):
+        raise AssertionError(json.dumps(l2_fallback_packet, ensure_ascii=False, indent=2))
     l4_implement_fallback_packet = deepcopy(fallback_packet)
     l4_implement_fallback_packet["target_phase"] = "l4_implement"
     l4_implement_fallback_packet["phase_route"] = ["l3_bridge", "l4_implement"]
@@ -4196,6 +5064,28 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     l4_execute_fallback_packet["task_spec"]["target_phase"] = "l4_execute"
     if _runtime_owned_teammate_fallback_allowed(l4_execute_fallback_packet, cli_failure):
         raise AssertionError(json.dumps(l4_execute_fallback_packet, ensure_ascii=False, indent=2))
+    if not _runtime_owned_should_salvage_after_observed_activity(
+        l4_execute_fallback_packet,
+        "executor",
+        {"type": "RuntimeOwnedTeammateTimeout"},
+    ):
+        raise AssertionError("L4 execute executor no-report after observed activity should salvage instead of retrying through tmux")
+    if _runtime_owned_should_salvage_after_observed_activity(
+        l4_execute_fallback_packet,
+        "postrun",
+        {"type": "RuntimeOwnedTeammateTimeout"},
+    ):
+        raise AssertionError("L4 execute non-executor teammates should keep normal retry semantics")
+    l4_execute_wait_packet = deepcopy(l4_execute_fallback_packet)
+    l4_execute_wait_packet["completion_contract"]["timeout_policy"] = {
+        "wait_until_process_complete": True,
+        "executor_hard_timeout_disabled": True,
+    }
+    if _runtime_owned_teammate_timeout_seconds(l4_execute_wait_packet, ["executor", "postrun"], teammate_name="executor") is not None:
+        raise AssertionError("runtime-owned L4 executor must not impose a 900s teammate timeout when hard timeout is disabled")
+    postrun_timeout = _runtime_owned_teammate_timeout_seconds(l4_execute_wait_packet, ["executor", "postrun"], teammate_name="postrun")
+    if not isinstance(postrun_timeout, int) or postrun_timeout > 900:
+        raise AssertionError(postrun_timeout)
     runtime_owned_tools = _runtime_owned_teammate_allowed_tools(fallback_packet, "preflight-initial")
     if any(tool not in runtime_owned_tools for tool in ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "MultiEdit", "NotebookEdit", "Write"]):
         raise AssertionError(json.dumps(runtime_owned_tools, ensure_ascii=False, indent=2))
@@ -4255,9 +5145,9 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     idle_no_report_capture = "\n──── refresher ──\n❯\n? for shortcuts\n"
     if not _tmux_runtime_teammate_idle_without_report(idle_no_report_capture, "return json"):
         raise AssertionError(json.dumps({"idle_no_report_capture": idle_no_report_capture}, ensure_ascii=False, indent=2))
-    idle_no_report_escape_footer = "\n* Ruminating... (7s)\n──── preflight-initial ──\n❯\nesc to interrupt\n"
-    if not _tmux_runtime_teammate_idle_without_report(idle_no_report_escape_footer, "return json"):
-        raise AssertionError(json.dumps({"idle_no_report_escape_footer": idle_no_report_escape_footer}, ensure_ascii=False, indent=2))
+    active_escape_footer_capture = "\n* Ruminating... (7s)\n──── preflight-initial ──\n❯\nesc to interrupt\n"
+    if _tmux_runtime_teammate_idle_without_report(active_escape_footer_capture, "return json"):
+        raise AssertionError(json.dumps({"active_escape_footer_capture": active_escape_footer_capture}, ensure_ascii=False, indent=2))
     active_teammate_capture = "\n* Razzmatazzing… (5s · ↓ 8.8k tokens)\n"
     if _tmux_runtime_teammate_idle_without_report(active_teammate_capture, "return json"):
         raise AssertionError(json.dumps({"active_teammate_capture": active_teammate_capture}, ensure_ascii=False, indent=2))
@@ -4289,6 +5179,12 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     fallback_validation = validate_bridge_result(fallback_result, completion_contract=fallback_packet["completion_contract"])
     if not fallback_validation.get("valid"):
         raise AssertionError(json.dumps(fallback_validation, ensure_ascii=False, indent=2))
+    mixed_report_failure_status = _runtime_owned_fallback_status_from_reports_and_failures(
+        [fallback_report],
+        [{"teammate": "chiefmate-b", "error_or_null": {"type": "ProviderTransportApiError"}}],
+    )
+    if mixed_report_failure_status != "partial_or_failed":
+        raise AssertionError(json.dumps({"mixed_report_failure_status": mixed_report_failure_status}, ensure_ascii=False, indent=2))
     completion_invalid = validate_completion_report({"completion_checks": {"required_outputs_present": True}, "artifact_refs": []})
     if completion_invalid.get("valid"):
         raise AssertionError(json.dumps(completion_invalid, ensure_ascii=False, indent=2))
@@ -4322,6 +5218,101 @@ def run_guardrail_tests(control_root: Path, runs_root: Path) -> dict:
     )
     if not no_required_artifacts_with_empty_refs.get("valid"):
         raise AssertionError(json.dumps(no_required_artifacts_with_empty_refs, ensure_ascii=False, indent=2))
+    anomaly_packet = packet("bw_anomaly_semantic_requirement", "sub_anomaly_semantic_requirement")
+    anomaly_packet["target_phase"] = "l4_anomaly"
+    anomaly_packet["phase_route"] = ["l4_execute", "l4_anomaly"]
+    anomaly_packet["completion_contract"] = {
+        "required_outputs": ["report"],
+        "required_artifacts": [],
+        "validation_requirements": [
+            "anomaly task describes a surprising, contradictory, suspicious, or underexplained result/failure requiring causal diagnosis",
+            "simple mechanical gaps such as missing files, absent manifests, missing data, dry-run-only handoffs, incomplete implementation validation, missing commands, or stale pointers are routed to l4_implement or l3_bridge instead of anomaly",
+        ],
+    }
+    anomaly_packet["task_spec"]["completion_contract"] = anomaly_packet["completion_contract"]
+    anomaly_packet["task_spec"]["instruction_coverage_checklist"] = ["diagnose anomaly"]
+    anomaly_report = report("anomaly analysis complete", item="diagnose anomaly")
+    anomaly_validation = validate_bridge_completion(
+        anomaly_packet,
+        {"status": "succeeded", "reports": [anomaly_report], "artifact_refs": [], "evidence": {"event_ids": ["evt_anomaly_semantic_requirement"]}, "error_or_null": None, "cleanup_required": False},
+    )
+    if not completion_succeeded(anomaly_validation):
+        raise AssertionError(json.dumps(anomaly_validation, ensure_ascii=False, indent=2))
+    if any(item.get("name") == "manifest_validation" and item.get("status") in {"fail", "block"} for item in anomaly_validation.get("checks", [])):
+        raise AssertionError(json.dumps(anomaly_validation, ensure_ascii=False, indent=2))
+    explicit_manifest_packet = deepcopy(anomaly_packet)
+    explicit_manifest_packet["completion_contract"]["validation_requirements"] = ["log manifests include required identity command cwd batchbasis gpu memory and semantic fields"]
+    explicit_manifest_packet["task_spec"]["completion_contract"] = explicit_manifest_packet["completion_contract"]
+    explicit_manifest_validation = validate_bridge_completion(
+        explicit_manifest_packet,
+        {"status": "succeeded", "reports": [anomaly_report], "artifact_refs": [], "evidence": {"event_ids": ["evt_anomaly_semantic_requirement"]}, "error_or_null": None, "cleanup_required": False},
+    )
+    if completion_succeeded(explicit_manifest_validation):
+        raise AssertionError(json.dumps(explicit_manifest_validation, ensure_ascii=False, indent=2))
+    if "log manifests include required identity command cwd batchbasis gpu memory and semantic fields" not in explicit_manifest_validation.get("failed_validations", []):
+        raise AssertionError(json.dumps(explicit_manifest_validation, ensure_ascii=False, indent=2))
+    observed_project = root / "observed_anomaly_reports"
+    observed_input = {
+        "run_id": "run_demo",
+        "main_session_id": "main_demo",
+        "sub_session_id": "sub_observed_anomaly",
+        "bridge_window_id": "bw_observed_anomaly",
+        "team_id": "team_observed_anomaly",
+        "task_id": "task_observed_anomaly",
+    }
+    observed_packet = deepcopy(anomaly_packet)
+    observed_packet["binding"].update(
+        {
+            "sub_session_id": observed_input["sub_session_id"],
+            "bridge_window_id": observed_input["bridge_window_id"],
+            "team_id_or_null": observed_input["team_id"],
+            "task_id_or_null": observed_input["task_id"],
+        }
+    )
+    observed_packet["team_spec"]["team_id_or_null"] = observed_input["team_id"]
+    observed_packet["team_spec"]["teammate_specs"] = [
+        {"teammate_name": "anomaly-analyst-a", "role": "anomaly_analysis", "allowed_tools": ["Read"], "responsibilities": []},
+        {"teammate_name": "anomaly-analyst-b", "role": "anomaly_analysis", "allowed_tools": ["Read"], "responsibilities": []},
+        {"teammate_name": "anomaly-analyst-c", "role": "anomaly_analysis", "allowed_tools": ["Read"], "responsibilities": []},
+    ]
+    observed_packet["task_team_mapping"] = {
+        "task_id_or_null": observed_input["task_id"],
+        "team_id_or_null": observed_input["team_id"],
+        "teammate_assignments": [
+            {"teammate_name": "anomaly-analyst-a", "assignment": "diagnose", "expected_output": "report"},
+            {"teammate_name": "anomaly-analyst-b", "assignment": "diagnose", "expected_output": "report"},
+            {"teammate_name": "anomaly-analyst-c", "assignment": "diagnose", "expected_output": "report"},
+        ],
+    }
+    observed_run_root = _runtime_run_root(observed_project, observed_input)
+    observed_run_root.mkdir(parents=True, exist_ok=True)
+    with (observed_run_root / "teammate_reports.jsonl").open("w", encoding="utf-8") as handle:
+        for teammate in ["anomaly-analyst-a", "anomaly-analyst-b", "anomaly-analyst-c"]:
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": _now(),
+                        "run_id": observed_input["run_id"],
+                        "bridge_window_id": observed_input["bridge_window_id"],
+                        "team_id": observed_input["team_id"],
+                        "task_id": observed_input["task_id"],
+                        "teammate_id": teammate,
+                        "report": report(f"{teammate} report", item="diagnose anomaly"),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    observed_result = _bridge_result_from_observed_teammate_reports(
+        packet=observed_packet,
+        execution_input=observed_input,
+        project_root=observed_project,
+        prompt_path=observed_project / "prompt.md",
+        original_error={"type": "ClaudeTmuxTerminalApiError", "message": "terminal transport failed after reports"},
+        transport="smoke",
+    )
+    if not observed_result or observed_result.get("status") != "succeeded" or len(observed_result.get("reports", [])) != 3:
+        raise AssertionError(json.dumps(observed_result, ensure_ascii=False, indent=2))
     bad_manifest = validate_log_manifest({"run_id": "run_demo", "bridge_window_id": "bw", "task_id": "task", "terminal_status": "completed"})
     if bad_manifest.get("valid") or bad_manifest.get("error_type") != "SchemaValidationFailed":
         raise AssertionError(json.dumps(bad_manifest, ensure_ascii=False, indent=2))
@@ -4759,6 +5750,132 @@ def run_multi_repo_isolation_tests(root: Path, control_root: Path) -> dict:
     auto_events = _read_jsonl(runs_a / context_run / "event_log.jsonl")
     if not any(item.get("event_kind") == "call_bridge_sdk_started" for item in auto_events):
         raise AssertionError(json.dumps(auto_events[-20:], ensure_ascii=False, indent=2))
+    active_guard_run = "run_active_bridge_guard"
+    second_packet = packet("bw_second_bridge_guard", "sub_second_bridge_guard")
+    second_packet["binding"]["repo_key"] = key_a
+    second_packet["binding"]["run_id"] = active_guard_run
+    second_packet["binding"]["main_session_id"] = "main_active_bridge_guard"
+    second_packet["binding"]["sub_session_id"] = "sub_second_bridge_guard"
+    second_packet["binding"]["bridge_window_id"] = "bw_second_bridge_guard"
+    second_packet["phase_route"] = ["leader_freeze", "l4_execute"]
+    second_packet["dispatch_contract"] = build_dispatch_contract(second_packet)
+    dispatch_workflow_event(
+        str(control_root),
+        {
+            "run_id": active_guard_run,
+            "repo_key": key_a,
+            "main_session_id": "main_active_bridge_guard",
+            "agent_id": "hook.session_start",
+            "agent_type": "hook",
+            "event_kind": "session_started",
+            "timestamp": _now(),
+            "payload": {"repo_root": str(repo_a)},
+        },
+        repo_key=key_a,
+        persist=True,
+    )
+    active_guard_event_log = runs_a / active_guard_run / "event_log.jsonl"
+    with active_guard_event_log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": _now(),
+                    "event_kind": "bridge_window_opened",
+                    "run_id": active_guard_run,
+                    "main_session_id": "main_active_bridge_guard",
+                    "sub_session_id": "sub_active_bridge_guard",
+                    "bridge_window_id": "bw_active_bridge_guard",
+                    "agent_id": "bridge-leader",
+                    "agent_type": "bridge-leader",
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    blocked_calls = []
+    real_call_bridge_sdk = bridge_server.call_bridge_sdk
+    try:
+        bridge_server.call_bridge_sdk = lambda *args, **kwargs: blocked_calls.append({"args": args, "kwargs": kwargs}) or {
+            "status": "succeeded",
+            "reports": [],
+            "artifact_refs": [],
+            "evidence": {"unexpected_call": True},
+            "error_or_null": None,
+            "cleanup_required": False,
+        }
+        blocked_result = bridge_server._call_bridge_sdk_for_arguments(
+            {"repo_key": key_a, "run_id": active_guard_run, "packet": second_packet, "persist": True},
+            runs_a,
+            {"repo_key": key_a, "run_id": active_guard_run, "packet": second_packet, "persist": True},
+        )
+    finally:
+        bridge_server.call_bridge_sdk = real_call_bridge_sdk
+    if (
+        blocked_result.get("error_or_null", {}).get("type") != "RunActiveBridgeWindowExists"
+        or blocked_calls
+        or "bw_active_bridge_guard" not in blocked_result.get("evidence", {}).get("run_level_active_bridge_window_ids", [])
+    ):
+        raise AssertionError(json.dumps({"blocked_result": blocked_result, "blocked_calls": blocked_calls}, ensure_ascii=False, indent=2, default=str))
+    with active_guard_event_log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": _now(),
+                    "event_kind": "orphan_timeout_without_bridge_return",
+                    "run_id": active_guard_run,
+                    "main_session_id": "main_active_bridge_guard",
+                    "sub_session_id": "sub_active_bridge_guard",
+                    "bridge_window_id": "bw_active_bridge_guard",
+                    "agent_id": "mcp.mark_bridge_orphaned",
+                    "agent_type": "runtime",
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "1970-01-01T00:00:00+00:00",
+                    "event_kind": "bridge_call_intended",
+                    "run_id": active_guard_run,
+                    "main_session_id": "main_active_bridge_guard",
+                    "sub_session_id": "sub_stale_bridge_guard",
+                    "bridge_window_id": "bw_stale_bridge_guard",
+                    "agent_id": "main",
+                    "agent_type": "main-leader",
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    active_after_terminal = bridge_server._active_bridge_windows(runs_a, active_guard_run, exclude_bridge_window_id="bw_unused")
+    if "bw_active_bridge_guard" in active_after_terminal or "bw_stale_bridge_guard" in active_after_terminal:
+        raise AssertionError(json.dumps({"active_after_terminal": active_after_terminal}, ensure_ascii=False, indent=2))
+    allowed_calls = []
+    def allowed_call_bridge_sdk(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        allowed_calls.append({"args": args, "kwargs": kwargs})
+        return {
+            "status": "succeeded",
+            "reports": [],
+            "artifact_refs": [],
+            "evidence": {"allowed_after_terminal_event": True},
+            "error_or_null": None,
+            "cleanup_required": False,
+        }
+
+    try:
+        bridge_server.call_bridge_sdk = allowed_call_bridge_sdk
+        allowed_result = bridge_server._call_bridge_sdk_for_arguments(
+            {"repo_key": key_a, "run_id": active_guard_run, "packet": second_packet, "persist": False},
+            runs_a,
+            {"repo_key": key_a, "run_id": active_guard_run, "packet": second_packet, "persist": False},
+        )
+    finally:
+        bridge_server.call_bridge_sdk = real_call_bridge_sdk
+    allowed_error = allowed_result.get("error_or_null") if isinstance(allowed_result, dict) else {}
+    if not allowed_calls or allowed_result is None or (allowed_error or {}).get("type") == "RunActiveBridgeWindowExists":
+        raise AssertionError(json.dumps({"allowed_result": allowed_result, "allowed_calls": allowed_calls}, ensure_ascii=False, indent=2, default=str))
     registered = {repo.repo_key for repo in list_registered_repos(control_root)}
     if key_a not in registered or key_b not in registered:
         raise AssertionError(json.dumps(sorted(registered), ensure_ascii=False, indent=2))
@@ -4820,8 +5937,8 @@ def run_event_artifact_completion_tests(control_root: Path, runs_root: Path) -> 
     context = {
         "run_id": "run_demo",
         "bridge_window_id": "bw_event_artifact",
-        "team_id": "team_event_artifact",
-        "task_id": "task_event_artifact",
+        "team_id": p["binding"]["team_id_or_null"],
+        "task_id": p["binding"]["task_id_or_null"],
         "agent_id": "bridge-leader",
         "event_id": "evt_event_artifact",
         "timestamp": _now(),
@@ -4832,8 +5949,8 @@ def run_event_artifact_completion_tests(control_root: Path, runs_root: Path) -> 
             "run_id": "run_demo",
             "sub_session_id": "sub_event_artifact",
             "bridge_window_id": "bw_event_artifact",
-            "team_id": "team_event_artifact",
-            "task_id": "task_event_artifact",
+            "team_id": p["binding"]["team_id_or_null"],
+            "task_id": p["binding"]["task_id_or_null"],
             "event_kind": "runtime_transition",
             "payload": {"secret_token": "sk-should-not-leak-1234567890"},
         },
@@ -4861,17 +5978,28 @@ def run_event_artifact_completion_tests(control_root: Path, runs_root: Path) -> 
         {
             "run_id": "run_demo",
             "bridge_window_id": "bw_event_artifact",
-            "task_id": "task_event_artifact",
+            "task_id": p["binding"]["task_id_or_null"],
             "command": "conda run -n formal_env python train.py",
             "cwd": ".",
             "environment_evidence": {"conda_env": "formal_env"},
             "process_refs": [{"pid": 123, "status": "completed"}],
             "batchbasis": "smoke selected batch 4",
             "gpu_id": "0",
+            "gpu_id_or_device_ids": "0",
+            "selected_gpu_total_free_memory": "selected GPU 0 total/free memory recorded by nvidia-smi",
             "memory": "warmup memory observed 72GB",
+            "smoke_memory_observed": "64GB",
+            "warmup_memory_observed": "68GB",
+            "formal_memory_observed": "72GB",
+            "resource_utilization_sanity_check": "observed-vs-available VRAM disposition: utilization acceptable; no further semantics-preserving resource adaptation needed",
+            "adjustment_reason": "best-available batchbasis after smoke-derived resource adaptation evidence",
             "model": "demo model",
+            "model_or_model_family": "demo model",
             "dataset": "demo dataset",
+            "dataset_name_split_source": "demo dataset",
             "method": "demo method",
+            "method_or_objective": "demo method",
+            "terminal_status": "succeeded",
         },
     )
     refs = normalize_artifact_refs(
@@ -4885,6 +6013,16 @@ def run_event_artifact_completion_tests(control_root: Path, runs_root: Path) -> 
     valid_refs = validate_artifact_refs(refs, required_artifacts=["artifact", "log_manifest"], context=context, base_dir=runs_root)
     if not valid_refs.get("valid"):
         raise AssertionError(json.dumps(valid_refs, ensure_ascii=False, indent=2))
+    formal_named_manifest = manifest_path.with_name("l4_execute_formal_log_manifest_run_demo.json")
+    formal_named_manifest.write_text(manifest_path.read_text(encoding="utf-8"), encoding="utf-8")
+    formal_named_validation = validate_artifact_refs(
+        [{"ref_type": "path", "path": str(formal_named_manifest)}],
+        required_artifacts=["log_manifest"],
+        context=context,
+        base_dir=runs_root,
+    )
+    if not formal_named_validation.get("valid"):
+        raise AssertionError(json.dumps(formal_named_validation, ensure_ascii=False, indent=2))
     generic_missing = validate_artifact_refs([refs[1]], required_artifacts=["artifact"], context=context, base_dir=runs_root)
     if generic_missing.get("valid"):
         raise AssertionError(json.dumps(generic_missing, ensure_ascii=False, indent=2))
@@ -4893,6 +6031,23 @@ def run_event_artifact_completion_tests(control_root: Path, runs_root: Path) -> 
     stale_validation = validate_artifact_refs([stale], required_artifacts=["log_manifest"], context=context, base_dir=runs_root)
     if stale_validation.get("valid") or not any(item.get("status") == "block" for item in stale_validation.get("checks", [])):
         raise AssertionError(json.dumps(stale_validation, ensure_ascii=False, indent=2))
+    supporting_stale = dict(stale)
+    supporting_stale_validation = validate_artifact_refs([refs[1], supporting_stale], required_artifacts=["log_manifest"], context=context, base_dir=runs_root)
+    if not supporting_stale_validation.get("valid") or not any(
+        item.get("name") == "artifact_binding" and item.get("status") == "warn"
+        for item in supporting_stale_validation.get("checks", [])
+    ):
+        raise AssertionError(json.dumps(supporting_stale_validation, ensure_ascii=False, indent=2))
+    object_artifact_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    object_artifact_manifest["produced_artifacts"] = {"log_manifest": str(manifest_path)}
+    object_artifact_manifest["microbatch_size"] = 1
+    object_artifact_validation = validate_log_manifest(
+        object_artifact_manifest,
+        control_root=control_root,
+        required_fields=["run_id", "bridge_window_id", "task_id", "command", "cwd", "terminal_status", "produced_artifacts"],
+    )
+    if not object_artifact_validation.get("valid"):
+        raise AssertionError(json.dumps(object_artifact_validation, ensure_ascii=False, indent=2))
 
     success_execution = {
         "status": "succeeded",
@@ -4905,6 +6060,72 @@ def run_event_artifact_completion_tests(control_root: Path, runs_root: Path) -> 
     success_validation = validate_bridge_completion(p, success_execution, context=context, control_root=control_root, base_dir=runs_root)
     if not completion_succeeded(success_validation):
         raise AssertionError(json.dumps(success_validation, ensure_ascii=False, indent=2))
+
+    resource_packet = deepcopy(p)
+    resource_requirement = "before L4 execute treats team idle or teammate completion as finish-ready, current GPU resource-utilization evidence is checked against actual selected-device availability, batch or microbatch basis, and semantics-preserving adaptation options when GPU execution is involved"
+    resource_packet["completion_contract"].setdefault("validation_requirements", []).append(resource_requirement)
+    resource_packet["task_spec"]["completion_contract"] = resource_packet["completion_contract"]
+    resource_success_validation = validate_bridge_completion(resource_packet, success_execution, context=context, control_root=control_root, base_dir=runs_root)
+    if not completion_succeeded(resource_success_validation):
+        raise AssertionError(json.dumps(resource_success_validation, ensure_ascii=False, indent=2))
+
+    adjustment_disposition_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    adjustment_disposition_manifest.pop("resource_utilization_sanity_check", None)
+    adjustment_disposition_manifest["adjustment_reason"] = "Selected GPU0 from current free-memory evidence; no semantic downshift used"
+    adjustment_disposition_path = manifest_path.with_name("adjustment_disposition_log_manifest.json")
+    _write_json(adjustment_disposition_path, adjustment_disposition_manifest)
+    adjustment_disposition_execution = {
+        **success_execution,
+        "artifact_refs": [
+            refs[0],
+            {"ref_type": "log_manifest", "path": str(adjustment_disposition_path), "producer": {"agent_id": "bridge-leader", "event_id": "evt_adjustment_disposition"}},
+        ],
+    }
+    adjustment_disposition_validation = validate_bridge_completion(resource_packet, adjustment_disposition_execution, context=context, control_root=control_root, base_dir=runs_root)
+    if not completion_succeeded(adjustment_disposition_validation):
+        raise AssertionError(json.dumps(adjustment_disposition_validation, ensure_ascii=False, indent=2))
+
+    missing_resource_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    missing_resource_manifest.pop("resource_utilization_sanity_check", None)
+    missing_resource_manifest.pop("adjustment_reason", None)
+    missing_resource_path = manifest_path.with_name("missing_resource_disposition_log_manifest.json")
+    _write_json(missing_resource_path, missing_resource_manifest)
+    missing_resource_execution = {
+        **success_execution,
+        "reports": [{"summary": "formal execution completed", "instruction_coverage": {"smoke checklist": "completed"}}],
+        "evidence": {},
+        "artifact_refs": [
+            refs[0],
+            {"ref_type": "log_manifest", "path": str(missing_resource_path), "producer": {"agent_id": "bridge-leader", "event_id": "evt_missing_resource"}},
+        ],
+    }
+    missing_resource_validation = validate_bridge_completion(resource_packet, missing_resource_execution, context=context, control_root=control_root, base_dir=runs_root)
+    if completion_succeeded(missing_resource_validation) or not any(
+        item.get("name") == "execute_resource_utilization" and item.get("status") == "block"
+        for item in missing_resource_validation.get("checks", [])
+        if isinstance(item, dict)
+    ):
+        raise AssertionError(json.dumps(missing_resource_validation, ensure_ascii=False, indent=2))
+
+    stale_manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stale_manifest_payload["bridge_window_id"] = "bw_previous_formal_run"
+    stale_manifest_payload["task_id"] = "task_previous_formal_run"
+    stale_manifest_path = manifest_path.with_name("stale_formal_log_manifest.json")
+    _write_json(stale_manifest_path, stale_manifest_payload)
+    stale_execution = {
+        **success_execution,
+        "artifact_refs": [
+            refs[0],
+            {"ref_type": "log_manifest", "path": str(stale_manifest_path), "producer": {"agent_id": "bridge-leader", "event_id": "evt_stale_manifest"}},
+        ],
+    }
+    stale_manifest_completion = validate_bridge_completion(p, stale_execution, context=context, control_root=control_root, base_dir=runs_root)
+    if completion_succeeded(stale_manifest_completion) or not any(
+        "bridge_window_id_matches_packet" in str(item.get("message") or "")
+        for item in stale_manifest_completion.get("checks", [])
+        if isinstance(item, dict)
+    ):
+        raise AssertionError(json.dumps(stale_manifest_completion, ensure_ascii=False, indent=2))
 
     wrapped_coverage = {
         key.replace(" ", "   ", 1): value
@@ -4922,6 +6143,30 @@ def run_event_artifact_completion_tests(control_root: Path, runs_root: Path) -> 
     wrapped_validation = validate_bridge_completion(p, wrapped_execution, context=context, control_root=control_root, base_dir=runs_root)
     if not completion_succeeded(wrapped_validation):
         raise AssertionError(json.dumps(wrapped_validation, ensure_ascii=False, indent=2))
+
+    indirect_coverage_packet = deepcopy(p)
+    indirect_coverage_packet["task_spec"]["instruction_coverage_checklist"] = [
+        "Run the formal M6 instruct evaluation using the formal command/inputs from the latest readiness manifest and l4_implement handoff.",
+        "Execute owns resource adaptation such as batch size/device map/precision if needed while preserving approved semantics.",
+    ]
+    indirect_coverage_report = {
+        **report_for_packet(indirect_coverage_packet, summary="formal M6 instruct execution completed with resource adaptation preserved"),
+        "instruction_coverage": {
+            "Formal M6 instruct evaluation completed or precise blocked status reported with evidence.": "completed",
+            "Current run/window/task-bound formal log manifest includes command, cwd, model identity, dataset/method basis, resource/batch/precision basis, output paths, terminal status, failure reason if any, and artifact refs.": "completed",
+            "latest_l4_implement_and_rungater_context_followed": "completed",
+            "formal_command_inputs_used": "completed",
+            "Execute may adapt device map, precision, batch/microbatch/resource settings only if semantics are preserved and manifest records the adaptation reason/evidence.": "completed",
+            "Proceed to l4_execute for the formal M6 instruct evaluation.": "completed",
+        },
+    }
+    indirect_coverage_execution = {
+        **success_execution,
+        "reports": [indirect_coverage_report],
+    }
+    indirect_coverage_validation = validate_bridge_completion(indirect_coverage_packet, indirect_coverage_execution, context=context, control_root=control_root, base_dir=runs_root)
+    if not completion_succeeded(indirect_coverage_validation):
+        raise AssertionError(json.dumps(indirect_coverage_validation, ensure_ascii=False, indent=2))
 
     tui_wrapped_path = runs_root / "AGENTS.md"
     tui_wrapped_path.write_text("artifact path smoke\n", encoding="utf-8")
@@ -5086,6 +6331,50 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         raise AssertionError(tmux_launch)
     if "--tools" in tmux_launch:
         raise AssertionError(tmux_launch)
+    new_native_session_id = str(uuid.uuid4())
+    tmux_new_session_launch = TmuxReplOuterLeaderAdapter(config)._launch_command(
+        control_root,
+        repo_root,
+        {
+            "cli_path": "claude",
+            "env": {"HOME": str(runtime_dir / "home")},
+            "mcp_config": str(control_root / "mcp.json"),
+            "strict_mcp_config": True,
+        },
+        {
+            "repo_key": "repo_smoke",
+            "run_id": "run_tmux_new_native_session",
+            "main_session_id": new_native_session_id,
+            "outer_claude_session_id": new_native_session_id,
+            "outer_claude_session_mode": "session_id",
+            "outer_claude_session_source": "generated_claude_session_id",
+            "input_id": "input_tmux_new_native_session",
+        },
+    )
+    if f"--session-id {new_native_session_id}" not in tmux_new_session_launch or "--resume" in tmux_new_session_launch or "--continue" in tmux_new_session_launch:
+        raise AssertionError(tmux_new_session_launch)
+    resumed_native_session_id = str(uuid.uuid4())
+    tmux_resume_launch = TmuxReplOuterLeaderAdapter(config)._launch_command(
+        control_root,
+        repo_root,
+        {
+            "cli_path": "claude",
+            "env": {"HOME": str(runtime_dir / "home")},
+            "mcp_config": str(control_root / "mcp.json"),
+            "strict_mcp_config": True,
+        },
+        {
+            "repo_key": "repo_smoke",
+            "run_id": "run_tmux_resume_native_session",
+            "main_session_id": "outer-main",
+            "outer_claude_session_id": resumed_native_session_id,
+            "outer_claude_session_mode": "resume",
+            "outer_claude_session_source": "session_bindings",
+            "input_id": "input_tmux_resume_native_session",
+        },
+    )
+    if f"--resume {resumed_native_session_id}" not in tmux_resume_launch or "--session-id" in tmux_resume_launch or "--continue" in tmux_resume_launch:
+        raise AssertionError(tmux_resume_launch)
     cli_env_names = [
         "OUTER_LEADER_CLAUDE_CLI",
         "BRIDGE_CLAUDE_CLI",
@@ -5210,8 +6499,20 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         raise AssertionError(json.dumps(response, ensure_ascii=False, indent=2))
     repo_key = response["host"]["repo_key"]
     run_id = response["host"]["run_id"]
+    try:
+        uuid.UUID(str(response["host"].get("main_session_id") or ""))
+    except ValueError as exc:
+        raise AssertionError(json.dumps(response["host"], ensure_ascii=False, indent=2)) from exc
+    if (
+        response["host"].get("main_session_id") == "outer_smoke_main"
+        or response["host"].get("outer_claude_session_id") != response["host"].get("main_session_id")
+        or response["host"].get("outer_claude_session_mode") != "session_id"
+    ):
+        raise AssertionError(json.dumps(response["host"], ensure_ascii=False, indent=2))
     host_status = host.status(repo_key=repo_key)
     if response["host"].get("default_run_id") != run_id or host_status.get("default_run_id") != run_id:
+        raise AssertionError(json.dumps({"response": response["host"], "status": host_status}, ensure_ascii=False, indent=2))
+    if host_status.get("outer_claude_session_id") != response["host"].get("main_session_id"):
         raise AssertionError(json.dumps({"response": response["host"], "status": host_status}, ensure_ascii=False, indent=2))
     second_default = host.handle_user_input({"text": "second message should stay on host default run"})
     if second_default.get("host", {}).get("run_id") != run_id:
@@ -5220,6 +6521,13 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     restarted_status = restarted_host.status(repo_key=repo_key)
     if restarted_status.get("default_run_id") != run_id:
         raise AssertionError(json.dumps({"expected": run_id, "restarted": restarted_status}, ensure_ascii=False, indent=2))
+    selected_existing_response = restarted_host.handle_user_input({"text": "continue selected existing native run", "run_id": run_id})
+    if (
+        selected_existing_response.get("host", {}).get("main_session_id") != response["host"].get("main_session_id")
+        or selected_existing_response.get("host", {}).get("outer_claude_session_id") != response["host"].get("main_session_id")
+        or selected_existing_response.get("host", {}).get("outer_claude_session_mode") != "resume"
+    ):
+        raise AssertionError(json.dumps({"first": response.get("host"), "selected": selected_existing_response.get("host")}, ensure_ascii=False, indent=2))
     run_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / run_id
     event_log = _read_jsonl(run_root / "event_log.jsonl")
     if not any(item.get("event_kind") == "user_prompt_submitted" for item in event_log):
@@ -5242,6 +6550,69 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     selected_run_response = restarted_host.handle_user_input({"text": "continue a selected run", "run_id": "run_outer_selected"})
     if selected_run_response.get("host", {}).get("default_run_id") != "run_outer_selected":
         raise AssertionError(json.dumps(selected_run_response.get("host", {}), ensure_ascii=False, indent=2))
+    legacy_run_id = "run_outer_legacy_resume"
+    legacy_native_session_id = str(uuid.uuid4())
+    legacy_run_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / legacy_run_id
+    legacy_run_root.mkdir(parents=True, exist_ok=True)
+    _write_json(legacy_run_root / "run_ledger.json", {"run_id": legacy_run_id, "main_session_id": "outer-main"})
+    with (legacy_run_root / "session_bindings.jsonl").open("w", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "run_id": legacy_run_id,
+                    "main_session_id": "outer-main",
+                    "session_id": legacy_native_session_id,
+                    "session_kind": "main_leader",
+                    "agent_type": "main-leader",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    legacy_response = restarted_host.handle_user_input({"text": "continue legacy selected run by native Claude session", "run_id": legacy_run_id})
+    if (
+        legacy_response.get("host", {}).get("main_session_id") != "outer-main"
+        or legacy_response.get("host", {}).get("outer_claude_session_id") != legacy_native_session_id
+        or legacy_response.get("host", {}).get("outer_claude_session_mode") != "resume"
+    ):
+        raise AssertionError(json.dumps(legacy_response.get("host", {}), ensure_ascii=False, indent=2))
+    later_teammate_session_id = str(uuid.uuid4())
+    with (legacy_run_root / "session_bindings.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "run_id": legacy_run_id,
+                    "main_session_id": "outer-main",
+                    "session_id": later_teammate_session_id,
+                    "agent_type": "implementor",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    teammate_shadow_response = restarted_host.handle_user_input({"text": "continue after teammate binding", "run_id": legacy_run_id})
+    if teammate_shadow_response.get("host", {}).get("outer_claude_session_id") != legacy_native_session_id:
+        raise AssertionError(json.dumps(teammate_shadow_response.get("host", {}), ensure_ascii=False, indent=2))
+    generated_outer_run_id = "run_outer_generated_native_session"
+    generated_outer_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / generated_outer_run_id
+    generated_outer_root.mkdir(parents=True, exist_ok=True)
+    _write_json(generated_outer_root / "run_ledger.json", {"run_id": generated_outer_run_id, "main_session_id": "outer-main"})
+    generated_outer_response = restarted_host.handle_user_input({"text": "continue run without stored native leader session", "run_id": generated_outer_run_id})
+    generated_outer_id = generated_outer_response.get("host", {}).get("outer_claude_session_id")
+    if (
+        not generated_outer_id
+        or generated_outer_response.get("host", {}).get("outer_claude_session_mode") != "session_id"
+        or generated_outer_response.get("host", {}).get("outer_claude_session_source") != "generated_outer_claude_session_id"
+    ):
+        raise AssertionError(json.dumps(generated_outer_response.get("host", {}), ensure_ascii=False, indent=2))
+    generated_outer_resume = restarted_host.handle_user_input({"text": "continue generated native session again", "run_id": generated_outer_run_id})
+    if (
+        generated_outer_resume.get("host", {}).get("outer_claude_session_id") != generated_outer_id
+        or generated_outer_resume.get("host", {}).get("outer_claude_session_mode") != "resume"
+    ):
+        raise AssertionError(json.dumps(generated_outer_resume.get("host", {}), ensure_ascii=False, indent=2))
     camel_task_response = host.handle_user_input(
         {
             "text": "camel task spec should be preserved",
@@ -5261,7 +6632,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         name = "success-no-bridge-smoke"
 
         def handle_user_input(self, request, *, event_sink=None):
-            summary = "outer leader returned without a bridge call"
+            summary = "Attached to run run_outer_auto_bridge; current runtime phase is l4_execute (bridge_call_intended for window bw_smoke)."
             if str(request.get("dispatch_intent") or "") == "leader_decide":
                 summary = "NO_BRIDGE_DECISION: smoke adapter intentionally did not open a bridge"
             return {
@@ -5294,7 +6665,6 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
             "run_id": "run_outer_auto_bridge",
             "dispatch_intent": "advance_or_continue",
             "target_phase": "l3_bridge",
-            "auto_bridge": True,
         }
     )
     auto_bridge_result = auto_bridge_response.get("leader_result", {})
@@ -5326,7 +6696,6 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
             "run_id": "run_outer_auto_bridge_transport_failure",
             "dispatch_intent": "advance_or_continue",
             "target_phase": "l3_bridge",
-            "auto_bridge": True,
         }
     )
     transport_failure_result = transport_failure_response.get("leader_result", {})
@@ -5336,6 +6705,17 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         or len(auto_bridge_calls) != 2
     ):
         raise AssertionError(json.dumps({"response": transport_failure_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+    explicit_disabled_response = auto_bridge_host.handle_user_input(
+        {
+            "text": "continue request with deterministic auto-bridge explicitly disabled",
+            "run_id": "run_outer_auto_bridge_explicit_disabled",
+            "dispatch_intent": "advance_or_continue",
+            "target_phase": "l3_bridge",
+            "auto_bridge": False,
+        }
+    )
+    if explicit_disabled_response.get("leader_result", {}).get("handled_by") == "outer_sdk_host_auto_bridge" or len(auto_bridge_calls) != 2:
+        raise AssertionError(json.dumps({"response": explicit_disabled_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
     inspect_response = auto_bridge_host.handle_user_input(
         {
             "text": "inspect only, do not advance",
@@ -5442,6 +6822,120 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
                 "cleanup_required": False,
             }
 
+    auto_bridge_before_print_adapter = PrintNoBridgeDecisionAdapter()
+    auto_bridge_before_print_host = OuterSdkHost(
+        config,
+        adapter=TmuxNoAssistantAdapter(),
+        auto_bridge_runner=fake_auto_bridge_runner,
+        print_fallback_adapter=auto_bridge_before_print_adapter,
+    )
+    auto_bridge_before_print_response = auto_bridge_before_print_host.handle_user_input(
+        {
+            "text": "advance without waiting for print fallback after TTY failure",
+            "run_id": "run_outer_auto_bridge_before_print",
+            "dispatch_intent": "advance_or_continue",
+            "target_phase": "l3_bridge",
+        }
+    )
+    auto_bridge_before_print_result = auto_bridge_before_print_response.get("leader_result", {})
+    if (
+        auto_bridge_before_print_result.get("handled_by") != "outer_sdk_host_auto_bridge"
+        or auto_bridge_before_print_result.get("status") != "succeeded"
+        or len(auto_bridge_before_print_adapter.calls) != 0
+        or len(auto_bridge_calls) != 3
+    ):
+        raise AssertionError(json.dumps({"response": auto_bridge_before_print_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+    answered_decision_readiness = {
+        "exit_ready": False,
+        "blocking_reasons": [
+            "latest_bridge_result_not_successful",
+            "latest_bridge_lifecycle_not_returned",
+            "latest_bridge_result_not_current_phase",
+        ],
+        "blocking_bridge_window_ids": [],
+        "latest_bridge_result_status": "needs_user_answer",
+        "latest_bridge_lifecycle_status": "user_answer_received",
+        "latest_bridge_target_phase": "l2_advisory",
+    }
+    if not _outer_phase_exit_blockers_allow_auto_bridge_retry(answered_decision_readiness, target_phase="l4_implement"):
+        raise AssertionError(json.dumps(answered_decision_readiness, ensure_ascii=False, indent=2))
+
+    terminal_retry_auto_bridge_calls = []
+
+    def terminal_retry_auto_bridge_runner(request):
+        terminal_retry_auto_bridge_calls.append(dict(request))
+        return {
+            "status": "succeeded",
+            "bridge_window_id": "bw_auto_bridge_terminal_retry",
+            "reports": [{"summary": "terminal failed bridge retry auto bridge smoke report"}],
+            "artifact_refs": [],
+            "error_or_null": None,
+            "cleanup_required": False,
+        }
+
+    class TerminalFailedBridgeSnapshotHost(OuterSdkHost):
+        def _dispatch_input_event(self, request):
+            result = super()._dispatch_input_event(request)
+            run_root = control_root.parent / "runtime_state" / "projects" / request["repo_key"] / "runs" / request["run_id"]
+            run_root.mkdir(parents=True, exist_ok=True)
+            (run_root / "runtime_snapshot.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": request["run_id"],
+                        "current_phase": "l3_bridge",
+                        "allowed_actions": ["call_bridge_sdk", "record_bridge_event"],
+                        "allowed_routes": ["l4_implement"],
+                        "integrity": {
+                            "has_hard_stop": False,
+                            "awaiting_approval": False,
+                            "awaiting_user_answer": False,
+                            "has_blocking_orchestration_anomaly": False,
+                            "has_execute_watchdog_alert": False,
+                        },
+                        "lifecycle": {"open_bridge_window_ids": []},
+                        "phase_exit_readiness": {
+                            "exit_ready": False,
+                            "blocking_reasons": [
+                                "latest_bridge_result_not_successful",
+                                "latest_bridge_lifecycle_not_returned",
+                                "latest_bridge_result_not_current_phase",
+                            ],
+                            "blocking_bridge_window_ids": [],
+                            "latest_bridge_target_phase": "l4_implement",
+                            "latest_bridge_result_status": "failed",
+                            "latest_bridge_lifecycle_status": "bridge_window_failed",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            return result
+
+    terminal_retry_print_adapter = PrintNoBridgeDecisionAdapter()
+    terminal_retry_host = TerminalFailedBridgeSnapshotHost(
+        config,
+        adapter=TmuxNoAssistantAdapter(),
+        auto_bridge_runner=terminal_retry_auto_bridge_runner,
+        print_fallback_adapter=terminal_retry_print_adapter,
+    )
+    terminal_retry_response = terminal_retry_host.handle_user_input(
+        {
+            "text": "retry explicit target after previous bridge terminal failure",
+            "run_id": "run_outer_auto_bridge_terminal_failed_retry",
+            "dispatch_intent": "advance_or_continue",
+            "target_phase": "l4_implement",
+        }
+    )
+    terminal_retry_result = terminal_retry_response.get("leader_result", {})
+    if (
+        terminal_retry_result.get("handled_by") != "outer_sdk_host_auto_bridge"
+        or terminal_retry_result.get("status") != "succeeded"
+        or len(terminal_retry_auto_bridge_calls) != 1
+        or len(terminal_retry_print_adapter.calls) != 0
+    ):
+        raise AssertionError(json.dumps({"response": terminal_retry_response, "calls": terminal_retry_auto_bridge_calls}, ensure_ascii=False, indent=2))
+
     print_fallback_adapter = PrintNoBridgeDecisionAdapter()
     print_fallback_host = OuterSdkHost(
         config,
@@ -5460,10 +6954,125 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     if (
         print_fallback_result.get("handled_by") != "claude-print"
         or len(print_fallback_adapter.calls) != 1
-        or len(auto_bridge_calls) != 2
+        or len(auto_bridge_calls) != 3
         or fallback_evidence.get("reason") != "tmux_outer_leader_returned_without_assistant_text"
     ):
         raise AssertionError(json.dumps({"response": print_fallback_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+
+    inspect_latest_run_id = "run_outer_inspect_latest_reports"
+    inspect_latest_root = control_root.parent / "runtime_state" / "projects" / repo_key / "runs" / inspect_latest_run_id
+    inspect_latest_root.mkdir(parents=True, exist_ok=True)
+    inspect_latest_bridge_result = {
+        "status": "failed",
+        "bridge_window_id": "bw_inspect_latest_reports",
+        "report_count": 3,
+        "reports_preview": [
+            {"summary": "anomaly analyst A says M6 executed formally but missed expectations", "teammate_name": "anomaly-analyst-a"},
+            {"summary": "anomaly analyst B identifies base model prompt mismatch", "teammate_name": "anomaly-analyst-b"},
+            {"summary": "anomaly analyst C recommends implementation-side repair before rerun", "teammate_name": "anomaly-analyst-c"},
+        ],
+        "error_or_null": {"type": "CompletionContractRejected", "message": "system gate rejected available reports"},
+    }
+    (inspect_latest_root / "run_ledger.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "0.4.0",
+                "run_id": inspect_latest_run_id,
+                "main_session_id": "outer_smoke_latest_reports",
+                "workflow_name": "bridge_window_workflow",
+                "workflow_version": "0.4.0",
+                "run_status": "in_progress",
+                "current_phase": "l4_execute",
+                "created_at": _now(),
+                "updated_at": _now(),
+                "last_bridge_result": inspect_latest_bridge_result,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class ShouldNotCallLatestReportsAdapter:
+        name = "claude-tmux-repl"
+
+        def handle_user_input(self, request, *, event_sink=None):
+            raise AssertionError("inspect latest reports should be precomputed before calling the outer leader adapter")
+
+    class LatestReportHost(OuterSdkHost):
+        def _dispatch_input_event(self, request):
+            result = super()._dispatch_input_event(request)
+            report_run_root = control_root.parent / "runtime_state" / "projects" / request["repo_key"] / "runs" / request["run_id"]
+            report_run_root.mkdir(parents=True, exist_ok=True)
+            (report_run_root / "runtime_snapshot.json").write_text(
+                json.dumps({"run_id": request["run_id"], "last_bridge_result": inspect_latest_bridge_result}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            return result
+
+    latest_report_print_adapter = PrintNoBridgeDecisionAdapter()
+    latest_report_host = LatestReportHost(
+        config,
+        adapter=ShouldNotCallLatestReportsAdapter(),
+        print_fallback_adapter=latest_report_print_adapter,
+    )
+    latest_report_response = latest_report_host.handle_user_input(
+        {
+            "text": "inspect latest bridge teammate reports; do not open a new bridge",
+            "run_id": inspect_latest_run_id,
+            "dispatch_intent": "inspect_only",
+        }
+    )
+    latest_report_result = latest_report_response.get("leader_result", {})
+    if (
+        latest_report_result.get("handled_by") != "outer_sdk_host_latest_bridge_reports"
+        or latest_report_result.get("status") != "succeeded"
+        or not any(item.get("teammate_or_source") == "anomaly-analyst-a" for item in latest_report_result.get("reports", []))
+        or latest_report_print_adapter.calls
+    ):
+        raise AssertionError(json.dumps({"response": latest_report_response}, ensure_ascii=False, indent=2))
+
+    class PrintTimeoutAdapter:
+        name = "claude-print"
+
+        def __init__(self):
+            self.calls = []
+
+        def handle_user_input(self, request, *, event_sink=None):
+            self.calls.append(dict(request))
+            return {
+                "status": "blocked",
+                "handled_by": self.name,
+                "reports": [],
+                "artifact_refs": [],
+                "evidence": {"adapter": self.name},
+                "error_or_null": {"type": "OuterLeaderPrintTimeout", "message": "print fallback timed out"},
+                "cleanup_required": False,
+            }
+
+    print_timeout_adapter = PrintTimeoutAdapter()
+    print_timeout_host = OuterSdkHost(
+        config,
+        adapter=TmuxNoAssistantAdapter(),
+        auto_bridge_runner=fake_auto_bridge_runner,
+        print_fallback_adapter=print_timeout_adapter,
+    )
+    print_timeout_response = print_timeout_host.handle_user_input(
+        {
+            "text": "advance through deterministic auto bridge before print timeout fallback",
+            "run_id": "run_outer_print_timeout_auto_bridge",
+            "dispatch_intent": "advance_or_continue",
+            "target_phase": "l3_bridge",
+        }
+    )
+    print_timeout_result = print_timeout_response.get("leader_result", {})
+    if (
+        print_timeout_result.get("handled_by") != "outer_sdk_host_auto_bridge"
+        or print_timeout_result.get("status") != "succeeded"
+        or len(print_timeout_adapter.calls) != 0
+        or len(auto_bridge_calls) != 4
+    ):
+        raise AssertionError(json.dumps({"response": print_timeout_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
+
     implicit_negated_response = auto_bridge_host.handle_user_input(
         {
             "text": "UI async ack probe only. Do not advance project work.",
@@ -5473,7 +7082,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     if (
         implicit_negated_response.get("host", {}).get("input_kind") != "user_prompt"
         or implicit_negated_response.get("leader_result", {}).get("handled_by") == "outer_sdk_host_auto_bridge"
-        or len(auto_bridge_calls) != 2
+        or len(auto_bridge_calls) != 4
     ):
         raise AssertionError(json.dumps({"response": implicit_negated_response, "calls": auto_bridge_calls}, ensure_ascii=False, indent=2))
 
@@ -5498,6 +7107,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
             "text": "record a long leader report",
             "run_id": "run_outer_long_report",
             "main_session_id": "outer_smoke_long",
+            "dispatch_intent": "inspect_only",
         }
     )
     long_summary = long_response.get("leader_result", {}).get("reports", [{}])[0].get("summary", "")
@@ -5509,7 +7119,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
     persisted_summary = long_result_events[-1].get("payload", {}).get("leader_result", {}).get("reports", [{}])[0].get("summary", "")
     if "chunk-0379" not in persisted_summary:
         raise AssertionError(json.dumps({"persisted_summary_tail": persisted_summary[-200:]}, ensure_ascii=False, indent=2))
-    new_default = long_host.handle_user_input({"text": "force a new host default run", "start_new_run": True})
+    new_default = long_host.handle_user_input({"text": "force a new host default run", "start_new_run": True, "dispatch_intent": "inspect_only"})
     if new_default.get("host", {}).get("run_id") == long_response.get("host", {}).get("default_run_id"):
         raise AssertionError(json.dumps({"old": long_response.get("host"), "new": new_default.get("host")}, ensure_ascii=False, indent=2))
 
@@ -5679,6 +7289,11 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         raise AssertionError(json.dumps({"tmux_processing_status_only": extract_tmux_assistant_text(tmux_processing_status_only, "go on for execute")}, ensure_ascii=False, indent=2))
     if not _outer_tmux_completed_without_assistant(tmux_processing_status_only, "go on for execute"):
         raise AssertionError("outer tmux processing-only prompt return should be classified as no assistant text")
+    tmux_bar_progress_only = "\n\u276f continue\n\n\u25b1\u25b1\u25b1\u25b1\u25b1\u25b1\u25b1\u25b1 1%\n\n\u2500\u2500\u2500 leader-orchestrator \u2500\u2500\n\u276f\n? for shortcuts\n"
+    if extract_tmux_assistant_text(tmux_bar_progress_only, "continue"):
+        raise AssertionError(json.dumps({"tmux_bar_progress_only": extract_tmux_assistant_text(tmux_bar_progress_only, "continue")}, ensure_ascii=False, indent=2))
+    if _outer_tmux_prompt_completion_candidate(tmux_bar_progress_only, "continue"):
+        raise AssertionError("outer tmux bare progress bar should not be accepted as a prompt completion")
     tmux_synthesizing_status_only = "\n\u276f go on for execution\n\n\u273d Synthesizing\u2026 (57s \u00b7 \u2191 755 tokens \u00b7 thought for 11s)\n\n\u2500\u2500\u2500 leader-orchestrator \u2500\u2500\n\u276f\n? for shortcuts\n"
     if extract_tmux_assistant_text(tmux_synthesizing_status_only, "go on for execution"):
         raise AssertionError(json.dumps({"tmux_synthesizing_status_only": extract_tmux_assistant_text(tmux_synthesizing_status_only, "go on for execution")}, ensure_ascii=False, indent=2))
@@ -5760,6 +7375,7 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         "returned_at": "2026-05-16T10:34:42+00:00",
         "full_result_ref": str(bridge_status_root / "run_ledger.json"),
         "cleanup_required": False,
+        "reports_preview": [{"summary": "analyst synthesis survived bridge failure", "teammate_name": "anomaly-analyst-a"}],
         "error_or_null": {
             "type": "ClaudeTmuxTerminalApiError",
             "message": "claude tmux bridge executor hit a terminal Claude API error",
@@ -5784,6 +7400,8 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         session_name="tmux_smoke",
     )
     if leader_result.get("error_or_null", {}).get("type") != "ClaudeTmuxTerminalApiError":
+        raise AssertionError(json.dumps(leader_result, ensure_ascii=False, indent=2))
+    if not any(item.get("teammate_or_source") == "anomaly-analyst-a" for item in leader_result.get("reports", [])):
         raise AssertionError(json.dumps(leader_result, ensure_ascii=False, indent=2))
     evidence_summary = leader_result.get("evidence", {}).get("bridge_evidence_summary", {})
     if len(str(evidence_summary.get("assistant_text", ""))) > 720:
@@ -5921,7 +7539,14 @@ def run_outer_sdk_host_tests(control_root: Path, runtime_dir: Path) -> dict:
         raise AssertionError(json.dumps(fake_client.queries, ensure_ascii=False, indent=2))
     if not any(item.get("event_type") == "sdk_stream_assistant_text" for item in sdk_events):
         raise AssertionError(json.dumps(sdk_events, ensure_ascii=False, indent=2))
-    if not fake_client.options.kwargs.get("mcp_servers", {}).get("bridge"):
+    sdk_mcp_servers = fake_client.options.kwargs.get("mcp_servers")
+    if isinstance(sdk_mcp_servers, dict):
+        sdk_mcp_ok = bool(sdk_mcp_servers.get("bridge"))
+    elif isinstance(sdk_mcp_servers, str):
+        sdk_mcp_ok = Path(sdk_mcp_servers).exists()
+    else:
+        sdk_mcp_ok = False
+    if not sdk_mcp_ok:
         raise AssertionError(json.dumps(fake_client.options.kwargs, ensure_ascii=False, indent=2))
     if fake_client.options.kwargs.get("strict_mcp_config") is not True:
         raise AssertionError(json.dumps(fake_client.options.kwargs, ensure_ascii=False, indent=2))
@@ -5971,13 +7596,23 @@ def main() -> None:
     try:
         control_root, runs_root = build_fixture(runtime_dir)
         user_clarification = run_user_clarification_resume(control_root, runs_root)
+        user_decision_control_root, user_decision_runs_root = build_fixture(runtime_dir / "user_decision")
+        runtime_owned_user_decision = run_runtime_owned_user_decision_pause(user_decision_control_root, user_decision_runs_root)
         success = run_success(control_root, runs_root)
+        cleanup_required = run_cleanup_required_return(control_root, runs_root)
+        completion_started_recovery = run_completion_started_recovery_returns(control_root, runs_root)
         if success.get("current_phase") != "l4_execute":
             raise AssertionError(json.dumps({"expected_phase": "l4_execute", "snapshot": success}, ensure_ascii=False, indent=2))
+        success_readiness = success.get("phase_exit_readiness") if isinstance(success.get("phase_exit_readiness"), dict) else {}
+        if success_readiness.get("exit_ready") is not True or success_readiness.get("latest_completion_validated") is not True:
+            raise AssertionError(json.dumps(success_readiness, ensure_ascii=False, indent=2))
+        legacy_completion_backfill = run_legacy_completion_backfill_test(runtime_dir / "legacy_completion_backfill")
         bridge_boundary = run_bridge_boundary_tests(control_root, runs_root)
         event_artifact_completion = run_event_artifact_completion_tests(control_root, runs_root)
         outer_sdk_host = run_outer_sdk_host_tests(control_root, runtime_dir)
-        state_graph = run_state_graph_tests(control_root, runs_root)
+        state_graph_control_root, state_graph_runs_root = build_fixture(runtime_dir / "state_graph")
+        run_success(state_graph_control_root, state_graph_runs_root)
+        state_graph = run_state_graph_tests(state_graph_control_root, state_graph_runs_root)
         retry_control_root, retry_runs_root = build_fixture(runtime_dir / "retry")
         retry_policy = run_retry_policy_tests(retry_control_root, retry_runs_root)
         guardrail_control_root, guardrail_runs_root = build_fixture(runtime_dir / "guardrail")
@@ -5986,9 +7621,18 @@ def main() -> None:
         orphan = run_orphan(control_root, runs_root)
         mcp_helper = run_mcp_lifecycle_helper(control_root, runs_root)
         sdk = run_sdk_roundtrip(control_root, runs_root)
+        reconcile_history_control_root, reconcile_history_runs_root = build_fixture(runtime_dir / "reconcile_history")
+        reconcile_history = run_reconcile_historical_check_replay_test(reconcile_history_control_root, reconcile_history_runs_root)
+        stale_projection_control_root, stale_projection_runs_root = build_fixture(runtime_dir / "stale_projection")
+        stale_projection = run_stale_projection_auto_reconcile_test(stale_projection_control_root, stale_projection_runs_root)
+        duplicate_call_coalescing = run_bridge_sdk_duplicate_call_coalescing(control_root, runs_root)
         policy_team_projection = run_policy_team_projection_tests(control_root, runs_root)
         anomaly_control_root, anomaly_runs_root = build_fixture(runtime_dir / "anomaly")
         stuck_dispatch = run_stuck_dispatch_anomaly(anomaly_control_root, anomaly_runs_root)
+        active_stream_control_root, active_stream_runs_root = build_fixture(runtime_dir / "active_sdk_stream_anomaly")
+        active_stream_suppression = run_active_sdk_stream_suppresses_stuck_dispatch_anomaly(active_stream_control_root, active_stream_runs_root)
+        active_process_control_root, active_process_runs_root = build_fixture(runtime_dir / "active_process_table_anomaly")
+        active_process_suppression = run_active_process_table_suppresses_stuck_dispatch_anomaly(active_process_control_root, active_process_runs_root)
         watchdog_control_root, watchdog_runs_root = build_fixture(runtime_dir / "watchdog")
         execute_watchdog = run_execute_watchdog_alert(watchdog_control_root, watchdog_runs_root)
         interrupt_control_root, interrupt_runs_root = build_fixture(runtime_dir / "interrupt")
@@ -6005,13 +7649,22 @@ def main() -> None:
         summary = {
             "success_status": success["lifecycle"]["status_index"]["bw_success"],
             "success_phase": success["current_phase"],
+            "cleanup_required_status": cleanup_required["lifecycle"]["status_index"]["bw_cleanup_required"],
+            "cleanup_required_open": "bw_cleanup_required" in cleanup_required["lifecycle"]["open_bridge_window_ids"],
+            "completion_started_recovery": completion_started_recovery,
             "failure_status": failure["lifecycle"]["status_index"]["bw_failed"],
             "orphan_status": orphan["lifecycle"]["status_index"]["bw_orphan"],
             "user_clarification_status": user_clarification["lifecycle"]["status_index"]["bw_user_clarification"],
             "user_clarification_allowed_actions": user_clarification["allowed_actions"],
+            "runtime_owned_user_decision_status": runtime_owned_user_decision["lifecycle"]["status_index"]["bw_runtime_owned_user_decision"],
+            "runtime_owned_user_decision_allowed_actions": runtime_owned_user_decision["allowed_actions"],
             "l3_allowed_routes": user_clarification["allowed_routes"],
             "mcp_helper_status": mcp_helper["lifecycle"]["status_index"]["bw_mcp_helper"],
             "stuck_dispatch_anomaly": stuck_dispatch["runtime_diagnostics"]["orchestration_anomalies"][0]["classification"],
+            "active_sdk_stream_anomalies": len(active_stream_suppression["runtime_diagnostics"]["orchestration_anomalies"]),
+            "active_sdk_stream_count": active_stream_suppression["runtime_diagnostics"]["observer_stream_counts"].get("sdk_stream_events"),
+            "active_process_table_anomalies": len(active_process_suppression["runtime_diagnostics"]["orchestration_anomalies"]),
+            "active_process_table_candidates": len(active_process_suppression["runtime_diagnostics"]["active_process_candidates"].get("bw_stuck_dispatch", [])),
             "execute_watchdog_alert": execute_watchdog["runtime_diagnostics"]["execute_watchdog_alerts"][0]["classification"],
             "manual_interrupt_status": manual_interrupt["lifecycle"]["status_index"]["bw_manual_interrupt"],
             "sdk_status": sdk["bridge_result_status"],
@@ -6022,6 +7675,9 @@ def main() -> None:
             "sdk_running_partial_status": sdk["running_partial_status"],
             "sdk_reject_status": sdk["reject_status"],
             "sdk_manifest_status": sdk["manifest_status"],
+            "reconcile_historical_replay": reconcile_history["reconcile_historical_replay"],
+            "stale_projection_auto_reconcile": stale_projection["stale_projection_auto_reconcile"],
+            "duplicate_call_coalescing": duplicate_call_coalescing["duplicate_call_coalescing"],
             "negative_tests": negative["negative_tests"],
             "cli_executor_policy": cli_executor["cli_executor_policy"],
             "hook_observer_rebind": hook_observer["hook_observer_rebind"],
@@ -6031,6 +7687,7 @@ def main() -> None:
             "guardrails": guardrails["guardrails"],
             "bridge_boundary": bridge_boundary["bridge_boundary"],
             "event_artifact_completion": event_artifact_completion["event_artifact_completion"],
+            "legacy_completion_backfill": legacy_completion_backfill["legacy_completion_backfill"],
             "outer_sdk_host": outer_sdk_host["outer_sdk_host"],
             "policy_team_projection": policy_team_projection["policy_team_projection"],
             "checkpoint_trajectory": checkpoint_trajectory["checkpoint_trajectory"],
@@ -6041,13 +7698,25 @@ def main() -> None:
             "runtime_dir": str(runtime_dir),
         }
         assert summary["success_status"] == "bridge_window_returned"
+        assert summary["cleanup_required_status"] == "bridge_window_partial_returned"
+        assert summary["cleanup_required_open"] is False
+        assert summary["completion_started_recovery"]["direct_cleanup_status"] == "bridge_window_partial_returned"
+        assert summary["completion_started_recovery"]["direct_cleanup_open"] is False
+        assert summary["completion_started_recovery"]["partial_cleanup_status"] == "bridge_window_partial_returned"
+        assert summary["completion_started_recovery"]["partial_cleanup_open"] is False
         assert summary["failure_status"] == "bridge_call_failed"
         assert summary["orphan_status"] == "bridge_window_orphaned"
         assert summary["user_clarification_status"] == "continuation_of_previous_l3"
         assert "call_bridge_sdk" in summary["user_clarification_allowed_actions"]
+        assert summary["runtime_owned_user_decision_status"] == "paused_for_user_answer"
+        assert summary["runtime_owned_user_decision_allowed_actions"] == ["record_user_answer", "abort_run"]
         assert {"l3_bridge", "leader_freeze", "l2_advisory", "l4_implement", "l4_execute", "l4_anomaly"}.issubset(set(summary["l3_allowed_routes"]))
         assert summary["mcp_helper_status"] == "bridge_window_orphaned"
         assert summary["stuck_dispatch_anomaly"] == "bridge_orchestration_hang"
+        assert summary["active_sdk_stream_anomalies"] == 0
+        assert summary["active_sdk_stream_count"] == 1
+        assert summary["active_process_table_anomalies"] == 0
+        assert summary["active_process_table_candidates"] == 1
         assert summary["execute_watchdog_alert"] == "execute_stale_heartbeat_with_owned_process_refs"
         assert summary["manual_interrupt_status"] == "bridge_window_interrupted"
         assert summary["sdk_status"] == "succeeded"
@@ -6058,6 +7727,9 @@ def main() -> None:
         assert summary["sdk_running_partial_status"] == "bridge_window_failed"
         assert summary["sdk_reject_status"] == "bridge_window_failed"
         assert summary["sdk_manifest_status"] == "bridge_window_returned"
+        assert summary["reconcile_historical_replay"] == "bridge_call_intended"
+        assert summary["stale_projection_auto_reconcile"] == "bridge_window_returned"
+        assert summary["duplicate_call_coalescing"] == "passed"
         assert summary["hook_pretool_packet_derivation"] == "passed"
         assert summary["state_graph"] == "passed"
         assert summary["retry_policy"] == "passed"

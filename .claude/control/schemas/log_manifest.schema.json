@@ -44,7 +44,15 @@
       ]
     },
     "log_files": {"type": "array"},
-    "produced_artifacts": {"type": "array"},
+    "produced_artifacts": {
+      "anyOf": [
+        {"type": "array"},
+        {"type": "object"}
+      ]
+    },
+    "formal_completion_evidence": {
+      "description": "Approved formal target quantity versus observed terminal quantity, with source refs such as exit code, log tail, losses, checkpoints, output counts, or not_applicable reason for non-countable work."
+    },
     "terminal_status": {"type": "string"}
   },
   "additionalProperties": true

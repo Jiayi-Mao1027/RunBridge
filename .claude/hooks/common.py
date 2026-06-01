@@ -963,6 +963,7 @@ def bash_execution_soft_reminders(tool_name: str, tool_input: dict[str, Any], bi
     has_gpu_probe = any(token in lowered for token in ("nvidia-smi", "gpustat", "torch.cuda.mem", "memory_allocated", "memory_reserved"))
     has_batch_hint = any(token in lowered for token in ("batch", "micro", "gradient_accumulation", "gradient-accumulation", "per_device", "per-device", "accumulation_steps"))
     has_manifest_hint = any(token in lowered for token in ("manifest", "run_manifest", "log_manifest"))
+    has_memory_target_hint = any(token in lowered for token in ("vram", "utilization", "utilisation", "formal_memory_observed", "memory target", "memory_target", "resource_adaptation", "resource adaptation"))
     reminders: list[dict[str, Any]] = []
     if smoke_like:
         if not has_gpu_probe:
@@ -990,6 +991,14 @@ def bash_execution_soft_reminders(tool_name: str, tool_input: dict[str, Any], bi
                 "message": "Formal-looking executor Bash should make batch/microbatch/gradient accumulation/effective batch basis explicit or reference the smoke-derived config.",
             }
         )
+    if has_gpu_probe and not has_memory_target_hint:
+        reminders.append(
+            {
+                "level": "warn",
+                "code": "executor_formal_memory_target_missing",
+                "message": "Formal-looking executor Bash should state or log the formal GPU memory target/deviation basis from executor guidance, including observed vs available VRAM and any semantics-preserving resource adaptation evidence before treating the run as complete.",
+            }
+        )
     if not has_manifest_hint:
         reminders.append(
             {
@@ -1011,6 +1020,38 @@ def bash_execution_soft_reminders(tool_name: str, tool_input: dict[str, Any], bi
                 }
             )
     return reminders
+
+
+def executor_bash_pretool_denial(tool_name: str, tool_input: dict[str, Any], binding: dict[str, Any]) -> str:
+    if tool_name != "Bash":
+        return ""
+    actor = " ".join(
+        str(binding.get(key) or "")
+        for key in ("teammate_id", "agent_id", "agent_type", "display_name")
+    ).casefold()
+    if "executor" not in actor:
+        return ""
+    command = str(tool_input.get("command") or "")
+    if not command.strip():
+        return ""
+    if _looks_like_self_matching_pgrep_poll_loop(command):
+        return (
+            "Executor Bash denied: do not poll owned formal processes with `while ... pgrep -f ...`; "
+            "that pattern can match the polling shell itself and keep the bridge window open after the real process exits. "
+            "Launch a waitable foreground process, capture the child PID and use `wait`, a pidfile plus `kill -0 \"$pid\"`, "
+            "or another PID-scoped monitor that cannot match its own command line."
+        )
+    return ""
+
+
+def _looks_like_self_matching_pgrep_poll_loop(command: str) -> bool:
+    return bool(
+        re.search(
+            r"\bwhile\b[\s\S]{0,600}\bpgrep\b[^\n;&|]{0,200}\s-[A-Za-z]*f[A-Za-z]*(?:\s|=|$)",
+            command,
+            re.IGNORECASE,
+        )
+    )
 
 
 def tool_file_refs(tool_name: str, tool_input: dict[str, Any], *, after: bool = False) -> list[dict[str, Any]]:

@@ -11,6 +11,7 @@ from .adapters import OuterLeaderEventSink
 from .claude_agent_adapter import (
     _build_user_prompt,
     _ensure_env_api_key_alias,
+    _ensure_loopback_provider_no_proxy,
     _env_int,
     _leader_model,
     _leader_prompt,
@@ -150,6 +151,7 @@ class ClaudePrintOuterLeaderAdapter:
         )
         env.update(_settings_env(settings_path))
         env.update({str(key): str(value) for key, value in (cli_info.get("env") or {}).items()})
+        _ensure_loopback_provider_no_proxy(env)
         env["ANTHROPIC_MODEL"] = model
         env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
         env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model

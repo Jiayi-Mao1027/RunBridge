@@ -19,7 +19,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--control-root", required=True, help="Path to .claude/control")
     parser.add_argument("--repo-root", default=None, help="Target repo root this host owns")
     parser.add_argument("--repo-key", default=None, help="Existing repo key")
-    parser.add_argument("--main-session-id", default=None, help="Stable outer leader session id")
+    parser.add_argument(
+        "--main-session-id",
+        default=None,
+        help="Optional compatibility override; use a real Claude Code session UUID, not a fixed placeholder",
+    )
     parser.add_argument("--host", default=os.environ.get("OUTER_SDK_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("OUTER_SDK_HOST_PORT", "8791")))
     parser.add_argument(
@@ -146,19 +150,20 @@ def serve(host: OuterSdkHost, *, bind_host: str, port: int) -> None:
                 payload = self._read_json_body()
                 query = parse_qs(parsed.query)
                 if _truthy(_first(query, "async") or _first(query, "background")):
-                    request = host.queue_user_input(payload)
-                    response = host.build_queued_input_ack(request)
-                    worker = threading.Thread(
-                        target=_run_queued_input_background,
-                        args=(host, request),
-                        daemon=True,
-                    )
+                    request, runtime_result = host.accept_user_input(payload)
+                    response = host.build_user_input_ack(request, runtime_result)
+                    worker = None
+                    if runtime_result.ok:
+                        worker = threading.Thread(
+                            target=_run_accepted_input_background,
+                            args=(host, request, runtime_result),
+                            daemon=True,
+                        )
+                        worker.start()
                     try:
-                        self._json(202, response)
+                        self._json(202 if runtime_result.ok else 200, response)
                     except OSError:
                         pass
-                    finally:
-                        worker.start()
                     return
                 self._json(200, host.handle_user_input(payload))
             except Exception as exc:
@@ -213,6 +218,10 @@ def _truthy(value: Any) -> bool:
 
 def _run_queued_input_background(host: OuterSdkHost, request: dict[str, Any]) -> None:
     host.handle_queued_user_input(request)
+
+
+def _run_accepted_input_background(host: OuterSdkHost, request: dict[str, Any], runtime_result: Any) -> None:
+    host.handle_accepted_user_input(request, runtime_result)
 
 
 def _decode_request_body(raw: bytes) -> str:

@@ -98,6 +98,23 @@ class BridgeLeaderRuntime:
             if execution.get("waiting"):
                 self._team_waiting(execution)
             if execution.get("status") in {"partial", "partial_or_failed"}:
+                if _execution_requests_user_decision(execution):
+                    self._event(
+                        "user_clarification_required",
+                        team_id=self.team_id,
+                        task_id=self.task_id,
+                        payload=_user_decision_payload(execution),
+                    )
+                    bridge_result = self._bridge_result("needs_user_answer", "user_clarification", execution)
+                    bridge_result["error_or_null"] = None
+                    evidence = bridge_result.get("evidence") if isinstance(bridge_result.get("evidence"), dict) else {}
+                    bridge_result["evidence"] = {
+                        **evidence,
+                        "user_decision_required": True,
+                        "question": _user_decision_question(execution),
+                    }
+                    self._return_bridge_result("bridge_result_returned_with_user_clarification_request", bridge_result, agent_type="main-leader")
+                    return bridge_result
                 if self._l4_execute_owned_process_still_running(execution):
                     execution = deepcopy(execution)
                     execution["error_or_null"] = {
@@ -1023,6 +1040,8 @@ def _failure_stage_for_event(event_kind: str) -> str:
 
 
 def _bridge_result_event_kind(bridge_result: dict[str, Any], *, requested_event_kind: str | None = None) -> str:
+    if requested_event_kind == "bridge_result_returned_with_user_clarification_request":
+        return requested_event_kind
     if bridge_result.get("cleanup_required") is True:
         return "bridge_result_returned_with_cleanup_required"
     status = str(bridge_result.get("status") or "").strip()
@@ -1030,9 +1049,68 @@ def _bridge_result_event_kind(bridge_result: dict[str, Any], *, requested_event_
         return "bridge_result_returned"
     if status in {"partial", "partial_or_failed"}:
         return "bridge_result_returned_with_partial"
-    if requested_event_kind == "bridge_result_returned_with_user_clarification_request":
-        return requested_event_kind
     return "bridge_result_returned_with_failure"
+
+
+def _execution_requests_user_decision(execution: dict[str, Any]) -> bool:
+    error = execution.get("error_or_null") if isinstance(execution.get("error_or_null"), dict) else {}
+    if error.get("type") != "RuntimeOwnedTeammateReportedBlocked":
+        return False
+    reports = execution.get("reports") if isinstance(execution.get("reports"), list) else []
+    if not reports:
+        return False
+    blocked = {str(item).strip() for item in error.get("blocked_teammates", []) if str(item).strip()}
+    user_decision_teammates: set[str] = set()
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        classification = str(report.get("classification") or "").strip().lower()
+        teammate = str(report.get("teammate_name") or report.get("agent_type") or report.get("teammate_id") or "").strip()
+        if classification == "user_decision":
+            user_decision_teammates.add(teammate or "unknown")
+    return bool(user_decision_teammates) and blocked.issubset(user_decision_teammates)
+
+
+def _user_decision_question(execution: dict[str, Any]) -> str:
+    recommendations: list[str] = []
+    for report in execution.get("reports", []) if isinstance(execution.get("reports"), list) else []:
+        if not isinstance(report, dict):
+            continue
+        if str(report.get("classification") or "").strip().lower() != "user_decision":
+            continue
+        recommendation = str(report.get("next_action_recommendation") or report.get("summary") or "").strip()
+        if recommendation and recommendation not in recommendations:
+            recommendations.append(recommendation)
+        if len(recommendations) >= 3:
+            break
+    if recommendations:
+        return "The bridge completed its advisory work but the next viable action needs an explicit user decision. " + " / ".join(
+            recommendations
+        )
+    return "The bridge completed its advisory work but the next viable action needs an explicit user decision before dispatching more work."
+
+
+def _user_decision_payload(execution: dict[str, Any]) -> dict[str, Any]:
+    reports = execution.get("reports") if isinstance(execution.get("reports"), list) else []
+    summaries: list[dict[str, str]] = []
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        if str(report.get("classification") or "").strip().lower() != "user_decision":
+            continue
+        summaries.append(
+            {
+                "teammate": str(report.get("teammate_name") or report.get("agent_type") or report.get("teammate_id") or "unknown"),
+                "summary": str(report.get("summary") or "")[:700],
+                "next_action_recommendation": str(report.get("next_action_recommendation") or "")[:500],
+            }
+        )
+    return {
+        "question": _user_decision_question(execution),
+        "classification": "user_decision",
+        "blocking_teammate_reports": summaries[:4],
+        "evidence": execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {},
+    }
 
 
 def _now_iso() -> str:
